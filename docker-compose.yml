@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  statz-projection:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app/projection-outputs:/app/app/projection-outputs
+      - ./app/data:/app/app/data
+    env_file:
+      - .env
+    restart: unless-stopped

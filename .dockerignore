@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.idea/
+app/data/fixture_player_stats.csv
+app/data/fixture_team_stats.csv
+app/data/all_leagues_model_dataset_with_history.xlsx
+app/data/all_leagues_accuracy_dataset.xlsx
+app/projection-outputs/

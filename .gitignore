@@ -1,0 +1,45 @@
+# secrets
+.env
+.env.*
+!.env.example
+*.secret
+
+# data (pulled/generated, not source) — config xlsx files are whitelisted below
+app/data/*.csv
+app/data/*.parquet
+app/data/*.xlsx
+app/data/last_fetch.txt
+app/data/Team
+!app/data/League Weightings.xlsx
+!app/data/League Coefficients.xlsx
+!app/data/Team Ratings.xlsx
+!app/data/Fanteam Mapping.xlsx
+!app/data/PL Fantasy Players.xlsx
+!app/data/*Promoted Team Ratings.xlsx
+
+# pre-trained model binaries (regenerated)
+app/model-builds/**/*.sav
+app/model-builds/**/*.pkl
+
+# projection outputs (regenerated every run)
+app/projection-outputs/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.Python
+
+# ide / os
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# logs
+*.log
+
+# docker overrides
+docker-compose.override.yml

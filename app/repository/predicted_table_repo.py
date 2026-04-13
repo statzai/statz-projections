@@ -1,0 +1,106 @@
+import logging
+from app.repository.db_utils import execute_chunked
+
+logger = logging.getLogger("predicted_table_repo")
+
+
+def clean_percentage(value):
+    if isinstance(value, str) and '%' in value:
+        return float(value.replace('%', '').strip())
+    return float(value) if value is not None else None
+
+
+async def insert_predicted_table_async(data_list, teams, comps, league):
+    if league == 'Brazil Serie A':
+        competition_id = 648
+    else:
+        competition_id = comps.loc[comps['name'] == league, "id"]
+        if not competition_id.empty:
+            competition_id = int(competition_id.iloc[0])
+        else:
+            raise Exception(f"League {league} not found in comps")
+
+    df = data_list.copy()
+    df['competition_id'] = competition_id
+
+    for idx, row in df.iterrows():
+        team_name = row["Team"]
+        team_id = teams.loc[teams["name"] == team_name, "id"]
+        if not team_id.empty:
+            df.at[idx, "team_id"] = int(team_id.iloc[0])
+        else:
+            df.at[idx, "team_id"] = None
+
+    missing = df[df["team_id"].isnull()]
+    if not missing.empty:
+        logger.error("Missing team IDs for: %s", missing["Team"].tolist())
+        raise Exception("Some teams from data_list do not exist in teams list")
+
+    df = df.rename(columns={
+        "Position": "position",
+        "Points": "points",
+        "Goals For": "goals_for",
+        "Goals Against": "goals_against",
+        "Goal Difference": "goal_difference",
+        "Win %": "win_percent",
+        "Top 2 %": "top_2_percent",
+        "Top 4 %": "top_4_percent",
+        "Top 6 %": "top_6_percent",
+        "Top 7 %": "top_7_percent",
+        "Relegation %": "relegation_percent",
+        "Max Points": "max_points",
+        "Min Points": "min_points",
+    })
+
+    for col in ['win_percent', 'top_2_percent', 'top_4_percent', 'top_6_percent', 'top_7_percent', 'relegation_percent']:
+        if col in df.columns:
+            df[col] = df[col].apply(clean_percentage)
+
+    for col in ["top_2_percent", "top_4_percent", "top_6_percent", "top_7_percent", "relegation_percent"]:
+        if col not in df.columns:
+            df[col] = None
+
+    values = [
+        (
+            row['position'],
+            row['team_id'],
+            row['points'],
+            row['goals_for'],
+            row['goals_against'],
+            row['goal_difference'],
+            row['win_percent'],
+            row['top_2_percent'],
+            row['top_4_percent'],
+            row['top_6_percent'],
+            row['top_7_percent'],
+            row['relegation_percent'],
+            row['max_points'],
+            row['min_points'],
+            row['competition_id'],
+        )
+        for _, row in df.iterrows()
+    ]
+
+    sql = """
+    INSERT INTO league_projections (
+        position, team_id, points, goals_for, goals_against, goal_difference,
+        win_percent, top_2_percent, top_4_percent, top_6_percent, top_7_percent,
+        relegation_percent, max_points, min_points, competition_id, created_at, updated_at
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    ON DUPLICATE KEY UPDATE
+        position = VALUES(position),
+        points = VALUES(points),
+        goals_for = VALUES(goals_for),
+        goals_against = VALUES(goals_against),
+        goal_difference = VALUES(goal_difference),
+        win_percent = VALUES(win_percent),
+        top_2_percent = VALUES(top_2_percent),
+        top_4_percent = VALUES(top_4_percent),
+        top_6_percent = VALUES(top_6_percent),
+        top_7_percent = VALUES(top_7_percent),
+        relegation_percent = VALUES(relegation_percent),
+        max_points = VALUES(max_points),
+        min_points = VALUES(min_points),
+        updated_at = NOW()
+    """
+    return await execute_chunked(sql, values, label=f"[league_projections:{league}]")

@@ -1,0 +1,83 @@
+import logging
+import os
+import pandas as pd
+
+logger = logging.getLogger("data_cache")
+
+
+class DataCache:
+    """
+    Singleton cache for shared source data (CSV files).
+    Loaded once per projection run, shared across all leagues.
+    Eliminates redundant file reads when projecting multiple leagues.
+    """
+
+    def __init__(self):
+        self.player_stats = None
+        self.team_stats = None
+        self.fixtures_df = None
+        self.standings = None
+        self.seasons = None
+        self.comps = None
+        self.comp_teams = None
+        self.teams = None
+        self.b365_odds = None
+        self.stats_types = None
+        self.league_weightings = None
+        self._loaded = False
+
+    def load(self, data_folder_path: str):
+        """Load all shared source CSV files into memory."""
+        logger.info("DataCache: loading source CSV files into memory...")
+        path = data_folder_path
+
+        self.player_stats = pd.read_csv(os.path.join(path, "fixture_player_stats.csv"))
+        self.player_stats.drop_duplicates(
+            subset=["fixture_id", "player_id", "stats_type_id"], inplace=True
+        )
+
+        self.team_stats = pd.read_csv(os.path.join(path, "fixture_team_stats.csv"))
+        self.team_stats.drop_duplicates(
+            subset=["fixture_id", "team_id", "stats_type_id"], inplace=True
+        )
+
+        self.standings = pd.read_csv(os.path.join(path, "standings.csv"))
+        self.seasons = pd.read_csv(os.path.join(path, "seasons.csv"))
+        self.comps = pd.read_csv(os.path.join(path, "competitions.csv"))
+        self.comp_teams = pd.read_csv(os.path.join(path, "competition_season_teams.csv"))
+        self.teams = pd.read_csv(os.path.join(path, "teams.csv"))
+
+        self.fixtures_df = pd.read_csv(os.path.join(path, "fixtures.csv"))
+        self.fixtures_df.drop_duplicates(
+            subset=["season_id", "home_team_id", "away_team_id", "kickoff_datetime"],
+            inplace=True,
+        )
+
+        self.b365_odds = pd.read_csv(os.path.join(path, "bet365_odds.csv"))
+        self.b365_odds = self.b365_odds.drop_duplicates(
+            subset=["fixture_id", "name"], keep="last"
+        )
+
+        # Map odds to fixtures once (shared across all leagues)
+        self.fixtures_df["over_1_5_odds_decimal"] = self.fixtures_df["id"].map(
+            self.b365_odds[self.b365_odds["name"] == "OVER_1_5"]
+            .set_index("fixture_id")["odd_decimal"]
+        )
+        self.fixtures_df["over_2_5_odds_decimal"] = self.fixtures_df["id"].map(
+            self.b365_odds[self.b365_odds["name"] == "OVER_2_5"]
+            .set_index("fixture_id")["odd_decimal"]
+        )
+
+        self.stats_types = pd.read_csv(os.path.join(path, "stats_types.csv"))
+
+        self.league_weightings = pd.read_excel(os.path.join(path, "League Weightings.xlsx"))
+
+        self._loaded = True
+        logger.info("DataCache: all source data loaded successfully.")
+
+    def invalidate(self):
+        """Force reload on next projection run (call after /fetch-data)."""
+        self._loaded = False
+
+    def is_loaded(self) -> bool:
+        return self._loaded

@@ -1,0 +1,1898 @@
+import os
+import pickle
+from typing import Any
+
+
+def get_league_id(league_name, comps):
+    if league_name == 'Brazil Serie A':
+        return 648
+    matches = comps[comps['name'] == league_name]['id'].values
+    if len(matches) == 0:
+        raise ValueError(f"League '{league_name}' not found in competitions table")
+    return matches[0]
+
+
+def get_season_id(comp_id, seasons, previous=False):
+    import pandas as pd
+    comp_seasons = seasons[seasons['competition_id'] == comp_id]
+    current_season = comp_seasons[comp_seasons['is_current'] == 1]
+    if previous:
+        comp_seasons = comp_seasons.drop(current_season.index)
+        comp_seasons['end_date'] = pd.to_datetime(comp_seasons['end_date'])
+        previous_season = comp_seasons[comp_seasons['end_date'] < pd.to_datetime('today')]
+        previous_season = previous_season.sort_values('end_date', ascending=False).iloc[[0]]
+        return previous_season['id'].values[0]
+    else:
+        return current_season['id'].values[0]
+
+
+def get_stat_list():
+    return ['Goals', 'Shots Total', 'Shots On Target', 'Corners', 'Fouls', 'Yellowcards', 'Tackles', 'Passes',
+            'Successful Passes', 'Total Crosses', 'Interceptions', 'Offsides']
+
+
+TEAM_NAME_FIXES = {
+    "Milan": "AC Milan",
+}
+
+def get_team_id(team_name, teams):
+    team_name = TEAM_NAME_FIXES.get(team_name, team_name)
+    team_id = teams[teams['name'] == team_name]['id'].values[0]
+    return team_id
+
+
+def get_stat_id(stat_name, stats_types):
+    stats = stats_types
+    stat_id = stats[stats['name'] == stat_name]['id'].values[0]
+    return stat_id
+
+
+def fit_model(trainX, trainY):
+    from sklearn.linear_model import PoissonRegressor
+    model = PoissonRegressor(solver='newton-cholesky')
+    model.fit(trainX, trainY)
+    return model
+
+
+def grid_search(trainX, trainY):
+    import numpy as np
+    from sklearn.linear_model import PoissonRegressor
+    from sklearn.model_selection import GridSearchCV
+    param_grid = {
+        'alpha': np.arange(0, 1, 0.1),
+        'max_iter': [100, 200, 500],
+        'fit_intercept': [True, False]
+    }
+    pr = PoissonRegressor()
+    gs = GridSearchCV(pr, param_grid, cv=5, scoring='neg_mean_squared_error')
+    model = gs.fit(trainX, trainY)
+    return model
+
+
+def get_comp_teams(league_id, season_id, comp_teams, teams):
+    comp_teams = comp_teams[(comp_teams['competition_id'] == league_id) &
+                            (comp_teams['season_id'] == season_id)].reset_index(drop=True)
+    team_names = []
+    for index, row in comp_teams.iterrows():
+        team_names.append(get_team(row['team_id'], teams))
+    return team_names
+
+
+def get_team_fixtures(team_name, fixtures, teams, comp_id=None, season_id=None):
+    team_id = get_team_id(team_name, teams)
+    fixtures = fixtures[(fixtures['home_team_id'] == team_id) | (fixtures['away_team_id'] == team_id)].reset_index(
+        drop=True)
+    fixtures[['home_team', 'away_team']] = fixtures['name'].str.split(' vs ', expand=True)
+    fixtures['opponent'] = fixtures.apply(lambda x: x['away_team'] if x['home_team'] == team_name else x['home_team'],
+                                          axis=1)
+    if comp_id is not None:
+        try:
+            fixtures = fixtures[fixtures['competition_id'].isin(comp_id)].reset_index(drop=True)
+        except:
+            fixtures = fixtures[fixtures['competition_id'] == comp_id].reset_index(drop=True)
+    if season_id is not None:
+        try:
+            fixtures = fixtures[fixtures['season_id'].isin(season_id)].reset_index(drop=True)
+        except:
+            fixtures = fixtures[fixtures['season_id'] == season_id].reset_index(drop=True)
+    fixtures = fixtures[
+        ['id', 'competition_id', 'round_id', 'season_id', 'kickoff_datetime', 'opponent', 'home_team', 'away_team',
+         'home_team_id', 'away_team_id', 'home_team_goals', 'away_team_goals',
+         'stats_imported']]  # UPDATED - added stats_imported
+    return fixtures.sort_values(by='kickoff_datetime').reset_index(drop=True)
+
+
+def get_team_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Yes', comp_id=None, season_id=None,
+                   games=None):
+    team_stats.drop_duplicates(subset=['fixture_id', 'stats_type_id', 'team_id'], inplace=True)
+    team_id = teams[teams['name'] == team]['id'].values[0]  # NEW - get team_id
+    fixtures = get_team_fixtures(team, fixtures, teams, comp_id=comp_id,
+                                 season_id=season_id)  # UPDATED - make sure to add comp_id=comp_id and season_id=season_id
+    if stat == 'Fouls Drawn':
+        team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
+                                (team_stats['stats_type_id'] == get_stat_id('Fouls', stats_types)) &
+                                (team_stats['team_id'] != get_team_id(team, teams))].reset_index(drop=True)
+    else:
+        team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
+                                (team_stats['stats_type_id'] == get_stat_id(stat, stats_types)) &
+                                (team_stats['team_id'] == get_team_id(team, teams))].reset_index(drop=True)
+    team_stats = team_stats[['fixture_id', 'value', 'team_id']]
+    team_stats = team_stats.merge(fixtures, left_on='fixture_id', right_on='id',
+                                  how='right')  # UPDATED - changed to right join to include all fixtures
+    team_stats = team_stats[team_stats['stats_imported'] == 1].reset_index(
+        drop=True)  # NEW - only include fixtures where stats have been imported
+    team_stats['value'].fillna(0, inplace=True)  # NEW - fill NaN values with 0
+    if venue == 'Yes':
+        venue = []
+        for index, row in team_stats.iterrows():
+            if row['home_team_id'] == team_id:  # UPDATED - use home_team_id and team_id variable
+                venue.append('H')
+            else:
+                venue.append('A')
+        team_stats['venue'] = venue
+        team_stats = team_stats[['kickoff_datetime', 'season_id', 'opponent', 'value', 'venue']]
+    else:
+        team_stats = team_stats[['kickoff_datetime', 'season_id', 'opponent', 'value']]
+    team_stats.rename(columns={'value': f'Team {stat}'}, inplace=True)
+    team_stats = team_stats.sort_values(by='kickoff_datetime').reset_index(drop=True)
+    if games is not None:
+        team_stats = team_stats.iloc[-games:]
+    return team_stats.reset_index(drop=True)
+
+
+def get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Yes', comp_id=None, season_id=None,
+                  games=None):
+    team_stats.drop_duplicates(subset=['fixture_id', 'stats_type_id', 'team_id'], inplace=True)
+    team_id = teams[teams['name'] == team]['id'].values[0]  # NEW - get team_id
+    fixtures = get_team_fixtures(team, fixtures, teams, comp_id=comp_id,
+                                 season_id=season_id)  # UPDATED - make sure to add comp_id=comp_id and season_id=season_id
+    if stat == 'Fouls Drawn':
+        team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
+                                (team_stats['stats_type_id'] == get_stat_id('Fouls', stats_types)) &
+                                (team_stats['team_id'] == get_team_id(team, teams))].reset_index(drop=True)
+    else:
+        team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
+                                (team_stats['stats_type_id'] == get_stat_id(stat, stats_types)) &
+                                (team_stats['team_id'] != get_team_id(team, teams))].reset_index(drop=True)
+    team_stats = team_stats[['fixture_id', 'value', 'team_id']]
+    team_stats = team_stats.merge(fixtures, left_on='fixture_id', right_on='id',
+                                  how='right')  # UPDATED - changed to right join to include all fixtures
+    team_stats = team_stats[team_stats['stats_imported'] == 1].reset_index(
+        drop=True)  # NEW - only include fixtures where stats have been imported
+    team_stats['value'].fillna(0, inplace=True)  # NEW - fill NaN values with 0
+    if venue == 'Yes':
+        venue = []
+        for index, row in team_stats.iterrows():
+            if row['home_team_id'] == team_id:  # UPDATED - use home_team_id and team_id variable
+                venue.append('H')  # UPDATED - H instead of A
+            else:
+                venue.append('A')  # UPDATED - A instead of H
+        team_stats['venue'] = venue
+        team_stats = team_stats[['kickoff_datetime', 'season_id', 'opponent', 'value', 'venue']]
+    else:
+        team_stats = team_stats[['kickoff_datetime', 'season_id', 'opponent', 'value']]
+    team_stats.rename(columns={'value': f'Team {stat}'}, inplace=True)
+    team_stats = team_stats.sort_values(by='kickoff_datetime').reset_index(drop=True)
+    if games is not None:
+        team_stats = team_stats.iloc[-games:]
+    return team_stats.reset_index(drop=True)
+
+
+# UPDATED - New Parameter: previous_team_ratings
+def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_ids, comp_teams, teams_df, fixtures_df,
+                team_stats, stats_types, weight, games, weightings):
+    import pandas as pd
+    comp_teams = get_comp_teams(league_id, current_season_id, comp_teams, teams=teams_df)
+    team_ratings = []
+    for team in comp_teams:
+        xG = get_team_stats('Expected Goals (xG)', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
+                            season_id=all_season_ids)  # UPDATED - games=games
+        xGA = get_opp_stats('Expected Goals (xG)', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
+                            season_id=all_season_ids)  # UPDATED - games=games
+        xGA = xGA.rename(columns={'Team Expected Goals (xG)': 'Opponent Expected Goals (xG)'})
+        GF = get_team_stats('Goals', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
+                            season_id=all_season_ids)  # UPDATED - games=games
+        GA = get_opp_stats('Goals', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
+                           season_id=all_season_ids)  # UPDATED - games=games
+        GA = GA.rename(columns={'Team Goals': 'Opponent Goals'})
+        matches = GF.merge(xG[['kickoff_datetime', 'Team Expected Goals (xG)']], on='kickoff_datetime', how='left')
+        matches = matches.merge(GA[['kickoff_datetime', 'Opponent Goals']], on='kickoff_datetime', how='left')
+        matches = matches.merge(xGA[['kickoff_datetime', 'Opponent Expected Goals (xG)']], on='kickoff_datetime',
+                                how='left')
+        matches['Team Expected Goals (xG)'].fillna(matches['Team Goals'], inplace=True)
+        matches['Opponent Expected Goals (xG)'].fillna(matches['Opponent Goals'], inplace=True)
+        matches['Adjusted Goals'] = matches['Team Goals'] * 0.3 + matches[
+            'Team Expected Goals (xG)'] * 0.7  # UPDATED - changed weightings to 0.3 and 0.7
+        matches['Adjusted Goals Against'] = matches['Opponent Goals'] * 0.3 + matches[
+            'Opponent Expected Goals (xG)'] * 0.7  # UPDATED - changed weightings to 0.3 and 0.7
+        matches = matches[['kickoff_datetime', 'season_id', 'opponent', 'Adjusted Goals', 'Adjusted Goals Against']]
+        for i in range(len(matches)):  # NEW - adjust for opponent ratings
+            kickoff_datetime = matches.iloc[i]['kickoff_datetime']  # NEW - get kickoff datetime
+            opponent = matches.iloc[i]['opponent']  # NEW - get opponent name
+            opponent_rating = previous_team_ratings[
+                previous_team_ratings['Team'] == opponent]  # NEW - get opponent rating
+            opponent_rating = opponent_rating[
+                opponent_rating['Date'] < pd.to_datetime(kickoff_datetime).date()].sort_values(by='Date',
+                                                                                               ascending=False).head(
+                1)  # NEW - get latest rating before match date
+            if not opponent_rating.empty:  # NEW - check if opponent rating exists
+                if opponent_rating['Inverse'].values[0] == 'Yes':  # NEW - check if inverse adjustment is needed
+                    matches.at[matches.index[i], 'Adjusted Goals Against'] /= (
+                                opponent_rating['Attack'].values[0] / 100)  # NEW - adjust goals against
+                    matches.at[matches.index[i], 'Adjusted Goals'] *= (
+                                opponent_rating['Defense'].values[0] / 100)  # NEW - adjust goals
+                else:  # NEW - normal adjustment
+                    matches.at[matches.index[i], 'Adjusted Goals Against'] /= (
+                                opponent_rating['Attack'].values[0] / 100)  # NEW - adjust goals against
+                    matches.at[matches.index[i], 'Adjusted Goals'] /= (
+                                opponent_rating['Defense'].values[0] / 100)  # NEW - adjust goals
+        if weightings[2] and weightings[3]:
+            matches.loc[matches['season_id'] == all_season_ids[3], 'Adjusted Goals'] *= weightings[2]
+            matches.loc[matches['season_id'] == all_season_ids[3], 'Adjusted Goals Against'] /= weightings[3]
+        if weightings[0] and weightings[1]:
+            matches.loc[matches['season_id'] == all_season_ids[2], 'Adjusted Goals'] *= weightings[0]
+            matches.loc[matches['season_id'] == all_season_ids[2], 'Adjusted Goals Against'] /= weightings[1]
+        matches['Weeks Since Game'] = (pd.to_datetime(matches['kickoff_datetime'].max()) - pd.to_datetime(
+            matches['kickoff_datetime'])).dt.days // 7
+        matches['Game Weight'] = weight ** (matches['Weeks Since Game'] - 3)  # UPDATED - changed to -3
+        matches.loc[
+            matches['Weeks Since Game'] < 4, 'Game Weight'] = 1  # NEW - set weight to 1 for games within last 4 weeks
+        matches['Weighted Goals'] = matches['Adjusted Goals'] * matches['Game Weight']
+        matches['Weighted Goals Against'] = matches['Adjusted Goals Against'] * matches['Game Weight']
+        attack_rating = matches['Weighted Goals'].sum() / matches['Game Weight'].sum()
+        defense_rating = matches['Weighted Goals Against'].sum() / matches['Game Weight'].sum()
+        team_ratings.append([team, attack_rating, defense_rating])
+    team_ratings = pd.DataFrame(team_ratings, columns=['Team', 'Attack', 'Defense'])
+    return team_ratings[['Team', 'Attack', 'Defense']]
+
+
+def get_market_value(league_dashed, div, country_code):
+    import requests
+    from bs4 import BeautifulSoup
+    import pandas as pd
+    url = f'https://www.transfermarkt.co.uk/{league_dashed.lower()}/startseite/wettbewerb/{country_code}{div}'
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    }
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    list = soup.select('td[class="hauptlink no-border-links"]')
+    teams = []
+    for y in range(len(list)):
+        team = list[y].text.strip()
+        teams.append(team)
+    df = pd.DataFrame(teams)
+    df.columns = ['Team']
+    mvalue = []
+    value = soup.select('td[class="rechts"]')
+    value = value[1::2]
+    value = value[1:]
+    for x in range(len(value)):
+        mvalue.append(value[x].text.strip())
+    df['Market Value'] = mvalue
+    df['Team'] = df['Team'].str.replace('AFC', '')
+    df['Team'] = df['Team'].str.replace('FC', '')
+    df['Team'] = df['Team'].str.replace('SC', '')
+    df['Team'] = df['Team'].str.replace('CF', '')
+    df['Team'] = df['Team'].str.replace('RCD', '')
+    df['Team'] = df['Team'].str.replace('SS', '')
+    df['Team'] = df['Team'].str.replace('AS', '')
+    df['Team'] = df['Team'].str.replace('BC', '')
+    df['Team'] = df['Team'].str.replace('US', '')
+    df['Team'] = df['Team'].str.replace('AC', '')
+    df['Team'] = df['Team'].str.strip()
+    df['Market Value'] = df['Market Value'].str.replace('.', '')
+    df_temp = df['Market Value'].str.strip('€').str.extract(r'(\d+)([bnm]+)')
+    df_temp2 = df_temp[0] + df_temp[1].map({'bn': '0000000', 'm': '0000', 'k': '000'})
+    df.drop('Market Value', axis=1, inplace=True)
+    df['Market Value'] = df_temp2
+    return df
+
+
+def get_home_goal_avg(league_id, team_stats, fixtures, stats_types):
+    import pandas as pd
+    fixtures = fixtures[fixtures['competition_id'] == league_id]
+    df = fixtures[['id', 'home_team_id', 'away_team_id', 'kickoff_datetime']].merge(
+        team_stats[['fixture_id', 'team_id', 'stats_type_id', 'value']], left_on='id', right_on='fixture_id',
+        how='inner')
+    df.drop_duplicates(subset=['id', 'home_team_id', 'away_team_id', 'team_id', 'stats_type_id'], inplace=True)
+    df['Weeks Since Kickoff'] = (pd.to_datetime('now') - pd.to_datetime(df['kickoff_datetime'])).dt.days // 7
+    df['Weeks Since Kickoff'] = df['Weeks Since Kickoff'].astype(int)
+    df['Weight'] = 0.9 ** (df['Weeks Since Kickoff'] - 5)  # UPDATED - changed to 0.9 and -5
+    df.loc[df['Weeks Since Kickoff'] < 6, 'Weight'] = 1  # NEW - set weight to 1 for games within last 6 weeks
+    df['Weighted Value'] = df['value'] * df['Weight']
+    goals = df[df['stats_type_id'] == get_stat_id('Goals', stats_types)]
+    home_goals = goals[goals['team_id'] == goals['home_team_id']]
+    home_goals_average = home_goals['Weighted Value'].sum() / home_goals['Weight'].sum()
+    xG = df[df['stats_type_id'] == get_stat_id('Expected Goals (xG)', stats_types)]
+    home_xG = xG[xG['team_id'] == xG['home_team_id']]
+    home_xG_average = home_xG['Weighted Value'].sum() / home_xG['Weight'].sum()
+    adjusted_home_goal_average = home_goals_average * 0.3 + home_xG_average * 0.7
+    return adjusted_home_goal_average
+
+
+def get_away_goal_avg(league_id, team_stats, fixtures, stats_types):
+    import pandas as pd
+    fixtures = fixtures[fixtures['competition_id'] == league_id]
+    df = fixtures[['id', 'home_team_id', 'away_team_id', 'kickoff_datetime']].merge(
+        team_stats[['fixture_id', 'team_id', 'stats_type_id', 'value']], left_on='id', right_on='fixture_id',
+        how='inner')
+    df.drop_duplicates(subset=['id', 'home_team_id', 'away_team_id', 'team_id', 'stats_type_id'], inplace=True)
+    df['Weeks Since Kickoff'] = (pd.to_datetime('now') - pd.to_datetime(df['kickoff_datetime'])).dt.days // 7
+    df['Weeks Since Kickoff'] = df['Weeks Since Kickoff'].astype(int)
+    df['Weight'] = 0.9 ** (df['Weeks Since Kickoff'] - 5)  # UPDATED - changed to 0.9 and -5
+    df.loc[df['Weeks Since Kickoff'] < 6, 'Weight'] = 1  # NEW - set weight to 1 for games within last 6 weeks
+    df['Weighted Value'] = df['value'] * df['Weight']
+    goals = df[df['stats_type_id'] == get_stat_id('Goals', stats_types)]
+    away_goals = goals[goals['team_id'] == goals['away_team_id']]
+    away_goals_average = away_goals['Weighted Value'].sum() / away_goals['Weight'].sum()
+    xG = df[df['stats_type_id'] == get_stat_id('Expected Goals (xG)', stats_types)]
+    away_xG = xG[xG['team_id'] == xG['away_team_id']]
+    away_xG_average = away_xG['Weighted Value'].sum() / away_xG['Weight'].sum()
+    adjusted_away_goal_average = away_goals_average * 0.3 + away_xG_average * 0.7
+    return adjusted_away_goal_average
+
+
+def make_goal_prediction(attack_rating, defense_rating, average_goals):
+    pred = average_goals * (attack_rating / 100) * (defense_rating / 100)
+    return pred
+
+
+def make_round_goal_prediction(fixtures, team_ratings, average_home_goals, average_away_goals):
+    import pandas as pd
+    import math
+    import logging
+    _log = logging.getLogger("projection")
+
+    def _safe_rating(df, col):
+        if len(df) == 0:
+            return None
+        v = df[col].values[0]
+        return None if (v is None or (isinstance(v, float) and math.isnan(v))) else v
+
+    predictions = []
+    for i in range(len(fixtures)):
+        id = fixtures.iloc[i]['id']
+        kickoff_datetime = fixtures.iloc[i]['kickoff_datetime']
+        home_team = fixtures.iloc[i]['home_team']
+        away_team = fixtures.iloc[i]['away_team']
+        _home = team_ratings[team_ratings['Team'] == home_team]
+        _away = team_ratings[team_ratings['Team'] == away_team]
+        home_attack = _safe_rating(_home, 'Attack')
+        home_defense = _safe_rating(_home, 'Defense')
+        away_attack = _safe_rating(_away, 'Attack')
+        away_defense = _safe_rating(_away, 'Defense')
+        if home_attack is None:
+            _log.warning(f"Team missing/NaN in ratings: '{home_team}' — using mean (100)")
+        if away_attack is None:
+            _log.warning(f"Team missing/NaN in ratings: '{away_team}' — using mean (100)")
+        home_attack_rating = home_attack if home_attack is not None else 100
+        home_defense_rating = home_defense if home_defense is not None else 100
+        away_attack_rating = away_attack if away_attack is not None else 100
+        away_defense_rating = away_defense if away_defense is not None else 100
+        home_goals = (make_goal_prediction(home_attack_rating, away_defense_rating, average_home_goals))
+        away_goals = (make_goal_prediction(away_attack_rating, home_defense_rating, average_away_goals))
+        # home_goal_boost, away_goal_boost = get_goal_boost(team_ratings, average_home_goals, average_away_goals)
+        # home_goals = (home_goals * home_goal_boost).round(2)
+        # away_goals = (away_goals * away_goal_boost).round(2)
+        predictions.append([id, kickoff_datetime, home_team, home_goals, away_goals, away_team])
+    return pd.DataFrame(predictions,
+                        columns=['id', 'kickoff_datetime', 'Home Team', 'Home Goals', 'Away Goals', 'Away Team'])
+
+
+def get_team(team_id, teams):
+    team = teams[teams['id'] == team_id]
+    return team['name'].values[0]
+
+
+def get_round_id(fixtures, previous=False):
+    import pandas as pd
+    date = pd.to_datetime('today')
+    fixtures.loc[:, 'kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
+    if previous == True:
+        fixtures = fixtures[fixtures['kickoff_datetime'] < date].reset_index(drop=True)
+        fixtures = fixtures.sort_values(by='kickoff_datetime', ascending=False)
+    else:
+        fixtures = fixtures[fixtures['kickoff_datetime'] > date].reset_index(drop=True)
+        fixtures = fixtures.sort_values(by='kickoff_datetime', ascending=True)
+    round_id = fixtures['round_id'].iloc[0]
+    return round_id
+
+
+def get_stage_id(fixtures, previous=False):
+    import pandas as pd
+    date = pd.to_datetime('today')
+    fixtures.loc[:, 'kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
+    if previous == True:
+        fixtures = fixtures[fixtures['kickoff_datetime'] < date].reset_index(drop=True)
+        fixtures = fixtures.sort_values(by='kickoff_datetime', ascending=False)
+    else:
+        fixtures = fixtures[fixtures['kickoff_datetime'] > date].reset_index(drop=True)
+        fixtures = fixtures.sort_values(by='kickoff_datetime', ascending=True)
+    stage_id = fixtures['stage_id'].iloc[0]
+    return stage_id
+
+
+def get_fixtures(fixtures, teams, previous=False, odds=True, cup=False, leg=None, round_id=None):
+    if cup == True:
+        stage_id = get_stage_id(fixtures, previous)
+        fixtures = fixtures[fixtures['stage_id'] == stage_id]
+        if leg != None:
+            fixtures = fixtures[fixtures['leg'] == f'{leg}/2']
+    else:
+        if round_id == None:
+            round_id = get_round_id(fixtures, previous)
+            fixtures = fixtures[fixtures['round_id'] == round_id]
+        else:
+            fixtures = fixtures[fixtures['round_id'] == round_id]
+    fixtures = fixtures[['id', 'kickoff_datetime', 'name', 'home_team_id', 'away_team_id', 'bet365_home_odds_decimal',
+                         'bet365_draw_odds_decimal', 'bet365_away_odds_decimal']]
+    fixtures['home_team'] = fixtures['home_team_id'].apply(lambda x: get_team(x, teams))
+    fixtures['away_team'] = fixtures['away_team_id'].apply(lambda x: get_team(x, teams))
+    fixtures = fixtures[
+        ['id', 'kickoff_datetime', 'home_team', 'away_team', 'bet365_home_odds_decimal', 'bet365_draw_odds_decimal',
+         'bet365_away_odds_decimal']]
+    fixtures.sort_values(by=['kickoff_datetime', 'home_team'], inplace=True)
+    return fixtures.reset_index(drop=True)
+
+
+def get_goal_boost(ratings, average_home_goals, average_away_goals):
+    import numpy as np
+    home_goals_list = []
+    away_goals_list = []
+    for i in range(len(ratings)):
+        home_team = ratings.iloc[i]['Team']
+        home_attack = ratings.iloc[i]['Attack']
+        home_defense = ratings.iloc[i]['Defense']
+        for i in range(len(ratings)):
+            away_team = ratings.iloc[i]['Team']
+            away_attack = ratings.iloc[i]['Attack']
+            away_defense = ratings.iloc[i]['Defense']
+            if home_team == away_team:
+                continue
+            home_goals = make_goal_prediction(home_attack, away_defense, average_home_goals)
+            away_goals = make_goal_prediction(away_attack, home_defense, average_away_goals)
+            home_goals_list.append(home_goals)
+            away_goals_list.append(away_goals)
+    home_goal_boost = average_home_goals / np.mean(home_goals_list)
+    away_goal_boost = average_away_goals / np.mean(away_goals_list)
+    return home_goal_boost, away_goal_boost
+
+
+def get_draw_boost(ratings, average_home_goals, average_away_goals, draw_perc):
+    import numpy as np
+    from scipy.stats import poisson
+    draw_probs = []
+    for i in range(len(ratings)):
+        home_team = ratings.iloc[i]['Team']
+        home_attack = ratings.iloc[i]['Attack']
+        home_defense = ratings.iloc[i]['Defense']
+        for i in range(len(ratings)):
+            away_team = ratings.iloc[i]['Team']
+            away_attack = ratings.iloc[i]['Attack']
+            away_defense = ratings.iloc[i]['Defense']
+            if home_team == away_team:
+                continue
+            home_goals = make_goal_prediction(home_attack, away_defense, average_home_goals)
+            away_goals = make_goal_prediction(away_attack, home_defense, average_away_goals)
+            x = np.arange(0, 9)
+            y = np.arange(0, 9)
+            X, Y = np.meshgrid(x, y)
+            Z = poisson.pmf(X, home_goals) * poisson.pmf(Y, away_goals)
+            draw_prob = np.sum(np.diag(Z))
+            draw_probs.append(draw_prob)
+
+    projected_draw_prob = np.mean(draw_probs)
+    draw_boost = draw_perc / projected_draw_prob
+    return np.clip(draw_boost, 1, 1.1)  # NEW
+
+
+def get_result_probs(home_goals: object, away_goals: object, boost: object) -> tuple[Any, Any, Any]:
+    import numpy as np
+    from scipy.stats import poisson
+    x = np.arange(0, 9)
+    y = np.arange(0, 9)
+    X, Y = np.meshgrid(x, y)
+    Z = poisson.pmf(X, home_goals) * poisson.pmf(Y, away_goals)
+    home_win_prob = np.sum(np.triu(Z, k=1))
+    draw_prob = np.sum(np.diag(Z))
+    away_win_prob = np.sum(np.tril(Z, k=-1))
+    draw_prob = draw_prob * boost
+    remaining_prob = 1 - draw_prob
+    original_home_probs = home_win_prob
+    original_away_probs = away_win_prob
+    home_win_prob = (original_home_probs / (original_home_probs + original_away_probs)) * remaining_prob
+    away_win_prob = (original_away_probs / (original_home_probs + original_away_probs)) * remaining_prob
+    return round(home_win_prob * 100, 2), round(draw_prob * 100, 2), round(away_win_prob * 100, 2)
+
+
+def find_inputs_for_probs(home_start, away_start, target_home, target_draw, target_away, boost=1.1):
+    from scipy.optimize import minimize
+    import numpy as np
+    from scipy.stats import poisson
+    def objective(x):
+        home_goals, away_goals = x
+        x_vals = np.arange(0, 9)
+        y_vals = np.arange(0, 9)
+        X, Y = np.meshgrid(x_vals, y_vals)
+        Z = poisson.pmf(X, home_goals) * poisson.pmf(Y, away_goals)
+        home_win_prob = np.sum(np.triu(Z, k=1))
+        draw_prob = np.sum(np.diag(Z)) * boost
+        away_win_prob = np.sum(np.tril(Z, k=-1))
+        remaining_prob = 1 - draw_prob
+        home_win_prob = (home_win_prob / (home_win_prob + away_win_prob)) * remaining_prob
+        away_win_prob = (away_win_prob / (home_win_prob + away_win_prob)) * remaining_prob
+        return (home_win_prob - target_home / 100) ** 2 + (draw_prob - target_draw / 100) ** 2 + (
+                    away_win_prob - target_away / 100) ** 2
+
+    x0 = [home_start, away_start]
+    bounds = [(0.1, 5), (0.1, 5)]
+    result = minimize(objective, x0, bounds=bounds, method='L-BFGS-B')
+    return result.x
+
+
+def sim_season(score_preds, current_league_table, _warned=set()):
+    import numpy as np
+    import copy
+    import logging
+    league_table = copy.deepcopy(current_league_table)
+    for index, row in score_preds.iterrows():
+        home_team = row['Home Team']
+        away_team = row['Away Team']
+        for team in [home_team, away_team]:
+            if team not in league_table:
+                if team not in _warned:
+                    logging.getLogger("projection").warning(f"Team not in league table: '{team}' — adding with 0 points")
+                    _warned.add(team)
+                league_table[team] = {'Points': 0, 'Goals For': 0, 'Goals Against': 0, 'Goal Difference': 0}
+
+        home_goals = np.random.poisson(row['Home Goals'])
+        away_goals = np.random.poisson(row['Away Goals'])
+
+        if home_goals > away_goals:
+            league_table[home_team]['Points'] += 3
+        elif home_goals < away_goals:
+            league_table[away_team]['Points'] += 3
+        else:
+            league_table[home_team]['Points'] += 1
+            league_table[away_team]['Points'] += 1
+
+        league_table[home_team]['Goals For'] += home_goals
+        league_table[away_team]['Goals For'] += away_goals
+        league_table[home_team]['Goals Against'] += away_goals
+        league_table[away_team]['Goals Against'] += home_goals
+        league_table[home_team]['Goal Difference'] += (home_goals - away_goals)
+        league_table[away_team]['Goal Difference'] += (away_goals - home_goals)
+
+    sorted_teams = sorted(
+        league_table.items(),
+        key=lambda item: (
+            item[1]['Points'],
+            item[1]['Goal Difference'],
+            item[1]['Goals For']
+        ),
+        reverse=True
+    )
+    for idx, (team, stats) in enumerate(sorted_teams, 1):
+        stats['Position'] = idx
+    league_table_sorted = dict(sorted_teams)
+    return league_table_sorted
+
+
+def sim_multiple_seasons(score_preds, current_league_table, num_sims=100):
+    import pandas as pd
+    all_tables = []
+    for sim in range(1, num_sims + 1):
+        simulated_league_table = sim_season(score_preds, current_league_table)  # returns dict: {team: stats_dict}
+        for team, stats in simulated_league_table.items():
+            stats_copy = stats.copy()
+            stats_copy['Team'] = team
+            stats_copy['Simulation'] = sim
+            all_tables.append(stats_copy)
+
+    all_tables_df = pd.DataFrame(all_tables)
+    avg_table = all_tables_df.groupby('Team').agg({
+        'Points': 'mean',
+        'Goals For': 'mean',
+        'Goals Against': 'mean',
+        'Goal Difference': 'mean'
+    }).reset_index()
+    avg_table['Position'] = avg_table['Points'].rank(method='min', ascending=False).astype(int)
+    avg_table = avg_table.sort_values(by='Position').reset_index(drop=True)
+    # debug prints removed
+
+
+    avg_table = avg_table[['Position', 'Team', 'Points', 'Goals For', 'Goals Against', 'Goal Difference']]
+
+    return avg_table, all_tables_df
+
+
+def get_avg_table_with_probs(league, avg_table, all_tables, sims=10000):
+    if league == 'Championship':
+        lines = [1, 2, 6, 22]
+    elif league == 'League One':
+        lines = [1, 2, 6, 21]
+    elif league == 'League Two':
+        lines = [1, 3, 7, 23]
+    elif league in ['Premier League', 'La Liga', 'Serie A']:
+        lines = [1, 4, 18]
+    elif league == 'Bundesliga':
+        lines = [1, 4]
+    elif league == 'Ligue 1':
+        lines = [1, 3]
+    elif league in ['Brazil Serie A', 'Campeonato Brasileiro']:
+        lines = [1, 4, 6, 17]
+    else:
+        lines = [1]
+    avg_table_with_probs = avg_table[
+        ['Position', 'Team', 'Points', 'Goals For', 'Goals Against', 'Goal Difference']].copy()
+    pos_probs = all_tables.groupby(['Team', 'Position']).size().reset_index(name='Count')
+    for line in lines:
+        if line > 10:
+            prob = pos_probs[pos_probs['Position'] >= line].groupby('Team')['Count'].sum() / sims
+            avg_table_with_probs['Relegation %'] = avg_table_with_probs['Team'].map(prob).fillna(0)
+            avg_table_with_probs['Relegation %'] = (avg_table_with_probs['Relegation %'] * 100).round(2)
+        else:
+            prob = pos_probs[pos_probs['Position'] <= line].groupby('Team')['Count'].sum() / sims
+            if line == 1:
+                avg_table_with_probs[f'Win %'] = avg_table_with_probs['Team'].map(prob).fillna(0)
+                avg_table_with_probs[f'Win %'] = (avg_table_with_probs[f'Win %'] * 100).round(2)
+            else:
+                avg_table_with_probs[f'Top {line} %'] = avg_table_with_probs['Team'].map(prob).fillna(0)
+                avg_table_with_probs[f'Top {line} %'] = (avg_table_with_probs[f'Top {line} %'] * 100).round(2)
+    return avg_table_with_probs
+
+
+def get_avg_table_with_probs_and_point_limits(avg_table_with_probs, all_tables):
+    max_points = all_tables.groupby('Team')['Points'].max().reset_index()
+    min_points = all_tables.groupby('Team')['Points'].min().reset_index()
+    min_points.rename(columns={'Points': 'Min Points'}, inplace=True)
+    max_points.rename(columns={'Points': 'Max Points'}, inplace=True)
+    avg_table_with_probs = avg_table_with_probs.merge(max_points, on='Team', how='left')
+    avg_table_with_probs = avg_table_with_probs.merge(min_points, on='Team', how='left')
+    return avg_table_with_probs
+
+
+# def load_model(stat, file_path, league):  # UPDATED - New Parameter: league
+#     import pickle
+#     if stat == 'Goals':  # NEW
+#         return None  # No model for Goals, return None
+#     filename = file_path + '\\' + stat + '_model.sav'
+#     ## NEW lines below - try loading league-specific model first
+#     try:
+#         model = pickle.load(open(filename, 'rb'))
+#     except:
+#         file_name = file_path + '\\' + 'All_Leagues_' + stat + '_model.sav'
+#         model = pickle.load(open(file_name, 'rb'))
+#     return model
+#
+
+# def load_model(stat, file_path, league):
+#     if stat == 'Goals':
+#         return None  # nema modela za Goals
+#
+#     # pokušaj učitavanja modela specifičnog za ligu
+#     league_model_path = os.path.join(file_path, league, f"{league}_{stat}_model.sav")
+#     if os.path.exists(league_model_path):
+#         with open(league_model_path, 'rb') as f:
+#             model = pickle.load(f)
+#         return model
+#
+#     # ako ne postoji, pokušaj učitavanje modela "All Leagues"
+#     all_leagues_path = os.path.join(file_path, "All Leagues", f"All_Leagues_{stat}_model.sav")
+#     if os.path.exists(all_leagues_path):
+#         with open(all_leagues_path, 'rb') as f:
+#             model = pickle.load(f)
+#         return model
+#
+#     # Ako ne postoji ni jedan model
+#     print(f"Model za {stat} nije pronađen ni u {league} ni u All Leagues.")
+#     return None
+#
+
+def load_model(stat, file_path, league):
+    if stat == 'Goals':
+        return None
+
+    filename = os.path.join(file_path, league, f"{league}_{stat}_model.sav")
+
+    try:
+        with open(filename, 'rb') as f:
+            model = pickle.load(f)
+    except:
+        fallback_path = os.path.join(file_path, "All Leagues", f"All_Leagues_{stat}_model.sav")
+        with open(fallback_path, 'rb') as f:
+            model = pickle.load(f)
+
+    return model
+
+def load_all_models(stat_list, file_path, league):  # UPDATED - New Parameter: league
+    models = {}
+    for stat in stat_list:
+        model = load_model(stat, file_path, league)  # UPDATED - Pass league parameter
+        models[stat] = model
+    return models
+
+def get_weighted_team_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', comp_id=None,
+                            season_id=None, games=None):
+    import pandas as pd
+    date_from = pd.to_datetime('today')
+    team_stats = get_team_stats(stat, team, fixtures, team_stats, teams, stats_types, venue, comp_id, season_id, games)
+    team_stats = team_stats[pd.to_datetime(team_stats['kickoff_datetime']) < date_from].reset_index(drop=True)
+    team_stats['Weeks Since Kickoff'] = (date_from - pd.to_datetime(team_stats['kickoff_datetime'])).dt.days // 7
+    team_stats['Weight'] = weight ** (team_stats['Weeks Since Kickoff'])
+    team_stats['Weighted ' + stat] = team_stats['Team ' + stat] * team_stats['Weight']
+    return team_stats
+
+
+def get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', ratings=None,
+                              comp_id=None, league_weightings=None, season_id=None, games=None):
+    team_stats_df = get_weighted_team_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue,
+                                            comp_id, season_id, games)
+    stat_list = ['Shots Total', 'Shots On Target', 'Passes', 'Successful Passes', 'Corners', 'Total Crosses']
+    if league_weightings is not None:
+        if stat in stat_list:
+            league_weightings[2] = (1 - league_weightings[2]) * 0.25 + league_weightings[2]
+            league_weightings[0] = (1 - league_weightings[0]) * 0.6 + league_weightings[0] if league_weightings[
+                                                                                                  0] is not None else \
+            league_weightings[0]
+            if season_id[2] is not None:
+                team_stats_df.loc[team_stats_df['season_id'] == season_id[2], 'Weighted ' + stat] *= league_weightings[
+                    0]
+            if season_id[3] is not None:
+                team_stats_df.loc[team_stats_df['season_id'] == season_id[3], 'Weighted ' + stat] *= league_weightings[
+                    2]
+    if len(team_stats_df) < 5:
+        league_fixtures = fixtures[fixtures['season_id'].isin(season_id)]
+        league_stats = team_stats[team_stats['fixture_id'].isin(league_fixtures['id'])]
+        league_stats = league_stats[league_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
+        average_stats = league_stats['value'].mean()
+        if stat in stat_list:
+            _r = ratings[ratings['Team'] == team]['Attack']
+            attack_ratings = _r.values[0] if len(_r) > 0 else 100
+            return average_stats * (attack_ratings / 100)
+        else:
+            return average_stats
+    return team_stats_df['Weighted ' + stat].sum() / team_stats_df['Weight'].sum()
+
+
+def get_weighted_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', comp_id=None,
+                           season_id=None, games=None):
+    import pandas as pd
+    date_from = pd.to_datetime('today')
+    team_stats = get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue, comp_id, season_id, games)
+    team_stats = team_stats[pd.to_datetime(team_stats['kickoff_datetime']) < date_from].reset_index(drop=True)
+    team_stats['Weeks Since Kickoff'] = (date_from - pd.to_datetime(team_stats['kickoff_datetime'])).dt.days // 7
+    team_stats['Weight'] = weight ** (team_stats['Weeks Since Kickoff'])
+    team_stats['Weighted' + stat] = team_stats['Team ' + stat] * team_stats['Weight']
+    return team_stats
+
+
+def get_opp_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', ratings=None,
+                             comp_id=None, league_weightings=None, season_id=None, games=None):
+    team_stats_df = get_weighted_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue, comp_id,
+                                           season_id, games)
+    stat_list = ['Shots Total', 'Shots On Target', 'Passes', 'Successful Passes', 'Corners', 'Total Crosses']
+    if league_weightings is not None:
+        if stat in stat_list:
+            league_weightings[3] = (1 - league_weightings[2]) * 0.25 + league_weightings[3]
+            league_weightings[1] = (1 - league_weightings[0]) * 0.6 + league_weightings[1] if league_weightings[
+                                                                                                  1] is not None else \
+            league_weightings[1]
+            if season_id[2] is not None:
+                team_stats_df.loc[team_stats_df['season_id'] == season_id[2], 'Weighted' + stat] /= league_weightings[1]
+            if season_id[3] is not None:
+                team_stats_df.loc[team_stats_df['season_id'] == season_id[3], 'Weighted' + stat] /= league_weightings[3]
+    if len(team_stats_df) < 5:
+        league_fixtures = fixtures[fixtures['season_id'].isin(season_id)]
+        league_stats = team_stats[team_stats['fixture_id'].isin(league_fixtures['id'])]
+        league_stats = league_stats[league_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
+        average_stats = league_stats['value'].mean()
+        if stat in stat_list:
+            _r = ratings[ratings['Team'] == team]['Defense']
+            defense_ratings = _r.values[0] if len(_r) > 0 else 100
+            return average_stats / (defense_ratings / 100)
+        else:
+            return average_stats
+    return team_stats_df['Weighted' + stat].sum() / team_stats_df['Weight'].sum()
+
+
+def calculate_team_venue_effect(team, stat, fixtures, team_stats_df, teams, stats_types, venue, comp_id=None,
+                                games=None, season_id=None):
+    team_stats = get_team_stats(stat, team, fixtures, team_stats_df, teams, stats_types, 'Yes', comp_id=comp_id,
+                                games=games, season_id=season_id)
+    if len(team_stats) < 5:
+        if venue == 'H':
+            return 1.1
+        else:
+            return 0.9
+    home = team_stats[team_stats['venue'] == 'H'][f'Team {stat}'].mean()
+    away = team_stats[team_stats['venue'] == 'A'][f'Team {stat}'].mean()
+    avg = team_stats[f'Team {stat}'].mean()
+    if venue == 'H':
+        return home / avg
+    else:
+        return away / avg
+
+
+def calculate_opp_venue_effect(team, stat, fixtures, team_stats_df, teams, stats_types, venue, comp_id=None, games=None,
+                               season_id=None):
+    team_stats = get_opp_stats(stat, team, fixtures, team_stats_df, teams, stats_types, 'Yes', comp_id=comp_id,
+                               games=games, season_id=season_id)
+    if len(team_stats) < 5:
+        if venue == 'H':
+            return 0.9
+        else:
+            return 1.1
+    home = team_stats[team_stats['venue'] == 'H'][f'Team {stat}'].mean()
+    away = team_stats[team_stats['venue'] == 'A'][f'Team {stat}'].mean()
+    avg = team_stats[f'Team {stat}'].mean()
+    if venue == 'H':
+        return home / avg
+    else:
+        return away / avg
+
+
+def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, stats_types, model, ratings=None,
+                             venue=None, comp_id=None, league_weightings=None, season_id=None, games=None):
+    import warnings
+    if venue == None:
+        team_history = get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, 0.98,
+                                                 ratings=ratings, comp_id=comp_id, league_weightings=league_weightings,
+                                                 season_id=season_id, games=games)
+        opponent_history = get_opp_weighted_average(stat, opponent, fixtures, team_stats, teams, stats_types, 0.98,
+                                                    ratings=ratings, comp_id=comp_id,
+                                                    league_weightings=league_weightings, season_id=season_id,
+                                                    games=games)
+    else:
+        team_history = get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, 0.98,
+                                                 ratings=ratings, comp_id=comp_id, league_weightings=league_weightings,
+                                                 season_id=season_id, games=games) * calculate_team_venue_effect(team,
+                                                                                                                 stat,
+                                                                                                                 fixtures,
+                                                                                                                 team_stats,
+                                                                                                                 teams,
+                                                                                                                 stats_types,
+                                                                                                                 venue,
+                                                                                                                 comp_id=comp_id,
+                                                                                                                 games=games * 2,
+                                                                                                                 season_id=season_id)
+        if venue == 'H':
+            opponent_venue = 'A'
+        else:
+            opponent_venue = 'H'
+        opponent_history = get_opp_weighted_average(stat, opponent, fixtures, team_stats, teams, stats_types, 0.98,
+                                                    ratings=ratings, comp_id=comp_id,
+                                                    league_weightings=league_weightings, season_id=season_id,
+                                                    games=games) * calculate_opp_venue_effect(opponent, stat, fixtures,
+                                                                                              team_stats, teams,
+                                                                                              stats_types,
+                                                                                              opponent_venue,
+                                                                                              comp_id=comp_id,
+                                                                                              games=games * 2,
+                                                                                              season_id=season_id)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        team_stat = model.predict([[team_history, opponent_history]])
+    return (team_stat[0]).round(2), team_history, opponent_history  # UPDATED - return histories
+
+
+def get_team_all_stats_prediction(team, opponent, fixtures, stat_list, team_stats, teams, stats_types, models,
+                                  ratings=None, venue=None, comp_id=None, league_weightings=None, season_id=None,
+                                  games=None):
+    predictions = {}
+    predictions['Team'] = team
+    predictions['Opponent'] = opponent
+    predictions['Venue'] = venue
+    original_weightings = league_weightings.copy() if league_weightings is not None else None
+    for stat in stat_list:
+        model = models[stat]
+        league_weightings = original_weightings.copy() if original_weightings is not None else None
+        # UPDATED - store history in predictions
+        predictions[stat], predictions['Team ' + stat + ' History'], predictions[
+            'Opponent ' + stat + ' History Against'] = get_team_stat_prediction(team, opponent, fixtures, stat,
+                                                                                team_stats, teams, stats_types, model,
+                                                                                ratings=ratings, venue=venue,
+                                                                                comp_id=comp_id,
+                                                                                league_weightings=league_weightings,
+                                                                                season_id=season_id, games=games)
+    return predictions
+
+
+def get_team_round_predictions(next_fix, stat_list, fixtures, team_stats, teams, stats_types, models, goals=False,
+                               ratings=None, comp_id=None, league_weightings=None, season_id=None, games=None,
+                               neutral_venue=False):
+    import pandas as pd
+    if goals == False:
+        stat_list.remove('Goals')
+    round_preds = []
+    original_weightings = league_weightings.copy() if league_weightings is not None else None
+    for index, row in next_fix.iterrows():
+        id = row['id']
+        kickoff_datetime = row['kickoff_datetime']
+        league_weightings = original_weightings.copy() if original_weightings is not None else None
+        if neutral_venue == True:
+            home_team_preds = get_team_all_stats_prediction(row['home_team'], row['away_team'], fixtures, stat_list,
+                                                            team_stats, teams, stats_types, models, ratings=ratings,
+                                                            comp_id=comp_id, league_weightings=league_weightings,
+                                                            season_id=season_id, games=games)
+            away_team_preds = get_team_all_stats_prediction(row['away_team'], row['home_team'], fixtures, stat_list,
+                                                            team_stats, teams, stats_types, models, ratings=ratings,
+                                                            comp_id=comp_id, league_weightings=league_weightings,
+                                                            season_id=season_id, games=games)
+        else:
+            home_team_preds = get_team_all_stats_prediction(row['home_team'], row['away_team'], fixtures, stat_list,
+                                                            team_stats, teams, stats_types, models, ratings=ratings,
+                                                            venue='H', comp_id=comp_id,
+                                                            league_weightings=league_weightings, season_id=season_id,
+                                                            games=games)
+            away_team_preds = get_team_all_stats_prediction(row['away_team'], row['home_team'], fixtures, stat_list,
+                                                            team_stats, teams, stats_types, models, ratings=ratings,
+                                                            venue='A', comp_id=comp_id,
+                                                            league_weightings=league_weightings, season_id=season_id,
+                                                            games=games)
+        home_team_preds['Fouls Drawn'] = away_team_preds['Fouls']
+        away_team_preds['Fouls Drawn'] = home_team_preds['Fouls']
+        if goals == True:
+            home_team_preds['Assists'] = (home_team_preds['Goals'] * 0.82).round(2)
+            away_team_preds['Assists'] = (away_team_preds['Goals'] * 0.82).round(2)
+            home_team_preds['Saves'] = away_team_preds['Shots On Target'] - away_team_preds['Goals']
+            away_team_preds['Saves'] = home_team_preds['Shots On Target'] - home_team_preds['Goals']
+        home_team_preds['fixture_id'] = id
+        away_team_preds['fixture_id'] = id
+        home_team_preds['kickoff_datetime'] = kickoff_datetime
+        away_team_preds['kickoff_datetime'] = kickoff_datetime
+        round_preds.append(home_team_preds)
+        round_preds.append(away_team_preds)
+        df = pd.DataFrame(round_preds)
+    if goals == True:
+        # UPDATED - return history columns
+        return df[
+            ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists'] + stat_list[1:] + [
+                'Fouls Drawn', 'Saves'] + ['Team ' + stat + ' History' for stat in stat_list] + [
+                'Opponent ' + stat + ' History Against' for stat in stat_list]]
+    else:
+        # UPDATED - return history columns
+        return df[['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue'] + stat_list[0:] + ['Fouls Drawn'] + [
+            'Team ' + stat + ' History' for stat in stat_list] + ['Opponent ' + stat + ' History Against' for stat in
+                                                                  stat_list]]
+
+
+def adjust_shots_projection(projected_goals, projected_shots, projected_shots_on_target, avg_shots_per_goal,
+                            avg_shots_on_target_per_goal, weight=0.5):
+    shots_based_on_goals = projected_goals * avg_shots_per_goal
+    shots_on_target_based_on_goals = projected_goals * avg_shots_on_target_per_goal
+    shots_diff = shots_based_on_goals - projected_shots
+    shots_on_target_diff = shots_on_target_based_on_goals - projected_shots_on_target
+
+    adjusted_shots = projected_shots + (shots_diff * weight)
+    adjusted_shots_on_target = projected_shots_on_target + (shots_on_target_diff * weight)
+    return round(adjusted_shots, 2), round(adjusted_shots_on_target, 2)
+
+
+# UPDATED - New Parameter: season_id
+def player_criteria(player, team, fixtures, player_stats, players, teams, season_id=None):
+    import pandas as pd
+    fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])  # NEW - ensure datetime format
+    team_fixtures = get_team_fixtures(team, fixtures, teams, season_id=season_id)  # UPDATED - pass season_id
+    todays_date = pd.to_datetime('today')
+    team_fixtures['kickoff_datetime'] = pd.to_datetime(team_fixtures['kickoff_datetime'])
+    team_fixtures = team_fixtures[team_fixtures['kickoff_datetime'] < todays_date]
+    last5_fixtures = team_fixtures.tail(5)
+    last5_fixtures = last5_fixtures[last5_fixtures['kickoff_datetime'] > todays_date - pd.DateOffset(weeks=20)]
+    last5_fixture_ids = last5_fixtures['id'].values
+    try:
+        player_stats_df = player_stats[player_stats['player_id'] == get_player_id(player, players, team, teams)]
+        player_stats_df = player_stats_df[player_stats_df['stats_type_id'] == 119]
+        player_stats_df = player_stats_df[player_stats_df['value'] > 45]  # NEW - filter out very low minutes
+        player_stats_df = player_stats_df.merge(fixtures, left_on='fixture_id',
+                                                right_on='id')  # NEW - merge to get kickoff_datetime
+        player_stats_df = player_stats_df[['fixture_id', 'value', 'kickoff_datetime']]  # NEW - include kickoff_datetime
+        player_stats_df = player_stats_df[
+            player_stats_df['kickoff_datetime'] > todays_date - pd.DateOffset(weeks=40)]  # NEW - only last 40 weeks
+
+    except:
+        return False
+    # if mins > 2500:
+    #    return True
+    # player_stats_df = player_stats_df[player_stats_df['fixture_id'].isin(last5_fixture_ids)]
+    # player_stats_df = player_stats_df[player_stats_df['value'] > 45]
+    # if len(player_stats_df) > 0:
+    #   return True
+    player_stats_df_last_5 = player_stats_df[
+        player_stats_df['fixture_id'].isin(last5_fixture_ids)]  # NEW - filter last 5 fixtures
+    player_stats_df_last_5 = player_stats_df_last_5[
+        player_stats_df_last_5['value'] > 45]  # NEW - filter out very low minutes
+    if len(player_stats_df_last_5) > 0 and len(
+            player_stats_df) > 5:  # NEW - ensure at least 5 total games and played in last 5 fixtures
+        return True  # NEW
+    return False
+
+
+def get_player_id(player_name, player_df, team, teams):
+    team_id = get_team_id(team, teams)
+    player_df = player_df[player_df['current_team_id'] == team_id]
+    player_id = player_df[player_df['display_name'] == player_name]['id']
+    return player_id.values[0]
+
+
+# UPDATED - New Parameters: comps and include_international
+def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, comps, mins=50, games=None,
+                     include_international=False):
+    player_df = stat_df[stat_df['player_id'] == player_id]
+    player_stats = player_df.merge(stats_types, left_on='stats_type_id', right_on='id')
+    player_minutes = player_stats[player_stats['name'] == 'Minutes Played']
+    player_minutes = player_minutes[['fixture_id', 'value', 'team_id']]
+    player_minutes.rename(columns={'value': 'minutes'}, inplace=True)
+    player_minutes['minutes'] = player_minutes['minutes'].astype(int)
+    player_minutes = player_minutes[player_minutes['minutes'] > mins]
+    player_minutes.reset_index(drop=True, inplace=True)  # NEW - reset index after filtering
+
+    ## NEW - This whole if statement is new - to filter out international games if required
+    if not include_international:
+        drop_indices = []
+        for i in range(len(player_minutes)):
+            fixture_id = player_minutes['fixture_id'].iloc[i]
+            fixture = fixtures[fixtures['id'] == fixture_id]
+            comp_id = fixture['competition_id'].values[0]
+            try:
+                if comps[comps['id'] == comp_id]['sub_type'].values[0] in ['domestic', 'domestic_cup',
+                                                                           'cup_international']:
+                    continue
+                else:
+                    drop_indices.append(i)
+            except:
+                drop_indices.append(i)
+        player_minutes.drop(drop_indices, inplace=True)
+        player_minutes.reset_index(drop=True, inplace=True)
+
+    player_stats = player_stats[player_stats['name'] == stat]
+    player_stats.drop(columns=['team_id'], inplace=True)
+    player_stats = player_minutes.merge(player_stats, left_on='fixture_id', right_on='fixture_id', how='left')
+    player_stats['value'].fillna(0, inplace=True)
+    player_stats = player_stats[['fixture_id', 'value', 'minutes', 'team_id']]
+    player_stats = player_stats.merge(fixtures, left_on='fixture_id', right_on='id')
+    player_stats = player_stats[['kickoff_datetime', 'fixture_id', 'team_id', 'name', 'value', 'minutes']].sort_values(
+        by='kickoff_datetime')
+    ## NEW - This if statement has been moved up
+    if games is not None:
+        player_stats = player_stats.iloc[-games:]
+    player_stats.reset_index(drop=True, inplace=True)
+
+    if stat == 'Expected Goals (xG)':
+        drop_indices = []  # NEW
+        player_stats['value'] = player_stats['value'].astype(float)
+
+        ## NEW - This whole for loop is new - to drop games with 0 xG and more than 0 shots
+        for i in range(len(player_stats)):
+            if player_stats['value'].iloc[i] > 0:
+                continue
+            else:
+                fixture_id = player_stats['fixture_id'].iloc[i]
+                player_shots = player_df[player_df['stats_type_id'] == get_stat_id('Shots Total', stats_types)]
+                shots = player_shots[player_shots['fixture_id'] == fixture_id]
+                if shots.empty:
+                    continue
+                elif shots['value'].values[0] > 0:
+                    drop_indices.append(i)
+        player_stats.drop(drop_indices, inplace=True)
+        player_stats.reset_index(drop=True, inplace=True)
+
+    else:
+        player_stats['value'] = player_stats['value'].astype(int)
+    player_stats.rename(columns={'name': 'Game', 'value': f'Player {stat}'}, inplace=True)
+    # if games is not None:
+    #    player_stats = player_stats.iloc[-games:]
+    # player_stats.reset_index(drop=True)
+    team_stat_list = []
+    for i in range(len(player_stats)):
+        team_id = player_stats['team_id'].iloc[i]
+        fixture_id = player_stats['fixture_id'].iloc[i]
+        team_stat_df = team_df[team_df['team_id'] == team_id]
+        team_stat_df = team_stat_df[team_stat_df['fixture_id'] == fixture_id]
+        if stat == 'Fouls Drawn':
+            team_stat_df = team_df[team_df['fixture_id'] == fixture_id]
+            team_stat_df = team_stat_df[team_stat_df['team_id'] != team_id]
+            team_stat = team_stat_df[team_stat_df['stats_type_id'] == get_stat_id('Fouls', stats_types)]
+        elif stat == 'Accurate Passes':
+            team_stat = team_stat_df[team_stat_df['stats_type_id'] == get_stat_id('Successful Passes', stats_types)]
+        else:
+            team_stat = team_stat_df[team_stat_df['stats_type_id'] == get_stat_id(stat, stats_types)]
+        try:
+            team_stat_list.append(team_stat['value'].values[0])
+        except:
+            team_stat_list.append(0)
+    player_stats[f'Team {stat}'] = team_stat_list
+    # if stat != 'Goals' and stat != 'Assists':
+    #    player_stats[f'Team {stat}'].replace({0:None}, inplace=True)
+    #    player_stats.dropna(subset=[f'Team {stat}'], inplace=True)
+    #    if stat == 'Expected Goals (xG)':
+    #        player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(float)
+    #    else:
+    #        player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(int)
+    #    player_stats['Game'] = player_stats['Game'].str.split(' v ').str[0]
+    #    player_stats[f'{stat} Proportion'] = ((player_stats[f'Player {stat}'] / player_stats[f'Team {stat}'])).round(3)
+    #    player_stats[f'{stat} Proportion'] = player_stats[f'{stat} Proportion'].apply(lambda x: 1 if x > 1 else x)
+    #    player_stats[f'{stat} Proportion'].fillna(0, inplace=True)
+    #    return player_stats.reset_index(drop=True)
+    # else:
+    #    player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(int)
+    #    player_stats['Game'] = player_stats['Game'].str.split(' v ').str[0]
+
+    if stat == 'Expected Goals (xG)':  # NEW - moved from above
+        player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(float)  # NEW
+    else:  # NEW
+        player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(int)  # NEW
+    player_stats['Game'] = player_stats['Game'].str.split(' v ').str[0]  # NEW
+    return player_stats.reset_index(drop=True)
+
+
+# UPDATED - New Parameters: team_id and comps
+def get_weighted_player_stats(df, team_df, player_id, team_id, stat, stats_types, fixtures, comps, weight, mins=50,
+                              games=None):
+    import pandas as pd
+    # UDATED - pass comps to get_player_stats function
+    player_stats = get_player_stats(df, team_df, player_id, stat, stats_types, fixtures, comps, mins, games)
+    player_stats = player_stats[pd.to_datetime(player_stats['kickoff_datetime']) < pd.to_datetime('today')].reset_index(
+        drop=True)
+    player_stats['Weeks Since Kickoff'] = (pd.to_datetime('today') - pd.to_datetime(
+        player_stats['kickoff_datetime'])).dt.days // 7
+    player_stats['Weight'] = weight ** (player_stats['Weeks Since Kickoff'] - 3)  # UPDATED - changed to -3
+    player_stats.loc[
+        player_stats['Weeks Since Kickoff'] < 4, 'Weight'] = 1  # UPDATED - set weight to 1 for last 4 weeks
+    for i in range(len(player_stats)):
+        if player_stats.loc[i, 'team_id'] != team_id:  # UPDATED - changed to team_id
+            player_stats.loc[i, 'Weight'] = player_stats.loc[i, 'Weight'] * 0.5
+    # if stat != 'Goals' and stat != 'Assists':
+    #    player_stats[f'Weighted {stat} Proportion'] = player_stats[f'{stat} Proportion'] * player_stats['Weight']
+    # else:
+    player_stats[f'Weighted Player {stat}'] = player_stats[f'Player {stat}'] * player_stats[
+        'Weight']  # UPDATED - No indent
+    player_stats[f'Weighted Team {stat}'] = player_stats[f'Team {stat}'] * player_stats['Weight']  # UPDATED - No indent
+    return player_stats
+
+
+# UPDATED - New Parameters: team_id and comps
+def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_types, fixtures, comps, weight, mins=50,
+                                games=None):
+    # UDATED - pass team_id and comps to get_weighted_player_stats function
+    player_stats = get_weighted_player_stats(df, team_df, player_id, team_id, stat, stats_types, fixtures, comps,
+                                             weight, mins, games)
+    # if stat == 'Goals' or stat == 'Assists':
+    weighted_sum = player_stats[f'Weighted Player {stat}'].sum()  # UPDATED - No indent
+    if weighted_sum == 0:  # UPDATED - No indent
+        return 0  # UPDATED - No indent
+    weighted_average = player_stats[f'Weighted Player {stat}'].sum() / player_stats[
+        f'Weighted Team {stat}'].sum()  # UPDATED - No indent
+    # else:
+    #    weighted_sum = player_stats[f'Weighted {stat} Proportion'].sum()
+    #    if weighted_sum == 0:
+    #        return 0
+    #    else:
+    #        weighted_average = player_stats[f'Weighted {stat} Proportion'].sum() / player_stats['Weight'].sum()
+    if len(player_stats) < 10 and weighted_average > 0.2:
+        return weighted_average * 0.75
+    return weighted_average
+
+
+# UPDATED - New Parameters: season_id and comps, Removed xG parameter
+def distribute_team_predictions_to_players(player_stats, team_df, team_predictions, stats_types, fixtures, players,
+                                           teams, comps, weight, season_id=None):
+    import numpy as np
+    import pandas as pd
+    team_predictions = team_predictions.drop(columns=['Corners'])
+    stat_list = team_predictions.columns[5:].to_list()
+    # debug print removed
+    # stat_list.remove('Saves')
+    if 'Saves' in stat_list:
+        stat_list.remove('Saves')
+
+    full_predicted_stats = []
+    for team in team_predictions['Team'].unique():  # UPDATED - loop through each team
+        specific_team_predictions = team_predictions[
+            team_predictions['Team'] == team]  # NEW - filter predictions for the specific team
+        team_id = get_team_id(team, teams)  # NEW - get team ID
+        # team_stat_values = row[1].values
+        team_players = players[players['current_team_id'] == team_id]  # UPDATED - use team_id
+        for name, id in team_players[['display_name', 'id']].values:
+            # player_pred_stats = {}
+            # UPDATED - New Parameter: season_id and we can now use team
+            if player_criteria(name, team, fixtures, player_stats, players, teams, season_id):
+                for stat in range(len(stat_list)):  # UPDATED - use stat instead of i
+                    if stat_list[stat] == 'Goals':  # UPDATED - use stat_list[stat] instead of i
+                        try:
+                            # UPDATED - Pass team_id and comps
+                            stat_prop_goals = get_player_weighted_average(player_stats, team_df, id, team_id, 'Goals',
+                                                                          stats_types, fixtures, comps, weight,
+                                                                          games=50)
+                            # if xG == True:
+                            try:  # NEW - try-except block to handle cases where xG data may be insufficient
+                                # UPDATED - Pass team_id and comps
+                                stat_prop_xG = get_player_weighted_average(player_stats, team_df, id, team_id,
+                                                                           'Expected Goals (xG)', stats_types, fixtures,
+                                                                           comps, weight, games=50)
+                                if stat_prop_xG == 0:  # NEW - if xG proportion is 0, use only goals proportion
+                                    stat_prop = stat_prop_goals  # NEW
+                                else:  # NEW - calculate average of goals and xG proportions
+                                    stat_prop = (stat_prop_goals + stat_prop_xG) / 2
+                                    # else:
+                            except:  # NEW - if xG data is insufficient, use only goals proportion
+                                stat_prop = stat_prop_goals
+                            # if np.isnan(stat_prop) == False:
+                            #    if stat_prop == 0:
+                            #        player_pred_stats[stat_list[i]] = 0.00
+                            #    else:
+                            #        predicted_stat = stat_prop * team_stat_values[i+5]
+                            #        player_pred_stats[stat_list[i]] = predicted_stat.round(2)
+                        except:
+                            pass
+                    else:
+                        try:
+                            # UPDATED - Pass team_id and comps
+                            stat_prop = get_player_weighted_average(player_stats, team_df, id, team_id, stat_list[stat],
+                                                                    stats_types, fixtures, comps, weight, games=50)
+                            # if np.isnan(stat_prop) == False:
+                            #    if stat_prop == 0:
+                            #        player_pred_stats[stat_list[i]] = 0.00
+                            #    else:
+                            #        predicted_stat = stat_prop * team_stat_values[i+5]
+                            #        player_pred_stats[stat_list[i]] = predicted_stat.round(2)
+                        except:
+                            pass
+
+                    ## NEW - Loop through specific team predictions to create entries for each fixture
+                    for i in range(len(specific_team_predictions)):
+                        player_pred_stats = {}
+                        player_pred_stats['player_id'] = id
+                        player_pred_stats['Player'] = name
+                        player_pred_stats['Team'] = team
+                        player_pred_stats['Opponent'] = specific_team_predictions['Opponent'].iloc[i]
+                        player_pred_stats['Venue'] = specific_team_predictions['Venue'].iloc[i]
+                        player_pred_stats['fixture_id'] = specific_team_predictions['fixture_id'].iloc[i]
+                        player_pred_stats['kickoff_datetime'] = specific_team_predictions['kickoff_datetime'].iloc[i]
+                        player_pred_stats['stat_name'] = stat_list[stat]
+                        player_pred_stats['value'] = specific_team_predictions[stat_list[stat]].iloc[i] * stat_prop
+                        full_predicted_stats.append(player_pred_stats)
+
+                        # if sum(player_pred_stats.values()) == 0:
+                #   continue
+            # else:
+            #    continue
+            # player_pred_stats['player_id'] = id
+            # player_pred_stats['Player'] = name
+            # player_pred_stats['Team'] = team_stat_values[2]
+            # player_pred_stats['Opponent'] = team_stat_values[3]
+            # if pd.isna(team_stat_values[2]):
+            #    player_pred_stats['Venue'] = 'Neutral'
+            # else:
+            #    player_pred_stats['Venue'] = team_stat_values[4]
+            # player_pred_stats['fixture_id'] = team_stat_values[0]
+            # player_pred_stats['kickoff_datetime'] = team_stat_values[1]
+            # full_predicted_stats.append(player_pred_stats)
+    df = pd.DataFrame(full_predicted_stats)
+
+    ## NEW - Pivot the dataframe to have stats as columns
+    # debug print removed
+
+    if df.empty or 'value' not in df.columns or 'stat_name' not in df.columns:
+        cols = ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Team', 'Opponent', 'Venue'] + stat_list
+        return pd.DataFrame(columns=cols)
+
+    df = df.pivot_table(
+        index=['player_id', 'Player', 'Team', 'Opponent', 'Venue', 'fixture_id', 'kickoff_datetime'],
+        columns='stat_name',
+        values='value',
+        aggfunc='first'
+    ).reset_index()
+
+    df.columns.name = None  # Remove the aggregation name
+    df = df.round(2)  # Round all values to 2 decimal places
+    existing_stats = [s for s in stat_list if s in df.columns]
+    return df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Team', 'Opponent', 'Venue'] + existing_stats]
+
+def get_player_position(player, team, players, teams):
+    if player == 'Caoimhin Kelleher':
+        return 'GK'
+    team_id = get_team_id(team, teams)
+    player_row = players[(players['display_name'] == player) & (players['current_team_id'] == team_id)]
+    if player_row.empty:
+        return None
+    position = player_row['position'].values[0]
+    if position == 'goalkeeper':
+        return 'GK'
+    elif position == 'defender':
+        return 'DEF'
+    elif position == 'midfielder':
+        return 'MID'
+    elif position == 'attacker':
+        return 'FWD'
+    return position
+
+
+def get_poisson_probs(projections, stats, numbers):
+    import pandas as pd
+    import numpy as np
+    from scipy.stats import poisson
+    new_df = pd.DataFrame(
+        columns=['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue',
+                 'Market', 'Prop', 'Projection %'])
+    for i in range(len(projections)):
+        fixture_id = projections['fixture_id'][i]
+        kickoff_datetime = projections['kickoff_datetime'][i]
+        player_id = projections['player_id'][i]
+        player = projections['Player'][i]
+        pos = projections['Position'][i]
+        team = projections['Team'][i]
+        opponent = projections['Opponent'][i]
+        venue = projections['Venue'][i]
+        for stat in stats:
+            for number in numbers:
+                prop = f"{number}+"
+                projection = projections[stat][i]
+                poisson_pred = poisson.pmf(np.arange(0, number), projection)
+                prob = 1 - poisson_pred[:number].sum().round(4)
+                prob = min(prob, 0.99)
+                prob = prob * 100
+                if prob == 100:
+                    prob = 99.99
+                if prob < 0.01:
+                    prob = 0.01
+                new_row = {
+                    'fixture_id': fixture_id,
+                    'kickoff_datetime': kickoff_datetime,
+                    'player_id': player_id,
+                    'Player': player,
+                    'Position': pos,
+                    'Team': team,
+                    'Opponent': opponent,
+                    'Venue': venue,
+                    'Market': stat,
+                    'Prop': prop,
+                    'Projection %': prob
+                }
+                new_df.loc[len(new_df)] = new_row
+    return new_df
+
+
+## THE FOLLOWING FUNCTIONS ARE FOR THE PREMIER LEAGUE SCRIPT
+
+def get_extra_stats(player, position, team, teams, players, player_stats, fixtures, stats_types, weight=0.98, mins=50,
+                    games=50):
+    import pandas as pd
+    player_id = get_player_id(player, players, team, teams)
+    player_stats = player_stats[player_stats['player_id'] == player_id]
+    player_df = player_stats[player_stats['stats_type_id'] == get_stat_id('Minutes Played', stats_types)]
+    player_df = player_df[player_df['value'] >= mins]
+    player_df.rename(columns={'value': 'Player Minutes Played'}, inplace=True)
+    if player_df.empty:
+        return None
+    player_df = player_df.merge(fixtures, left_on='fixture_id', right_on='id')
+    player_df = player_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player Minutes Played']]
+    for stat in ['Clearances', 'Blocked Shots', 'Interceptions', 'Tackles', 'Ball Recovery', 'Tackles Won']:
+        player_stat = player_stats[player_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
+        player_stat = player_stat[['fixture_id', 'value']]
+        player_stat.rename(columns={'value': f'Player {stat}'}, inplace=True)
+        player_stat[f'Player {stat}'] = player_stat[f'Player {stat}'].astype(int)
+        player_df = player_df.merge(player_stat, on='fixture_id', how='left')
+    player_df.fillna(0).reset_index(drop=True)
+    if position == 'DEF':
+        player_df['Player Def Con'] = player_df[
+            ['Player Clearances', 'Player Blocked Shots', 'Player Interceptions', 'Player Tackles']].sum(axis=1)
+    else:
+        player_df['Player Def Con'] = player_df[
+            ['Player Clearances', 'Player Blocked Shots', 'Player Interceptions', 'Player Tackles',
+             'Player Ball Recovery']].sum(axis=1)
+    player_df['Player Def Con'] = player_df['Player Def Con'].astype(int)
+    player_df = player_df.sort_values(by='kickoff_datetime', ascending=False)
+    player_df = player_df.head(games)
+    if position == 'DEF':
+        player_df['Hit?'] = player_df['Player Def Con'] >= 10
+    else:
+        player_df['Hit?'] = player_df['Player Def Con'] >= 12
+    player_df['90 Hit?'] = player_df['Player Minutes Played'] >= 90
+    player_df['Weeks Since Kickoff'] = (pd.to_datetime('today') - pd.to_datetime(
+        player_df['kickoff_datetime'])).dt.days // 7
+    player_df['Weight'] = weight ** (player_df['Weeks Since Kickoff'] - 5)
+    player_df.loc[player_df['Weeks Since Kickoff'] < 6, 'Weight'] = 1
+    player_df['Weighted Hit Rate'] = player_df['Hit?'] * player_df['Weight']
+    player_df['Weighted Def Con'] = player_df['Player Def Con'] * player_df['Weight']
+    player_df['Weighted Clearances'] = player_df['Player Clearances'] * player_df['Weight']
+    player_df['Weighted Blocked Shots'] = player_df['Player Blocked Shots'] * player_df['Weight']
+    player_df['Weighted Ball Recovery'] = player_df['Player Ball Recovery'] * player_df['Weight']
+    player_df['Weighted Tackles Won'] = player_df['Player Tackles Won'] * player_df['Weight']
+    player_df['Weighted 90 Hit Rate'] = player_df['90 Hit?'] * player_df['Weight']
+    if position == 'GK':
+        weighted_hit_rate = 0
+    else:
+        weighted_hit_rate = player_df['Weighted Hit Rate'].sum() / player_df['Weight'].sum()
+    weighted_def_con = player_df['Weighted Def Con'].sum() / player_df['Weight'].sum()
+    weighted_clearances = player_df['Weighted Clearances'].sum() / player_df['Weight'].sum()
+    weighted_blocked_shots = player_df['Weighted Blocked Shots'].sum() / player_df['Weight'].sum()
+    weighted_ball_recovery = player_df['Weighted Ball Recovery'].sum() / player_df['Weight'].sum()
+    weighted_tackles_won = player_df['Weighted Tackles Won'].sum() / player_df['Weight'].sum()
+    weighted_90_hit_rate = player_df['Weighted 90 Hit Rate'].sum() / player_df['Weight'].sum()
+    return weighted_hit_rate, weighted_def_con, weighted_clearances, weighted_blocked_shots, weighted_ball_recovery, weighted_tackles_won, weighted_90_hit_rate
+
+
+def get_fpl_points(pl_projections, score_preds, fpl_points_dict_gk, fpl_points_dict_def, fpl_points_dict_mid,
+                   fpl_points_dict_fwd):
+    import pandas as pd
+    import numpy as np
+    from scipy.stats import poisson
+    fpl_points_df = {'fixture_id': [], 'kickoff_datetime': [], 'player_id': [], 'Player': [], 'Position': [],
+                     'Team': [], 'Opponent': [], 'Venue': [], 'PTS': []}
+    fpl_points_df['fixture_id'] = pl_projections['fixture_id'].tolist()
+    fpl_points_df['kickoff_datetime'] = pl_projections['kickoff_datetime'].tolist()
+    fpl_points_df['player_id'] = pl_projections['player_id'].tolist()
+    fpl_points_df['Player'] = pl_projections['Player'].tolist()
+    fpl_points_df['Position'] = pl_projections['FPL Position'].tolist()
+    fpl_points_df['Team'] = pl_projections['Team'].tolist()
+    fpl_points_df['Opponent'] = pl_projections['Opponent'].tolist()
+    fpl_points_df['Venue'] = pl_projections['Venue'].tolist()
+    for i in range(len(pl_projections)):
+        fixture_id = pl_projections['fixture_id'][i]
+        fix_score_pred = score_preds[score_preds['id'] == fixture_id]
+        position = pl_projections['FPL Position'][i]
+        if position == 'GK':
+            fpl_points_dict = fpl_points_dict_gk
+        elif position == 'DEF':
+            fpl_points_dict = fpl_points_dict_def
+        elif position == 'MID':
+            fpl_points_dict = fpl_points_dict_mid
+        elif position == 'FWD':
+            fpl_points_dict = fpl_points_dict_fwd
+        else:
+            fpl_points_df['PTS'].append(0)
+            continue
+        team = pl_projections['Team'][i]
+        goal_points = pl_projections['Goals'][i] * fpl_points_dict['Goals']
+        assists = pl_projections['Assists'][i] * fpl_points_dict['Assists']
+        yellow_cards = pl_projections['Yellow Cards'][i] * fpl_points_dict['Yellow Card']
+        saves = pl_projections['Saves'][i]
+        saves_points = poisson.pmf(3, saves) + poisson.pmf(4, saves) + poisson.pmf(5, saves) + (
+                    (poisson.pmf(6, saves) + poisson.pmf(7, saves) + poisson.pmf(8, saves)) * 2) + (
+                                   poisson.pmf(9, saves) + poisson.pmf(10, saves) + poisson.pmf(11,
+                                                                                                saves)) * 3 if saves > 0 else 0
+        if 'Goals Conceded' in fpl_points_dict:
+            goals_conceded = fix_score_pred[fix_score_pred['Home Team'] == team]['Away Goals'].values[0] if team in \
+                                                                                                            fix_score_pred[
+                                                                                                                'Home Team'].values else \
+            fix_score_pred[fix_score_pred['Away Team'] == team]['Home Goals'].values[0]
+            goal_conceded_points = (poisson.pmf(2, goals_conceded) + poisson.pmf(3, goals_conceded) + (
+                        (poisson.pmf(4, goals_conceded) + poisson.pmf(5, goals_conceded)) * 2) + (
+                                                poisson.pmf(6, goals_conceded) + poisson.pmf(7, goals_conceded)) * 3) * \
+                                   fpl_points_dict['Goals Conceded'] if goals_conceded > 0 else 0
+        else:
+            goal_conceded_points = 0
+        if 'Clean Sheet' in fpl_points_dict:
+            clean_sheet_perc = fix_score_pred[fix_score_pred['Home Team'] == team]['Home Clean Sheet %'].values[
+                0] if team in fix_score_pred['Home Team'].values else \
+            fix_score_pred[fix_score_pred['Away Team'] == team]['Away Clean Sheet %'].values[0]
+            clean_sheet_points = (float(clean_sheet_perc.replace('%', '')) / 100) * fpl_points_dict['Clean Sheet']
+        else:
+            clean_sheet_points = 0
+        if 'Penalties Saved' in fpl_points_dict:
+            pen_save_points = (0.1 * goals_conceded) * 0.16 * fpl_points_dict['Penalties Saved']
+        else:
+            pen_save_points = 0
+        cbit_points = pl_projections['CBIT Hit Rate'][i] * 2
+        fpl_points = goal_points + assists + yellow_cards + saves_points + clean_sheet_points + goal_conceded_points + cbit_points + pen_save_points + 2
+        fpl_points_df['PTS'].append(fpl_points)
+    fpl_points_df = pd.DataFrame(fpl_points_df)
+    fpl_points_df.sort_values(by='PTS', ascending=False, inplace=True)
+    fpl_points_df['PTS'] = fpl_points_df['PTS'].round(2)
+    fpl_points_df.reset_index(drop=True, inplace=True)
+    return fpl_points_df
+
+
+def bonus_points_score(projections, score_preds, fpl_bonus_dict_gk, fpl_bonus_dict_def, fpl_bonus_dict_mid,
+                       fpl_bonus_dict_fwd):
+    import pandas as pd
+    fpl_bonus_df = {'fixture_id': [], 'kickoff_datetime': [], 'player_id': [], 'Player': [], 'Team': [], 'Opponent': [],
+                    'Venue': [], 'Goal Bonus': [], 'Assist Bonus': [], 'Save Bonus': [], 'CBIT Bonus': [],
+                    'Goal Conceded Bonus': [], 'Clean Sheet Bonus': [], 'Pass Completion Bonus': [], 'Total': []}
+    fpl_bonus_df['fixture_id'] = projections['fixture_id'].tolist()
+    fpl_bonus_df['kickoff_datetime'] = projections['kickoff_datetime'].tolist()
+    fpl_bonus_df['player_id'] = projections['player_id'].tolist()
+    fpl_bonus_df['Player'] = projections['Player'].tolist()
+    fpl_bonus_df['Team'] = projections['Team'].tolist()
+    fpl_bonus_df['Opponent'] = projections['Opponent'].tolist()
+    fpl_bonus_df['Venue'] = projections['Venue'].tolist()
+    for i in range(len(projections)):
+        fixture_id = projections['fixture_id'][i]
+        fix_score_pred = score_preds[score_preds['id'] == fixture_id]
+        position = projections['FPL Position'][i]
+        if position == 'GK':
+            fpl_bonus_dict = fpl_bonus_dict_gk
+        elif position == 'DEF':
+            fpl_bonus_dict = fpl_bonus_dict_def
+        elif position == 'MID':
+            fpl_bonus_dict = fpl_bonus_dict_mid
+        elif position == 'FWD':
+            fpl_bonus_dict = fpl_bonus_dict_fwd
+        else:
+            for _k in ['Goal Bonus', 'Assist Bonus', 'Save Bonus', 'CBIT Bonus',
+                       'Goal Conceded Bonus', 'Clean Sheet Bonus', 'Pass Completion Bonus', 'Total']:
+                fpl_bonus_df[_k].append(0)
+            continue
+        team = projections['Team'][i]
+        save_bonus = projections['Saves'][i] * fpl_bonus_dict['Saves'] if position == 'GK' else 0
+        key_passes = projections['Key Passes'][i] * fpl_bonus_dict['Key Passes']
+        big_chances_created = projections['Key Passes'][i] * fpl_bonus_dict['Big Chances Created'] * 0.2
+        chances_created_bonus = key_passes + big_chances_created
+        cbi = projections['Clearances Average'][i] + projections['Blocked Shots Average'][i] + \
+              projections['Interceptions'][i]
+        cbi_points = cbi * fpl_bonus_dict['Clearances, Blocks & Interceptions']
+        recoveries = projections['Ball Recovery Average'][i] * fpl_bonus_dict['Recoveries']
+        cbit_bonus = cbi_points + recoveries
+        shots_on_target = projections['Shots On Target'][i] * fpl_bonus_dict['Shots On Target']
+        shots_off_target = projections['Shots Total'][i] - projections['Shots On Target'][i]
+        shots_off_target = shots_off_target * fpl_bonus_dict['Shots Off Target'] if shots_off_target > 0 else 0
+        shots_bonus = shots_on_target + shots_off_target
+        goal_bonus = (projections['Goals'][i] * fpl_bonus_dict['Goals']) + shots_bonus
+        assist_bonus = projections['Assists'][i] * fpl_bonus_dict['Assists'] + chances_created_bonus
+        if 'Goals Conceded' in fpl_bonus_dict:
+            goals_conceded = fix_score_pred[fix_score_pred['Home Team'] == team]['Away Goals'].values[0] if team in \
+                                                                                                            fix_score_pred[
+                                                                                                                'Home Team'].values else \
+            fix_score_pred[fix_score_pred['Away Team'] == team]['Home Goals'].values[0]
+            goal_conceded_points = goals_conceded * fpl_bonus_dict['Goals Conceded'] if goals_conceded > 0 else 0
+        else:
+            goal_conceded_points = 0
+        if 'Clean Sheet' in fpl_bonus_dict:
+            clean_sheet_perc = fix_score_pred[fix_score_pred['Home Team'] == team]['Home Clean Sheet %'].values[
+                0] if team in fix_score_pred['Home Team'].values else \
+            fix_score_pred[fix_score_pred['Away Team'] == team]['Away Clean Sheet %'].values[0]
+            clean_sheet_points = (float(clean_sheet_perc.replace('%', '')) / 100) * fpl_bonus_dict['Clean Sheet']
+        else:
+            clean_sheet_points = 0
+        passes = projections['Passes'][i] if projections['Passes'][i] > 0 else 0
+        accurate_passes = projections['Accurate Passes'][i] if projections['Accurate Passes'][i] > 0 else 0
+        pass_completion = accurate_passes / passes if passes > 0 else 0
+        if 20 <= passes < 25 and pass_completion >= 0.7:
+            pass_completion_points = 0.25
+        elif 25 <= passes < 30 and 0.7 < pass_completion < 0.75:
+            pass_completion_points = 0.75
+        elif 30 <= passes < 40 and 0.7 < pass_completion < 0.75:
+            pass_completion_points = 1
+        elif 30 <= passes < 40 and 0.75 <= pass_completion < 0.8:
+            pass_completion_points = 1.5
+        elif 30 <= passes < 40 and pass_completion >= 0.8:
+            pass_completion_points = 2
+        elif 40 <= passes < 50 and 0.7 < pass_completion < 0.75:
+            pass_completion_points = 1.5
+        elif 40 <= passes < 50 and 0.75 <= pass_completion < 0.8:
+            pass_completion_points = 2
+        elif 40 <= passes < 50 and pass_completion >= 0.8:
+            pass_completion_points = 2.5
+        elif 50 <= passes < 60 and 0.7 < pass_completion < 0.8:
+            pass_completion_points = 2
+        elif 50 <= passes < 60 and 0.8 <= pass_completion < 0.85:
+            pass_completion_points = 3
+        elif 50 <= passes < 60 and pass_completion >= 0.85:
+            pass_completion_points = 3.5
+        elif 60 <= passes < 70 and 0.7 < pass_completion < 0.8:
+            pass_completion_points = 2.5
+        elif 60 <= passes < 70 and 0.8 <= pass_completion < 0.85:
+            pass_completion_points = 3.5
+        elif 60 <= passes < 70 and pass_completion >= 0.85:
+            pass_completion_points = 4
+        elif 70 <= passes < 80 and 0.7 <= pass_completion < 0.8:
+            pass_completion_points = 3
+        elif 70 <= passes < 80 and pass_completion >= 0.8:
+            pass_completion_points = 4
+        elif 80 <= passes < 90:
+            pass_completion_points = 4.75
+        elif passes > 100:
+            pass_completion_points = 5
+        else:
+            pass_completion_points = 0
+        fpl_bonus = goal_bonus + assist_bonus + cbit_bonus + goal_conceded_points + clean_sheet_points + pass_completion_points + save_bonus
+        fpl_bonus_df['Goal Bonus'].append(goal_bonus)
+        fpl_bonus_df['Assist Bonus'].append(assist_bonus)
+        fpl_bonus_df['Save Bonus'].append(save_bonus)
+        fpl_bonus_df['CBIT Bonus'].append(cbit_bonus)
+        fpl_bonus_df['Goal Conceded Bonus'].append(goal_conceded_points)
+        fpl_bonus_df['Clean Sheet Bonus'].append(clean_sheet_points)
+        fpl_bonus_df['Pass Completion Bonus'].append(pass_completion_points)
+        fpl_bonus_df['Total'].append(fpl_bonus)
+    fpl_bonus_df = pd.DataFrame(fpl_bonus_df)
+    fpl_bonus_df.sort_values(by='Total', ascending=False, inplace=True)
+    fpl_bonus_df = fpl_bonus_df.round(2)
+    fpl_bonus_df['Total'] = fpl_bonus_df['Total'].clip(lower=0)
+    fpl_bonus_df.reset_index(drop=True, inplace=True)
+    return fpl_bonus_df
+
+
+def get_bonus_points(bps_df, score_preds, expo_factor=0.1):
+    import pandas as pd
+    import numpy as np
+    df = pd.DataFrame()
+    for i in range(len(score_preds)):
+        fixture_id = score_preds['id'].iloc[i]
+        fixture_bps = bps_df[bps_df['fixture_id'] == fixture_id]
+        fixture_bps = fixture_bps.copy()
+        fixture_bps['Total Scaled'] = np.exp(expo_factor * fixture_bps['Total'])
+        fixture_bps = fixture_bps.copy()
+        fixture_bps['Bonus Points'] = (fixture_bps['Total Scaled'] / fixture_bps['Total Scaled'].sum()) * (
+                    len(fixture_bps[fixture_bps['Total'] >= 7.5]) * 0.5)
+        df = pd.concat([df, fixture_bps[['Player', 'Team', 'Opponent', 'Bonus Points']]], ignore_index=True)
+    return df
+
+
+def get_dream11_points(pl_projections, score_preds, dream11_points_dict_gk, dream11_points_dict_def,
+                       dream11_points_dict_mid, dream11_points_dict_fwd):
+    import pandas as pd
+    dream11_points_df = {'fixture_id': [], 'kickoff_datetime': [], 'player_id': [], 'Player': [], 'Position': [],
+                         'Team': [], 'Opponent': [], 'Venue': [], 'PTS': []}
+    dream11_points_df['fixture_id'] = pl_projections['fixture_id'].tolist()
+    dream11_points_df['kickoff_datetime'] = pl_projections['kickoff_datetime'].tolist()
+    dream11_points_df['player_id'] = pl_projections['player_id'].tolist()
+    dream11_points_df['Player'] = pl_projections['Player'].tolist()
+    dream11_points_df['Position'] = pl_projections['Dream11 Position'].tolist()
+    dream11_points_df['Team'] = pl_projections['Team'].tolist()
+    dream11_points_df['Opponent'] = pl_projections['Opponent'].tolist()
+    dream11_points_df['Venue'] = pl_projections['Venue'].tolist()
+    for i in range(len(pl_projections)):
+        fixture_id = pl_projections['fixture_id'][i]
+        fix_score_pred = score_preds[score_preds['id'] == fixture_id]
+        position = pl_projections['Dream11 Position'][i]
+        if position == 'GK':
+            dream11_points_dict = dream11_points_dict_gk
+        elif position == 'DEF':
+            dream11_points_dict = dream11_points_dict_def
+        elif position == 'MID':
+            dream11_points_dict = dream11_points_dict_mid
+        elif position == 'FWD':
+            dream11_points_dict = dream11_points_dict_fwd
+        else:
+            dream11_points_df['PTS'].append(0)
+            continue
+        team = pl_projections['Team'][i]
+        goal_points = pl_projections['Goals'][i] * dream11_points_dict['Goals']
+        assists = pl_projections['Assists'][i] * dream11_points_dict['Assists']
+        shots_on_target = pl_projections['Shots On Target'][i] * dream11_points_dict['Shots On Target']
+        tackles_won = pl_projections['Tackles Won Average'][i] * dream11_points_dict['Tackles Won']
+        key_passes = pl_projections['Key Passes'][i] * dream11_points_dict['Key Passes']
+        accurate_passes = pl_projections['Accurate Passes'][i] * dream11_points_dict['Successful Passes']
+        interceptions = pl_projections['Interceptions'][i] * dream11_points_dict['Interceptions']
+        yellow_cards = pl_projections['Yellow Cards'][i] * dream11_points_dict['Yellow Card']
+        saves = pl_projections['Saves'][i] * dream11_points_dict['Saves'] if position == 'GK' else 0
+        goals_conceded = fix_score_pred[fix_score_pred['Home Team'] == team]['Away Goals'].values[0] if team in \
+                                                                                                        fix_score_pred[
+                                                                                                            'Home Team'].values else \
+        fix_score_pred[fix_score_pred['Away Team'] == team]['Home Goals'].values[0]
+        goal_conceded_points = goals_conceded * dream11_points_dict[
+            'Goals Conceded'] if position == 'GK' and goals_conceded > 0 else 0
+        clean_sheet_perc = fix_score_pred[fix_score_pred['Home Team'] == team]['Home Clean Sheet %'].values[
+            0] if team in fix_score_pred['Home Team'].values else \
+        fix_score_pred[fix_score_pred['Away Team'] == team]['Away Clean Sheet %'].values[0]
+        clean_sheet_points = (float(clean_sheet_perc.replace('%', '')) / 100) * dream11_points_dict[
+            'Clean Sheet'] if 'Clean Sheet' in dream11_points_dict else 0
+        pen_save_points = (0.1 * goals_conceded) * 0.16 * dream11_points_dict[
+            'Penalties Saved'] if 'Penalties Saved' in dream11_points_dict else 0
+        dream11_points = goal_points + assists + shots_on_target + tackles_won + key_passes + accurate_passes + yellow_cards + interceptions + saves + goal_conceded_points + clean_sheet_points + pen_save_points + 4
+        dream11_points_df['PTS'].append(dream11_points)
+    dream11_points_df = pd.DataFrame(dream11_points_df)
+    dream11_points_df.sort_values(by='PTS', ascending=False, inplace=True)
+    dream11_points_df['PTS'] = dream11_points_df['PTS'].round(2)
+    dream11_points_df.reset_index(drop=True, inplace=True)
+    return dream11_points_df
+
+
+def get_draftkings_points(pl_projections, score_preds, draftkings_points_dict_gk, draftkings_points_dict_def,
+                          draftkings_points_dict_mid, draftkings_points_dict_fwd):
+    import pandas as pd
+    import numpy as np
+    from scipy.stats import poisson
+    draftkings_points_df = {'fixture_id': [], 'kickoff_datetime': [], 'player_id': [], 'Player': [], 'Position': [],
+                            'Team': [], 'Opponent': [], 'Venue': [], 'PTS': []}
+    draftkings_points_df['fixture_id'] = pl_projections['fixture_id'].tolist()
+    draftkings_points_df['kickoff_datetime'] = pl_projections['kickoff_datetime'].tolist()
+    draftkings_points_df['player_id'] = pl_projections['player_id'].tolist()
+    draftkings_points_df['Player'] = pl_projections['Player'].tolist()
+    draftkings_points_df['Position'] = pl_projections['Draftkings Position'].tolist()
+    draftkings_points_df['Team'] = pl_projections['Team'].tolist()
+    draftkings_points_df['Opponent'] = pl_projections['Opponent'].tolist()
+    draftkings_points_df['Venue'] = pl_projections['Venue'].tolist()
+    for i in range(len(pl_projections)):
+        fixture_id = pl_projections['fixture_id'][i]
+        fix_score_pred = score_preds[score_preds['id'] == fixture_id]
+        position = pl_projections['Draftkings Position'][i]
+        if position == 'GK':
+            draftkings_points_dict = draftkings_points_dict_gk
+        elif position == 'DEF':
+            draftkings_points_dict = draftkings_points_dict_def
+        elif position == 'MID':
+            draftkings_points_dict = draftkings_points_dict_mid
+        elif position == 'FWD':
+            draftkings_points_dict = draftkings_points_dict_fwd
+        else:
+            draftkings_points_df['PTS'].append(0)
+            continue
+        team = pl_projections['Team'][i]
+        goal_points = pl_projections['Goals'][i] * draftkings_points_dict['Goals']
+        assists = pl_projections['Assists'][i] * draftkings_points_dict['Assists']
+        shots_on_target = pl_projections['Shots On Target'][i] * draftkings_points_dict['Shots On Target']
+        shots_total = pl_projections['Shots Total'][i] * draftkings_points_dict['Shots Total']
+        crosses_total = pl_projections['Total Crosses'][i] * draftkings_points_dict['Total Crosses']
+        tackles_won = pl_projections['Tackles Won Average'][i] * draftkings_points_dict['Tackles Won']
+        key_passes = pl_projections['Key Passes'][i] * draftkings_points_dict['Key Passes']
+        accurate_passes = pl_projections['Accurate Passes'][i] * draftkings_points_dict['Successful Passes']
+        fouls_drawn = pl_projections['Fouls Drawn'][i] * draftkings_points_dict['Fouls Drawn']
+        fouls_committed = pl_projections['Fouls'][i] * draftkings_points_dict['Fouls Committed']
+        interceptions = pl_projections['Interceptions'][i] * draftkings_points_dict[
+            'Interceptions'] if position != 'GK' else 0
+        yellow_cards = pl_projections['Yellow Cards'][i] * draftkings_points_dict['Yellow Card']
+        saves = pl_projections['Saves'][i] * draftkings_points_dict['Saves'] if position == 'GK' else 0
+        goals_conceded = fix_score_pred[fix_score_pred['Home Team'] == team]['Away Goals'].values[0] if team in \
+                                                                                                        fix_score_pred[
+                                                                                                            'Home Team'].values else \
+        fix_score_pred[fix_score_pred['Away Team'] == team]['Home Goals'].values[0]
+        goal_conceded_points = goals_conceded * draftkings_points_dict[
+            'Goals Conceded'] if position == 'GK' and goals_conceded > 0 else 0
+        clean_sheet_perc = fix_score_pred[fix_score_pred['Home Team'] == team]['Home Clean Sheet %'].values[
+            0] if team in fix_score_pred['Home Team'].values else \
+        fix_score_pred[fix_score_pred['Away Team'] == team]['Away Clean Sheet %'].values[0]
+        clean_sheet_points = (float(clean_sheet_perc.replace('%', '')) / 100) * draftkings_points_dict[
+            'Clean Sheet'] if 'Clean Sheet' in draftkings_points_dict else 0
+        pen_save_points = (0.1 * goals_conceded) * 0.16 * draftkings_points_dict[
+            'Penalties Saved'] if 'Penalties Saved' in draftkings_points_dict else 0
+        if 'Win' in draftkings_points_dict:
+            win_perc = fix_score_pred[fix_score_pred['Home Team'] == team]['Home Win %'].values[0] if team in \
+                                                                                                      fix_score_pred[
+                                                                                                          'Home Team'].values else \
+            fix_score_pred[fix_score_pred['Away Team'] == team]['Away Win %'].values[0]
+            win_points = (float(win_perc.replace('%', '')) / 100) * draftkings_points_dict['Win']
+        else:
+            win_points = 0
+        draftkings_points = goal_points + assists + shots_on_target + shots_total + crosses_total + tackles_won + key_passes + accurate_passes + fouls_drawn + fouls_committed + yellow_cards + interceptions + saves + goal_conceded_points + clean_sheet_points + pen_save_points + win_points
+        draftkings_points_df['PTS'].append(draftkings_points)
+    draftkings_points_df = pd.DataFrame(draftkings_points_df)
+    draftkings_points_df.sort_values(by='PTS', ascending=False, inplace=True)
+    draftkings_points_df['PTS'] = draftkings_points_df['PTS'].round(2)
+    draftkings_points_df.reset_index(drop=True, inplace=True)
+    return draftkings_points_df
+
+
+def get_fanteam_points(pl_projections, score_preds, fanteam_points_dict_gk, fanteam_points_dict_def,
+                       fanteam_points_dict_mid, fanteam_points_dict_fwd):
+    import pandas as pd
+    from scipy.stats import poisson
+    fanteam_points_df = {'fixture_id': [], 'kickoff_datetime': [], 'player_id': [], 'Player': [], 'Position': [],
+                         'Team': [], 'Opponent': [], 'Venue': [], 'Price': [], 'FanTeam Points': [], 'Value': []}
+    fanteam_points_df['fixture_id'] = pl_projections['fixture_id'].tolist()
+    fanteam_points_df['kickoff_datetime'] = pl_projections['kickoff_datetime'].tolist()
+    fanteam_points_df['player_id'] = pl_projections['player_id'].tolist()
+    fanteam_points_df['Player'] = pl_projections['Player'].tolist()
+    fanteam_points_df['Position'] = pl_projections['FanTeam Position'].tolist()
+    fanteam_points_df['Team'] = pl_projections['Team'].tolist()
+    fanteam_points_df['Opponent'] = pl_projections['Opponent'].tolist()
+    fanteam_points_df['Venue'] = pl_projections['Venue'].tolist()
+    fanteam_points_df['Price'] = pl_projections['Price'].tolist()
+    for i in range(len(pl_projections)):
+        fixture_id = pl_projections['fixture_id'][i]
+        fix_score_pred = score_preds[score_preds['id'] == fixture_id]
+        position = pl_projections['FanTeam Position'][i]
+        if position == 'GK':
+            fanteam_points_dict = fanteam_points_dict_gk
+        elif position == 'DEF':
+            fanteam_points_dict = fanteam_points_dict_def
+        elif position == 'MID':
+            fanteam_points_dict = fanteam_points_dict_mid
+        elif position == 'FWD':
+            fanteam_points_dict = fanteam_points_dict_fwd
+        else:
+            fanteam_points_df['FanTeam Points'].append(0)
+            continue
+        team = pl_projections['Team'][i]
+        goal_points = pl_projections['Goals'][i] * fanteam_points_dict['Goals']
+        assists = pl_projections['Assists'][i] * fanteam_points_dict['Assists']
+        shots_on_target = pl_projections['Shots On Target'][i] * fanteam_points_dict['Shots On Target']
+        yellow_cards = pl_projections['Yellow Cards'][i] * fanteam_points_dict['Yellow Card']
+        saves = pl_projections['Saves'][i] * fanteam_points_dict['Saves'] if position == 'GK' else 0
+        full_match_perc = pl_projections['Full Match Hit Rate'][i]
+        full_match_points = full_match_perc * fanteam_points_dict[
+            'Full Match'] if 'Full Match' in fanteam_points_dict else 0
+        if 'Goals Conceded' in fanteam_points_dict:
+            # Get goals conceded from fix_score_pred
+            goals_conceded = fix_score_pred[fix_score_pred['Home Team'] == team]['Away Goals'].values[0] if team in \
+                                                                                                            fix_score_pred[
+                                                                                                                'Home Team'].values else \
+            fix_score_pred[fix_score_pred['Away Team'] == team]['Home Goals'].values[0]
+            goal_conceded_points = (poisson.pmf(2, goals_conceded) + poisson.pmf(3, goals_conceded) + (
+                        (poisson.pmf(4, goals_conceded) + poisson.pmf(5, goals_conceded)) * 2) + (
+                                                poisson.pmf(6, goals_conceded) + poisson.pmf(7, goals_conceded)) * 3) * \
+                                   fanteam_points_dict['Goals Conceded'] if goals_conceded > 0 else 0
+        else:
+            goal_conceded_points = 0
+        if 'Clean Sheet' in fanteam_points_dict:
+            # Get clean sheet percentage from fix_score_pred
+            clean_sheet_perc = fix_score_pred[fix_score_pred['Home Team'] == team]['Home Clean Sheet %'].values[
+                0] if team in fix_score_pred['Home Team'].values else \
+            fix_score_pred[fix_score_pred['Away Team'] == team]['Away Clean Sheet %'].values[0]
+            clean_sheet_points = (float(clean_sheet_perc.replace('%', '')) / 100) * fanteam_points_dict['Clean Sheet']
+        else:
+            clean_sheet_points = 0
+        if 'Penalties Saved' in fanteam_points_dict:
+            pen_save_points = (0.1 * goals_conceded) * 0.16 * fanteam_points_dict['Penalties Saved']
+        else:
+            pen_save_points = 0
+        if 'Win' in fanteam_points_dict:
+            win_perc = fix_score_pred[fix_score_pred['Home Team'] == team]['Home Win %'].values[0] if team in \
+                                                                                                      fix_score_pred[
+                                                                                                          'Home Team'].values else \
+            fix_score_pred[fix_score_pred['Away Team'] == team]['Away Win %'].values[0]
+            win_points = (float(win_perc.replace('%', '')) / 100) * fanteam_points_dict['Win']
+        else:
+            win_points = 0
+        if 'Lose' in fanteam_points_dict:
+            lose_perc = fix_score_pred[fix_score_pred['Home Team'] == team]['Away Win %'].values[0] if team in \
+                                                                                                       fix_score_pred[
+                                                                                                           'Home Team'].values else \
+            fix_score_pred[fix_score_pred['Away Team'] == team]['Home Win %'].values[0]
+            lose_points = (float(lose_perc.replace('%', '')) / 100) * fanteam_points_dict['Lose']
+        fanteam_points = goal_points + assists + shots_on_target + yellow_cards + saves + clean_sheet_points + goal_conceded_points + pen_save_points + win_points + lose_points + full_match_points + 2
+        fanteam_points_df['FanTeam Points'].append(fanteam_points)
+        if pl_projections['Price'][i] > 0:
+            value = (fanteam_points / pl_projections['Price'][i]).round(2)
+        else:
+            value = 0
+        fanteam_points_df['Value'].append(value)
+    fanteam_points_df = pd.DataFrame(fanteam_points_df)
+    fanteam_points_df.sort_values(by='FanTeam Points', ascending=False, inplace=True)
+    fanteam_points_df['FanTeam Points'] = fanteam_points_df['FanTeam Points'].round(2)
+    fanteam_points_df.reset_index(drop=True, inplace=True)
+    return fanteam_points_df
+
+
+def get_opta_points(pl_projections, score_preds, opta_points_dict):
+    import pandas as pd
+    opta_points_df = {'fixture_id': [], 'kickoff_datetime': [], 'player_id': [], 'Player': [], 'Position': [],
+                      'Team': [], 'Opponent': [], 'Venue': [], 'PTS': [], 'Floor PTS': []}
+    opta_points_df['fixture_id'] = pl_projections['fixture_id'].tolist()
+    opta_points_df['kickoff_datetime'] = pl_projections['kickoff_datetime'].tolist()
+    opta_points_df['player_id'] = pl_projections['player_id'].tolist()
+    opta_points_df['Player'] = pl_projections['Player'].tolist()
+    opta_points_df['Position'] = pl_projections['Position'].tolist()
+    opta_points_df['Team'] = pl_projections['Team'].tolist()
+    opta_points_df['Opponent'] = pl_projections['Opponent'].tolist()
+    opta_points_df['Venue'] = pl_projections['Venue'].tolist()
+
+    for i in range(len(pl_projections)):
+        fixture_id = pl_projections['fixture_id'][i]
+        fix_score_pred = score_preds[score_preds['id'] == fixture_id]
+        team = pl_projections['Team'][i]
+        position = pl_projections['Position'][i]
+        goals = pl_projections['Goals'][i] * opta_points_dict['Goals']
+        assists = pl_projections['Assists'][i] * opta_points_dict['Assists']
+        shots_off = (pl_projections['Shots Total'][i] - pl_projections['Shots On Target'][i]) * opta_points_dict[
+            'Shots Off']
+        shots_on_target = pl_projections['Shots On Target'][i] * opta_points_dict['Shots On Target']
+        passes = pl_projections['Passes'][i] * opta_points_dict['Passes']
+        interceptions = pl_projections['Interceptions'][i] * opta_points_dict['Interceptions']
+        tackles = pl_projections['Tackles'][i] * opta_points_dict['Tackles']
+        crosses = pl_projections['Total Crosses'][i] * opta_points_dict['Total Crosses']
+        yellow_cards = pl_projections['Yellow Cards'][i] * opta_points_dict['Yellow Cards']
+        fouls = pl_projections['Fouls'][i] * opta_points_dict['Fouls']
+        fouls_drawn = pl_projections['Fouls Drawn'][i] * opta_points_dict['Fouls Drawn']
+        saves = pl_projections['Saves'][i] * opta_points_dict['Saves']
+        offsides = pl_projections['Offsides'][i] * opta_points_dict['Offsides']
+        blocked_shots = pl_projections['Blocked Shots Average'][i] * opta_points_dict['Blocked Shots']
+        goals_conceded = fix_score_pred[fix_score_pred['Home Team'] == team]['Away Goals'].values[0] if team in \
+                                                                                                        fix_score_pred[
+                                                                                                            'Home Team'].values else \
+        fix_score_pred[fix_score_pred['Away Team'] == team]['Home Goals'].values[0]
+        goals_conceded_points = goals_conceded * opta_points_dict['Goals Conceded']
+        pen_save_points = (0.1 * goals_conceded) * 0.16 * opta_points_dict['Penalties Saved'] if position == 'GK' else 0
+        if position == 'GK':
+            goals_conceded_points = goals_conceded_points * 6
+        points = goals + assists + shots_off + shots_on_target + passes + interceptions + tackles + crosses + yellow_cards + fouls + fouls_drawn + saves + offsides + blocked_shots + goals_conceded_points + pen_save_points
+        floor_points = shots_off + shots_on_target + passes + interceptions + tackles + crosses + yellow_cards + fouls + fouls_drawn + saves + offsides + blocked_shots + goals_conceded_points + pen_save_points
+        opta_points_df['PTS'].append(points)
+        opta_points_df['Floor PTS'].append(floor_points)
+    opta_points = pd.DataFrame(opta_points_df)
+    opta_points.sort_values(by='PTS', ascending=False, inplace=True)
+    opta_points = opta_points.round(2)
+    opta_points.reset_index(drop=True, inplace=True)
+    return opta_points
