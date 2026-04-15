@@ -1028,23 +1028,29 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
     player_minutes = player_minutes[player_minutes['minutes'] > mins]
     player_minutes.reset_index(drop=True, inplace=True)  # NEW - reset index after filtering
 
-    ## NEW - This whole if statement is new - to filter out international games if required
+    # Vectorized international filter: merge fixture → competition → sub_type,
+    # then keep only domestic/domestic_cup/cup_international. Preserves the original
+    # behavior that any unmapped fixture or competition is dropped (via the how='left'
+    # + .isin() which returns False for NaN).
     if not include_international:
-        drop_indices = []
-        for i in range(len(player_minutes)):
-            fixture_id = player_minutes['fixture_id'].iloc[i]
-            fixture = fixtures[fixtures['id'] == fixture_id]
-            comp_id = fixture['competition_id'].values[0]
-            try:
-                if comps[comps['id'] == comp_id]['sub_type'].values[0] in ['domestic', 'domestic_cup',
-                                                                           'cup_international']:
-                    continue
-                else:
-                    drop_indices.append(i)
-            except:
-                drop_indices.append(i)
-        player_minutes.drop(drop_indices, inplace=True)
-        player_minutes.reset_index(drop=True, inplace=True)
+        _fix_to_comp = (
+            fixtures[['id', 'competition_id']]
+            .drop_duplicates(subset=['id'])
+            .rename(columns={'id': 'fixture_id'})
+        )
+        _comp_to_subtype = (
+            comps[['id', 'sub_type']]
+            .drop_duplicates(subset=['id'])
+            .rename(columns={'id': 'competition_id'})
+        )
+        _fixture_subtype = _fix_to_comp.merge(
+            _comp_to_subtype, on='competition_id', how='left'
+        )[['fixture_id', 'sub_type']]
+        player_minutes = player_minutes.merge(_fixture_subtype, on='fixture_id', how='left')
+        player_minutes = player_minutes[
+            player_minutes['sub_type'].isin(['domestic', 'domestic_cup', 'cup_international'])
+        ]
+        player_minutes = player_minutes.drop(columns=['sub_type']).reset_index(drop=True)
 
     player_stats = player_stats[player_stats['name'] == stat]
     player_stats.drop(columns=['team_id'], inplace=True)
@@ -1060,49 +1066,59 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
     player_stats.reset_index(drop=True, inplace=True)
 
     if stat == 'Expected Goals (xG)':
-        drop_indices = []  # NEW
+        # Vectorized xG zero filter: drop rows where xG=0 AND the player took shots
+        # (indicates missing xG data rather than a genuinely zero-xG game).
+        # Preserves the original behavior: keep if xG>0, keep if no shots row exists,
+        # keep if shots=0, drop only if shots>0 and xG=0.
         player_stats['value'] = player_stats['value'].astype(float)
-
-        ## NEW - This whole for loop is new - to drop games with 0 xG and more than 0 shots
-        for i in range(len(player_stats)):
-            if player_stats['value'].iloc[i] > 0:
-                continue
-            else:
-                fixture_id = player_stats['fixture_id'].iloc[i]
-                player_shots = player_df[player_df['stats_type_id'] == get_stat_id('Shots Total', stats_types)]
-                shots = player_shots[player_shots['fixture_id'] == fixture_id]
-                if shots.empty:
-                    continue
-                elif shots['value'].values[0] > 0:
-                    drop_indices.append(i)
-        player_stats.drop(drop_indices, inplace=True)
-        player_stats.reset_index(drop=True, inplace=True)
+        _shots_id = get_stat_id('Shots Total', stats_types)
+        _shots_lookup = (
+            player_df[player_df['stats_type_id'] == _shots_id][['fixture_id', 'value']]
+            .rename(columns={'value': '_shots'})
+            .drop_duplicates(subset=['fixture_id'])
+        )
+        player_stats = player_stats.merge(_shots_lookup, on='fixture_id', how='left')
+        _drop_mask = (
+            (player_stats['value'] == 0)
+            & player_stats['_shots'].notna()
+            & (player_stats['_shots'] > 0)
+        )
+        player_stats = player_stats[~_drop_mask].drop(columns=['_shots']).reset_index(drop=True)
 
     else:
         player_stats['value'] = player_stats['value'].astype(int)
     player_stats.rename(columns={'name': 'Game', 'value': f'Player {stat}'}, inplace=True)
-    # if games is not None:
-    #    player_stats = player_stats.iloc[-games:]
-    # player_stats.reset_index(drop=True)
-    team_stat_list = []
-    for i in range(len(player_stats)):
-        team_id = player_stats['team_id'].iloc[i]
-        fixture_id = player_stats['fixture_id'].iloc[i]
-        team_stat_df = team_df[team_df['team_id'] == team_id]
-        team_stat_df = team_stat_df[team_stat_df['fixture_id'] == fixture_id]
-        if stat == 'Fouls Drawn':
-            team_stat_df = team_df[team_df['fixture_id'] == fixture_id]
-            team_stat_df = team_stat_df[team_stat_df['team_id'] != team_id]
-            team_stat = team_stat_df[team_stat_df['stats_type_id'] == get_stat_id('Fouls', stats_types)]
-        elif stat == 'Accurate Passes':
-            team_stat = team_stat_df[team_stat_df['stats_type_id'] == get_stat_id('Successful Passes', stats_types)]
-        else:
-            team_stat = team_stat_df[team_stat_df['stats_type_id'] == get_stat_id(stat, stats_types)]
-        try:
-            team_stat_list.append(team_stat['value'].values[0])
-        except:
-            team_stat_list.append(0)
-    player_stats[f'Team {stat}'] = team_stat_list
+
+    # Vectorized team stat lookup: replaces the per-row loop that filtered team_df
+    # by (team_id, fixture_id, stats_type_id) for every player row.
+    # Three cases:
+    #   - Fouls Drawn → look up the OPPONENT's Fouls value (team_id != player's team_id)
+    #   - Accurate Passes → look up the team's "Successful Passes" stat
+    #   - Everything else → look up the team's own value for this stat
+    # Missing data preserves the original fall-through to 0 via fillna(0).
+    _team_col = f'Team {stat}'
+    if stat == 'Fouls Drawn':
+        _fouls_id = get_stat_id('Fouls', stats_types)
+        _fouls = team_df[team_df['stats_type_id'] == _fouls_id][['fixture_id', 'team_id', 'value']]
+        # Self-merge on fixture_id to get (self, opponent) pairs per fixture,
+        # then keep only opposite-team rows so each player gets the OPPONENT's fouls.
+        _fouls_cross = _fouls.merge(_fouls, on='fixture_id', suffixes=('_self', '_opp'))
+        _fouls_cross = _fouls_cross[_fouls_cross['team_id_self'] != _fouls_cross['team_id_opp']]
+        _team_lookup = (
+            _fouls_cross[['fixture_id', 'team_id_self', 'value_opp']]
+            .rename(columns={'team_id_self': 'team_id', 'value_opp': _team_col})
+            .drop_duplicates(subset=['fixture_id', 'team_id'])
+        )
+    else:
+        _lookup_stat_name = 'Successful Passes' if stat == 'Accurate Passes' else stat
+        _target_stat_id = get_stat_id(_lookup_stat_name, stats_types)
+        _team_lookup = (
+            team_df[team_df['stats_type_id'] == _target_stat_id][['fixture_id', 'team_id', 'value']]
+            .rename(columns={'value': _team_col})
+            .drop_duplicates(subset=['fixture_id', 'team_id'])
+        )
+    player_stats = player_stats.merge(_team_lookup, on=['fixture_id', 'team_id'], how='left')
+    player_stats[_team_col] = player_stats[_team_col].fillna(0)
     # if stat != 'Goals' and stat != 'Assists':
     #    player_stats[f'Team {stat}'].replace({0:None}, inplace=True)
     #    player_stats.dropna(subset=[f'Team {stat}'], inplace=True)
@@ -1140,9 +1156,8 @@ def get_weighted_player_stats(df, team_df, player_id, team_id, stat, stats_types
     player_stats['Weight'] = weight ** (player_stats['Weeks Since Kickoff'] - 3)  # UPDATED - changed to -3
     player_stats.loc[
         player_stats['Weeks Since Kickoff'] < 4, 'Weight'] = 1  # UPDATED - set weight to 1 for last 4 weeks
-    for i in range(len(player_stats)):
-        if player_stats.loc[i, 'team_id'] != team_id:  # UPDATED - changed to team_id
-            player_stats.loc[i, 'Weight'] = player_stats.loc[i, 'Weight'] * 0.5
+    # Vectorized: halve the weight on games played for a different team
+    player_stats.loc[player_stats['team_id'] != team_id, 'Weight'] *= 0.5
     # if stat != 'Goals' and stat != 'Assists':
     #    player_stats[f'Weighted {stat} Proportion'] = player_stats[f'{stat} Proportion'] * player_stats['Weight']
     # else:
