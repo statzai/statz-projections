@@ -8,14 +8,18 @@ FastAPI + Docker service that generates football fixture, team, and player proje
 
 1. Edit locally in this clone
 2. `git commit` and `git push origin main`
-3. SSH to the projection server and pull:
+3. SSH to the projection server, pull, and rebuild:
 
    ```bash
    ssh -p 2223 projections@176.74.18.125
    cd /home/projections/site/statz-projection
    git pull
-   docker compose restart statz-projection   # only if the change needs a container restart
+   docker compose up -d --build statz-projection
    ```
+
+**Why `up -d --build` and not `restart`:** the Dockerfile uses `COPY . .` to bake the source into the image at build time, so `docker compose restart` reuses the existing image and silently keeps running the old code. `up -d --build` rebuilds the image from the updated source and recreates the container with the new image. The pip layer is cached so rebuilds of source-only changes take ~30 seconds.
+
+Use `restart` only when you've changed environment variables or bind-mounted files (e.g. the xlsx configs in `app/data/`) — those don't need a rebuild.
 
 ## Data files
 
