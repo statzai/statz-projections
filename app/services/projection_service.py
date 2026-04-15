@@ -230,12 +230,23 @@ class ProjectionService:
                         league_above, league_below, league_standings,
                         league_below_attack_weight, league_below_defense_weight,
                         league_above_id, league_below_id, xG, fpl, b365_odds,
-                        season_fixtures, total_matches, players):
+                        season_fixtures, total_matches, players, mode="full"):
         """
         Shared preparation: gap-fill model/accuracy datasets, retrain models,
         calculate accuracy, build ratings with MV adjustment.
         Returns the computed ratings DataFrame.
+
+        mode="refresh" skips the historical accuracy dataset gap-fill and the
+        aggregated accuracy metrics calculation. These blocks are expensive
+        (looping past fixtures + merging team stats) and aren't meaningfully
+        different from what the 2am full run already computed a few hours
+        earlier, so the 1:35pm refresh run skips them entirely. The
+        projections() method still appends NEW projected values for upcoming
+        fixtures to the accuracy dataset after _prepare_league() returns —
+        that append path is NOT skipped, so historical tracking stays intact.
         """
+        skip_accuracy = (mode == "refresh")
+        logger.info(f"[{league}] _prepare_league mode={mode} skip_accuracy={skip_accuracy}")
         model_dataset_league['comp_id'] = league_id
         previous_fixtures = model_dataset_league[model_dataset_league.isnull().any(axis=1)]
         for i in range(len(previous_fixtures)):
@@ -263,11 +274,17 @@ class ProjectionService:
         # In[ ]:
 
         ## THIS IS ALL NEW - FILL IN ANY MISSING TEAM STATS IN ACCURACY DATASET
+        ## Skipped on refresh runs — 2am run already gap-filled the same past
+        ## fixtures a few hours earlier, no new matches have completed since.
 
-        previous_accuracy_fixtures = projection_accuracy_dataset_league[
-            projection_accuracy_dataset_league.isnull().any(axis=1)]
-        previous_accuracy_fixtures = previous_accuracy_fixtures[
-            previous_accuracy_fixtures['kickoff_datetime'] < pd.to_datetime('today')]
+        if skip_accuracy:
+            logger.info(f"[{league}] skipping accuracy gap-fill (refresh mode)")
+            previous_accuracy_fixtures = projection_accuracy_dataset_league.iloc[0:0]  # empty
+        else:
+            previous_accuracy_fixtures = projection_accuracy_dataset_league[
+                projection_accuracy_dataset_league.isnull().any(axis=1)]
+            previous_accuracy_fixtures = previous_accuracy_fixtures[
+                previous_accuracy_fixtures['kickoff_datetime'] < pd.to_datetime('today')]
         for i in range(len(previous_accuracy_fixtures)):
             fixture_id = previous_accuracy_fixtures.iloc[i]['fixture_id']
             home_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Home Team'], teams)
@@ -370,87 +387,88 @@ class ProjectionService:
         # In[ ]:
 
         ## THIS IS ALL NEW - CALCULATE AND SAVE PROJECTION ACCURACY
+        ## Skipped on refresh runs — the 2am full run already computed and
+        ## saved these CSVs a few hours earlier. Rebuilding them at 1:35pm is
+        ## wasted work since the underlying historical data hasn't changed.
 
-        logger.info(f"[{league}] Step: calculating projection accuracy")
+        if skip_accuracy:
+            logger.info(f"[{league}] skipping accuracy metrics + save (refresh mode)")
+        else:
+            logger.info(f"[{league}] Step: calculating projection accuracy")
 
-        cols = ['Home {}', 'Away {}', 'Total {}', 'Total Projected {}', 'Home Projected {}', 'Away Projected {}']
-        metrics = [
-            ('Fixture Error', lambda df, s: df[f'Total Projected {s}'] - df[f'Total {s}']),
-            ('Home Team Error', lambda df, s: df[f'Home Projected {s}'] - df[f'Home {s}']),
-            ('Away Team Error', lambda df, s: df[f'Away Projected {s}'] - df[f'Away {s}']),
-        ]
-        abs_metrics = [
-            ('Fixture Abs Error', 'Fixture Error'),
-            ('Home Team Abs Error', 'Home Team Error'),
-            ('Away Team Abs Error', 'Away Team Error'),
-        ]
+            cols = ['Home {}', 'Away {}', 'Total {}', 'Total Projected {}', 'Home Projected {}', 'Away Projected {}']
+            metrics = [
+                ('Fixture Error', lambda df, s: df[f'Total Projected {s}'] - df[f'Total {s}']),
+                ('Home Team Error', lambda df, s: df[f'Home Projected {s}'] - df[f'Home {s}']),
+                ('Away Team Error', lambda df, s: df[f'Away Projected {s}'] - df[f'Away {s}']),
+            ]
+            abs_metrics = [
+                ('Fixture Abs Error', 'Fixture Error'),
+                ('Home Team Abs Error', 'Home Team Error'),
+                ('Away Team Abs Error', 'Away Team Error'),
+            ]
 
-        def calc_errors(df, stat):
-            d = {name: func(df, stat) for name, func in metrics}
-            for name, base in abs_metrics:
-                d[name] = d[base].abs()
-            return d
+            def calc_errors(df, stat):
+                d = {name: func(df, stat) for name, func in metrics}
+                for name, base in abs_metrics:
+                    d[name] = d[base].abs()
+                return d
 
-        def summarize(df, stat):
-            d = calc_errors(df, stat)
-            return {
-                'Stat': stat,
-                'Fixture Error': d['Fixture Error'].mean(),
-                'Home Team Error': d['Home Team Error'].mean(),
-                'Away Team Error': d['Away Team Error'].mean(),
-                'Fixture Abs Error': d['Fixture Abs Error'].mean(),
-                'Home Team Abs Error': d['Home Team Abs Error'].mean(),
-                'Away Team Abs Error': d['Away Team Abs Error'].mean(),
-            }
+            def summarize(df, stat):
+                d = calc_errors(df, stat)
+                return {
+                    'Stat': stat,
+                    'Fixture Error': d['Fixture Error'].mean(),
+                    'Home Team Error': d['Home Team Error'].mean(),
+                    'Away Team Error': d['Away Team Error'].mean(),
+                    'Fixture Abs Error': d['Fixture Abs Error'].mean(),
+                    'Home Team Abs Error': d['Home Team Abs Error'].mean(),
+                    'Away Team Abs Error': d['Away Team Abs Error'].mean(),
+                }
 
-        projection_accuracy_dataset_all_copy = projection_accuracy_dataset_all.dropna().copy()
-        projection_accuracy_dataset_all_copy = projection_accuracy_dataset_all_copy[
-            projection_accuracy_dataset_all_copy['Total Passes'] > 0]
-        projection_accuracy_dataset_all_copy.reset_index(drop=True, inplace=True)
-        projection_accuracy_dataset_league_copy = projection_accuracy_dataset_league.dropna().copy()
-        projection_accuracy_dataset_league_copy = projection_accuracy_dataset_league_copy[
-            projection_accuracy_dataset_league_copy['Total Passes'] > 0]
-        projection_accuracy_dataset_league_copy.reset_index(drop=True, inplace=True)
-        accuracy_df_league = pd.DataFrame(
-            [summarize(projection_accuracy_dataset_league_copy, stat) for stat in stat_list])
-        accuracy_df_all = pd.DataFrame([summarize(projection_accuracy_dataset_all_copy, stat) for stat in stat_list])
-        accuracy_df_league = accuracy_df_league.round(2)
-        accuracy_df_all = accuracy_df_all.round(2)
-        # accuracy_df_league.to_csv(rf"{data_folder_path}\{league} Projection Accuracy.csv", index=False)
-        # accuracy_df_all.to_csv(rf"{data_folder_path}\All Leagues Projection Accuracy.csv", index=False)
+            projection_accuracy_dataset_all_copy = projection_accuracy_dataset_all.dropna().copy()
+            projection_accuracy_dataset_all_copy = projection_accuracy_dataset_all_copy[
+                projection_accuracy_dataset_all_copy['Total Passes'] > 0]
+            projection_accuracy_dataset_all_copy.reset_index(drop=True, inplace=True)
+            projection_accuracy_dataset_league_copy = projection_accuracy_dataset_league.dropna().copy()
+            projection_accuracy_dataset_league_copy = projection_accuracy_dataset_league_copy[
+                projection_accuracy_dataset_league_copy['Total Passes'] > 0]
+            projection_accuracy_dataset_league_copy.reset_index(drop=True, inplace=True)
+            accuracy_df_league = pd.DataFrame(
+                [summarize(projection_accuracy_dataset_league_copy, stat) for stat in stat_list])
+            accuracy_df_all = pd.DataFrame([summarize(projection_accuracy_dataset_all_copy, stat) for stat in stat_list])
+            accuracy_df_league = accuracy_df_league.round(2)
+            accuracy_df_all = accuracy_df_all.round(2)
 
-        # Za league
-        file_path_league = os.path.join(data_folder_path, f"{league} Projection Accuracy.csv")
-        accuracy_df_league.to_csv(file_path_league, index=False)
+            # Za league
+            file_path_league = os.path.join(data_folder_path, f"{league} Projection Accuracy.csv")
+            accuracy_df_league.to_csv(file_path_league, index=False)
 
-        # Za sve lige
-        file_path_all = os.path.join(data_folder_path, "All Leagues Projection Accuracy.csv")
-        accuracy_df_all.to_csv(file_path_all, index=False)
+            # Za sve lige
+            file_path_all = os.path.join(data_folder_path, "All Leagues Projection Accuracy.csv")
+            accuracy_df_all.to_csv(file_path_all, index=False)
 
-        # In[ ]:
-        logger.info(f"[{league}] Step: projection accuracy saved")
-        ## THIS IS ALL NEW - ADD ABSOLUTE ERROR COLUMNS TO ACCURACY DATASET
+            logger.info(f"[{league}] Step: projection accuracy saved")
+            ## THIS IS ALL NEW - ADD ABSOLUTE ERROR COLUMNS TO ACCURACY DATASET
 
-        for stat in stat_list:
-            # Calculate absolute errors
-            for prefix in ['Total', 'Home', 'Away']:
-                abs_err_col = f"{prefix} {stat} Absolute Error"
-                proj_col = f"{prefix} Projected {stat}"
-                actual_col = f"{prefix} {stat}"
-                projection_accuracy_dataset_all_copy[abs_err_col] = (
-                            projection_accuracy_dataset_all_copy[proj_col] - projection_accuracy_dataset_all_copy[
-                        actual_col]).abs()
-                # Move the absolute error column next to projected column
-                cols = list(projection_accuracy_dataset_all_copy.columns)
-                if abs_err_col in cols and proj_col in cols:
-                    idx = cols.index(proj_col) + 1
-                    cols.remove(abs_err_col)
-                    cols.insert(idx, abs_err_col)
-                    projection_accuracy_dataset_all_copy = projection_accuracy_dataset_all_copy[cols]
+            for stat in stat_list:
+                # Calculate absolute errors
+                for prefix in ['Total', 'Home', 'Away']:
+                    abs_err_col = f"{prefix} {stat} Absolute Error"
+                    proj_col = f"{prefix} Projected {stat}"
+                    actual_col = f"{prefix} {stat}"
+                    projection_accuracy_dataset_all_copy[abs_err_col] = (
+                                projection_accuracy_dataset_all_copy[proj_col] - projection_accuracy_dataset_all_copy[
+                            actual_col]).abs()
+                    # Move the absolute error column next to projected column
+                    cols = list(projection_accuracy_dataset_all_copy.columns)
+                    if abs_err_col in cols and proj_col in cols:
+                        idx = cols.index(proj_col) + 1
+                        cols.remove(abs_err_col)
+                        cols.insert(idx, abs_err_col)
+                        projection_accuracy_dataset_all_copy = projection_accuracy_dataset_all_copy[cols]
 
-        # projection_accuracy_dataset_all_copy.to_excel(rf"{data_folder_path}\Accuracy Dataset with Errors.xlsx",
-        #                                               index=False)
-        ProjectionService._write_df(projection_accuracy_dataset_all_copy, os.path.join(data_folder_path, "Accuracy Dataset with Errors"))
+            ProjectionService._write_df(projection_accuracy_dataset_all_copy, os.path.join(data_folder_path, "Accuracy Dataset with Errors"))
 
         # ## **Team Ratings**
         #
@@ -707,6 +725,7 @@ class ProjectionService:
             league_above_id=league_above_id, league_below_id=league_below_id,
             xG=xG, fpl=fpl, b365_odds=b365_odds,
             season_fixtures=season_fixtures, total_matches=total_matches, players=players,
+            mode=(league_request.mode if hasattr(league_request, 'mode') and league_request.mode else "full"),
         )
 
         # ## **Make Predictions for Next Fixture Round**
@@ -1400,6 +1419,7 @@ class ProjectionService:
             league_above_id=league_above_id, league_below_id=league_below_id,
             xG=xG, fpl=fpl, b365_odds=b365_odds,
             season_fixtures=season_fixtures, total_matches=total_matches, players=players,
+            mode=(league_request.mode if hasattr(league_request, 'mode') and league_request.mode else "full"),
         )
 
         # ## **Make Predictions for Next Fixture Round**
@@ -1589,6 +1609,7 @@ class ProjectionService:
             league_above_id=league_above_id, league_below_id=league_below_id,
             xG=xG, fpl=fpl, b365_odds=b365_odds,
             season_fixtures=season_fixtures, total_matches=total_matches, players=players,
+            mode=(league_request.mode if hasattr(league_request, 'mode') and league_request.mode else "full"),
         )
 
         # ## **Make Predictions for Next Fixture Round**
@@ -1922,6 +1943,7 @@ class ProjectionService:
             league_above_id=league_above_id, league_below_id=league_below_id,
             xG=xG, fpl=fpl, b365_odds=b365_odds,
             season_fixtures=season_fixtures, total_matches=total_matches, players=players,
+            mode=(league_request.mode if hasattr(league_request, 'mode') and league_request.mode else "full"),
         )
 
         # ## **Make Predictions for Next Fixture Round**
@@ -2375,6 +2397,7 @@ class ProjectionService:
             league_above_id=league_above_id, league_below_id=league_below_id,
             xG=xG, fpl=fpl, b365_odds=b365_odds,
             season_fixtures=season_fixtures, total_matches=total_matches, players=players,
+            mode=(league_request.mode if hasattr(league_request, 'mode') and league_request.mode else "full"),
         )
 
         # ## **Make Predictions for Next Fixture Round**
@@ -3002,6 +3025,7 @@ class ProjectionService:
             league_above_id=league_above_id, league_below_id=league_below_id,
             xG=xG, fpl=fpl, b365_odds=b365_odds,
             season_fixtures=season_fixtures, total_matches=total_matches, players=players,
+            mode=(league_request.mode if hasattr(league_request, 'mode') and league_request.mode else "full"),
         )
 
         # ## **Make Predictions for Next Fixture Round**
