@@ -1,0 +1,9 @@
+# Force LF line endings for all text files (prevents Windows CRLF churn)
+* text=auto eol=lf
+
+# Binary files — never text-convert
+*.xlsx binary
+*.parquet binary
+*.sav binary
+*.pkl binary
+*.csv binary
