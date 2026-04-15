@@ -133,19 +133,42 @@ class ProjectionService:
             ctx.xG = False
             ctx.fpl = False
 
-        # Load shared source data from cache
+        # Load shared source data from cache. Everything is now .copy()ed to
+        # prevent any in-place mutation inside a projection run from polluting
+        # the shared cache for subsequent runs. Previously only the "big 4"
+        # (player_stats, team_stats, standings, fixtures_df) were copied and
+        # the others were passed by reference — which matched an observed
+        # warm-cache vs fresh-cache drift of ~12 extra qualified players.
         ctx.player_stats = ProjectionService._cache.player_stats.copy()
         ctx.team_stats = ProjectionService._cache.team_stats.copy()
         ctx.standings_all = ProjectionService._cache.standings.copy()
-        ctx.seasons = ProjectionService._cache.seasons
-        ctx.comps = ProjectionService._cache.comps
-        ctx.comp_teams = ProjectionService._cache.comp_teams
-        ctx.teams = ProjectionService._cache.teams
+        ctx.seasons = ProjectionService._cache.seasons.copy()
+        ctx.comps = ProjectionService._cache.comps.copy()
+        ctx.comp_teams = ProjectionService._cache.comp_teams.copy()
+        ctx.teams = ProjectionService._cache.teams.copy()
         ctx.players = pd.read_csv(os.path.join(ctx.data_folder_path, "players.csv"))
         ctx.players['display_name'] = ctx.players['display_name'].str.strip()
         ctx.fixtures_df = ProjectionService._cache.fixtures_df.copy()
-        ctx.b365_odds = ProjectionService._cache.b365_odds
-        ctx.stats_types = ProjectionService._cache.stats_types
+        ctx.b365_odds = ProjectionService._cache.b365_odds.copy()
+        ctx.stats_types = ProjectionService._cache.stats_types.copy()
+
+        # TEMP DEBUG (2026-04-15): log row counts of the cache itself (not the
+        # copies) so we can see whether the SHARED cache state is drifting
+        # between runs. If these counts change run-to-run, pollution is
+        # happening directly on the cache dataframes. Remove once verified.
+        logger.info(
+            f"[{league}] cache rows: "
+            f"player_stats={len(ProjectionService._cache.player_stats)} "
+            f"team_stats={len(ProjectionService._cache.team_stats)} "
+            f"fixtures_df={len(ProjectionService._cache.fixtures_df)} "
+            f"teams={len(ProjectionService._cache.teams)} "
+            f"comps={len(ProjectionService._cache.comps)} "
+            f"comp_teams={len(ProjectionService._cache.comp_teams)} "
+            f"seasons={len(ProjectionService._cache.seasons)} "
+            f"b365_odds={len(ProjectionService._cache.b365_odds)} "
+            f"stats_types={len(ProjectionService._cache.stats_types)} "
+            f"standings={len(ProjectionService._cache.standings)}"
+        )
 
         # Model and accuracy datasets
         ctx.model_dataset_all = ProjectionService._read_df(
