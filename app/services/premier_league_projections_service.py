@@ -1695,4 +1695,4 @@ class PremierLeagueProjectionsService:
         player_stat_probs = player_stat_probs.round(2)
         file_path = os.path.join(save_file_path, f"{league} Player Stat Props.csv")
         player_stat_probs.to_csv(file_path, index=False)
-        await insert_players_stats_async(player_stat_probs)
+        await insert_players_stats_async(player_stat_probs, teams=teams)

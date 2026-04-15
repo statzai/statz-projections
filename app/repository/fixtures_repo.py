@@ -1,5 +1,5 @@
 import logging
-from app.repository.db_utils import execute_chunked
+from app.repository.db_utils import execute_chunked, resolve_team_id
 
 logger = logging.getLogger("fixtures_repo")
 
@@ -10,7 +10,7 @@ def clean_percentage(value):
     return float(value) if value is not None else None
 
 
-async def insert_fixtures_async(data_list):
+async def insert_fixtures_async(data_list, teams=None):
     if len(data_list) == 0:
         return
 
@@ -40,6 +40,8 @@ async def insert_fixtures_async(data_list):
     values = [
         (
             row['fixture_id'],
+            resolve_team_id(row['home_team_name'], teams) if teams is not None else None,
+            resolve_team_id(row['away_team_name'], teams) if teams is not None else None,
             row['home_team_name'],
             row['away_team_name'],
             row['home_goals'],
@@ -59,14 +61,16 @@ async def insert_fixtures_async(data_list):
 
     sql = """
     INSERT INTO fixture_projections (
-        fixture_id, home_team_name, away_team_name, home_goals, away_goals,
+        fixture_id, home_team_id, away_team_id,
+        home_team_name, away_team_name, home_goals, away_goals,
         home_win_percent, away_win_percent, draw_percent,
         home_clean_sheet_percent, away_clean_sheet_percent,
         over_15_goals_percent, over_25_goals_percent, both_teams_shore_percent,
         kickoff_datetime,
         created_at, updated_at
     ) VALUES (
-        %s, %s, %s, %s, %s,
+        %s, %s, %s,
+        %s, %s, %s, %s,
         %s, %s, %s,
         %s, %s,
         %s, %s, %s,
@@ -74,6 +78,8 @@ async def insert_fixtures_async(data_list):
         NOW(), NOW()
     )
     ON DUPLICATE KEY UPDATE
+        home_team_id = VALUES(home_team_id),
+        away_team_id = VALUES(away_team_id),
         home_team_name = VALUES(home_team_name),
         away_team_name = VALUES(away_team_name),
         home_goals = VALUES(home_goals),

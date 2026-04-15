@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 import pandas as pd
 from app.source_database import get_source_connection, release_source_connection
-from app.repository.db_utils import execute_chunked
+from app.repository.db_utils import execute_chunked, resolve_team_id
 
 logger = logging.getLogger("player_repo")
 
@@ -35,7 +35,7 @@ STATUS_TYPES = {
 }
 
 
-async def insert_player_async(data_list):
+async def insert_player_async(data_list, teams=None):
     if len(data_list) == 0:
         return
 
@@ -56,6 +56,9 @@ async def insert_player_async(data_list):
 
     records = []
     for _, row in api_pl_projections.iterrows():
+        # Resolve team IDs once per row (each row spawns ~15 stat records)
+        row_team_id = resolve_team_id(row.get("team"), teams) if teams is not None else None
+        row_opponent_id = resolve_team_id(row.get("opponent"), teams) if teams is not None else None
         for stat_name, stat_id in STATUS_TYPES.items():
             if stat_name in row:
                 value = row[stat_name]
@@ -67,6 +70,8 @@ async def insert_player_async(data_list):
                     stat_id,
                     row.get("player_name"),
                     row.get("position"),
+                    row_team_id,
+                    row_opponent_id,
                     row.get("team"),
                     row.get("opponent"),
                     row.get("venue"),
@@ -79,12 +84,15 @@ async def insert_player_async(data_list):
 
     sql = """
     INSERT INTO player_projections (
-        fixture_id, player_id, stats_type_id, player_name, position, team, opponent,
+        fixture_id, player_id, stats_type_id, player_name, position,
+        team_id, opponent_id, team, opponent,
         venue, start, stats_value, kickoff_datetime, created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE
         player_name = VALUES(player_name),
         position = VALUES(position),
+        team_id = VALUES(team_id),
+        opponent_id = VALUES(opponent_id),
         team = VALUES(team),
         opponent = VALUES(opponent),
         venue = VALUES(venue),

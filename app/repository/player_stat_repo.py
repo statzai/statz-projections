@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime
-from app.repository.db_utils import execute_chunked
+from app.repository.db_utils import execute_chunked, resolve_team_id
 
 logger = logging.getLogger("player_stat_repo")
 
@@ -24,7 +24,7 @@ STATUS_TYPES = {
 }
 
 
-async def insert_players_stats_async(data_list):
+async def insert_players_stats_async(data_list, teams=None):
     if len(data_list) == 0:
         return
 
@@ -55,6 +55,8 @@ async def insert_players_stats_async(data_list):
             row.get("player_id"),
             row.get("player_name"),
             row.get("position"),
+            resolve_team_id(row.get("team"), teams) if teams is not None else None,
+            resolve_team_id(row.get("opponent"), teams) if teams is not None else None,
             row.get("team"),
             row.get("opponent"),
             row.get("venue"),
@@ -67,13 +69,17 @@ async def insert_players_stats_async(data_list):
 
     sql = """
     INSERT INTO player_prop_projections (
-        fixture_id, player_id, player_name, position, team, opponent,
+        fixture_id, player_id, player_name, position,
+        team_id, opponent_id,
+        team, opponent,
         venue, market_name, stats_type_id, prop, projection_percent,
         kickoff_datetime, created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     ON DUPLICATE KEY UPDATE
         player_name = VALUES(player_name),
         position = VALUES(position),
+        team_id = VALUES(team_id),
+        opponent_id = VALUES(opponent_id),
         team = VALUES(team),
         opponent = VALUES(opponent),
         venue = VALUES(venue),

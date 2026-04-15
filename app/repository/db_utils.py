@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import aiomysql
+import pandas as pd
 import app.database as _db
 from app.database import get_connection
 
@@ -10,6 +11,31 @@ logger = logging.getLogger("db_utils")
 CHUNK_SIZE = 50
 MAX_RETRIES = 3
 QUERY_TIMEOUT = 120  # seconds per chunk before giving up and retrying
+
+
+def resolve_team_id(team_name, teams):
+    """
+    Resolve a team name to its id via the `teams` dataframe, returning None
+    if the name can't be mapped. Applies TEAM_NAME_FIXES so historical names
+    like "Milan" map to their current counterparts ("AC Milan"). Used by the
+    projection repos to populate `team_id` columns on insert, replacing the
+    previous pattern of writing the name string directly.
+
+    Returning None rather than raising lets insert rows with unresolvable
+    names still land (with team_id NULL) instead of breaking the whole batch.
+    """
+    if team_name is None or (isinstance(team_name, float) and math.isnan(team_name)):
+        return None
+    try:
+        from app.services.statz_functions import TEAM_NAME_FIXES
+        name = TEAM_NAME_FIXES.get(team_name, team_name)
+        match = teams.loc[teams['name'] == name, 'id']
+        if match.empty:
+            return None
+        return int(match.iloc[0])
+    except Exception as e:
+        logger.warning(f"resolve_team_id({team_name!r}) failed: {type(e).__name__}: {e}")
+        return None
 
 
 async def _get_fresh_connection(label: str, chunk_info: str):
