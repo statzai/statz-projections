@@ -556,7 +556,10 @@ class ProjectionService:
                     'Mapping Error for the teams above. Please Update the team_mapping dictionary in the code.')
 
             total_match_perc = 38 / total_matches  # NEW - This calculates the percentage of total matches played so far in the season compared to Premier League
-            mv_beta = league_weightings_df[league_weightings_df['League'] == league]['mv_beta'].values[0] ##ADDED
+            # mv_beta is already passed in from _setup_league (line 654: mv_beta = ctx.mv_beta),
+            # so no need to re-look it up from league_weightings_df here (which isn't even in scope
+            # inside _prepare_league — the old lookup was raising NameError and being silently
+            # swallowed by the MV try/except, skipping the whole MV adjustment for every run).
             mv_beta = (mv_beta * (0.95 ** (
                         matches_played * total_match_perc)))  # NEW - This adjusts the mv_beta based on matches played so far in the season
             ## ratings['MV Index'] = (ratings['MV Index'] * 100).round(1) #REMOVED
@@ -581,10 +584,9 @@ class ProjectionService:
             ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance', 'MV Index',
                                   'MV Defense Underperformance %', 'MV Attack Underperformance %', 'MV Index Reverse'],
                          inplace=True)
+            logger.info(f"[{league}] Step: market value adjustments applied")
         except Exception as _mv_err:
             logger.warning(f"[{league}] Market value block failed for {league}: {_mv_err} — skipping MV adjustment")
-
-        logger.info(f"[{league}] Step: market value adjustments applied")
         # In[17]:
 
         # Readjust so that 100 is the mean for Attack, Defense, and Overall
