@@ -110,7 +110,6 @@ class ProjectionService:
             ctx.div = r.get('transfermarkt_div') if pd.notna(r.get('transfermarkt_div')) else None
             ctx.mv_beta = float(r.get('mv_beta', 0.15))
             ctx.odds_beta = float(r.get('odds_beta', 0.3))
-            ctx.xG = bool(r.get('xg_enabled', False))
             ctx.fpl = (league == 'Premier League')  # FPL is always PL-only
             logger.info(f"[{league}] Config loaded from DB (projection_config.csv)")
         else:
@@ -143,16 +142,7 @@ class ProjectionService:
                 ctx.odds_beta = 1.0
                 logger.warning(f"[{league}] No config found in DB or xlsx — using defaults")
 
-            # Feature flags from hardcoded logic (xlsx path only)
-            if league == 'Premier League':
-                ctx.xG = True
-                ctx.fpl = True
-            elif league == 'Championship':
-                ctx.xG = True
-                ctx.fpl = False
-            else:
-                ctx.xG = False
-                ctx.fpl = False
+            ctx.fpl = (league == 'Premier League')
 
         ctx.weightings = [ctx.league_above_attack_weight, ctx.league_above_defense_weight,
                           ctx.league_below_attack_weight, ctx.league_below_defense_weight]
@@ -222,6 +212,18 @@ class ProjectionService:
         ctx.previous_season_id_above = get_season_id(ctx.league_above_id, ctx.seasons, True) if ctx.league_above_id else None
 
         ctx.stat_list = get_stat_list()
+
+        # Auto-detect xG availability by checking if any player xG stats
+        # exist for this league's current-season fixtures. No manual config
+        # needed — if the data exists, we use it.
+        xg_stat_id = get_stat_id('Expected Goals (xG)', ctx.stats_types)
+        season_fixture_ids = set(ctx.season_fixtures['id'].values)
+        has_xg = ctx.player_stats[
+            (ctx.player_stats['stats_type_id'] == xg_stat_id) &
+            (ctx.player_stats['fixture_id'].isin(season_fixture_ids))
+        ]
+        ctx.xG = len(has_xg) > 0
+        logger.info(f"[{league}] xG auto-detected: {'enabled' if ctx.xG else 'disabled'} ({len(has_xg)} xG rows found)")
 
         return ctx
 
