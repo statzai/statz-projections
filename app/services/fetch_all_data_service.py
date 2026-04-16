@@ -209,6 +209,18 @@ class FetchAllDataService:
         return pd.DataFrame(rows, columns=cols)
 
     @staticmethod
+    async def _query_promoted_team_ratings(conn):
+        async with conn.cursor() as cur:
+            await cur.execute("""
+                SELECT c.name AS league_name, ptr.*
+                FROM promoted_team_ratings ptr
+                JOIN competitions c ON c.id = ptr.competition_id
+            """)
+            rows = await cur.fetchall()
+            cols = [d[0] for d in cur.description]
+        return pd.DataFrame(rows, columns=cols)
+
+    @staticmethod
     async def _query_projection_config(conn):
         async with conn.cursor() as cur:
             await cur.execute("""
@@ -469,6 +481,15 @@ class FetchAllDataService:
             "projection_config",
             self._query_projection_config,
             f / "projection_config.csv",
+            incremental=False,
+            results=results,
+        )
+
+        logger.info("[promoted_team_ratings] START")
+        await self._fetch_table(
+            "promoted_team_ratings",
+            self._query_promoted_team_ratings,
+            f / "promoted_team_ratings.csv",
             incremental=False,
             results=results,
         )

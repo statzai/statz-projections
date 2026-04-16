@@ -25,6 +25,7 @@ class DataCache:
         self.stats_types = None
         self.league_weightings = None
         self.projection_config = None
+        self.promoted_team_ratings = None
         self._loaded = False
 
     def load(self, data_folder_path: str):
@@ -82,6 +83,15 @@ class DataCache:
         else:
             self.projection_config = pd.DataFrame()
             logger.info("DataCache: projection_config.csv not found — using League Weightings.xlsx fallback")
+
+        # DB-driven promoted team ratings (replaces per-league xlsx files).
+        promoted_path = os.path.join(path, "promoted_team_ratings.csv")
+        if os.path.exists(promoted_path):
+            self.promoted_team_ratings = pd.read_csv(promoted_path)
+            logger.info(f"DataCache: loaded promoted_team_ratings.csv ({len(self.promoted_team_ratings)} rows)")
+        else:
+            self.promoted_team_ratings = pd.DataFrame()
+            logger.info("DataCache: promoted_team_ratings.csv not found — using xlsx fallback")
 
         self._loaded = True
         logger.info("DataCache: all source data loaded successfully.")

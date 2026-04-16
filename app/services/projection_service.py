@@ -499,9 +499,19 @@ class ProjectionService:
         # In[13]:
 
         try:
-            # second_ratings = pd.read_excel(rf"{data_folder_path}\{league} Promoted Team Ratings.xlsx")
-            second_ratings = pd.read_excel(f"{data_folder_path}/{league} Promoted Team Ratings.xlsx")
-            second_ratings = second_ratings[['Team', 'Attack', 'Defense']]
+            # Try DB-driven promoted ratings first (from admin panel),
+            # fall back to the per-league xlsx file.
+            db_promoted = ProjectionService._cache.promoted_team_ratings
+            db_promoted_rows = db_promoted[db_promoted['league_name'] == league] if not db_promoted.empty else pd.DataFrame()
+
+            if len(db_promoted_rows) > 0:
+                second_ratings = db_promoted_rows[['team_name', 'attack', 'defense']].copy()
+                second_ratings.columns = ['Team', 'Attack', 'Defense']
+                logger.info(f"[{league}] Promoted team ratings loaded from DB ({len(second_ratings)} teams)")
+            else:
+                second_ratings = pd.read_excel(f"{data_folder_path}/{league} Promoted Team Ratings.xlsx")
+                second_ratings = second_ratings[['Team', 'Attack', 'Defense']]
+                logger.info(f"[{league}] Promoted team ratings loaded from xlsx")
             second_ratings['Attack'] = (second_ratings['Attack']) * league_below_attack_weight
             second_ratings['Defense'] = (second_ratings[
                 'Defense']) / league_below_defense_weight  # UPDATED - divide instead of multiply
