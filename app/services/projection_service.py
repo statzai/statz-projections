@@ -626,15 +626,21 @@ class ProjectionService:
         ratings['Rank'] = ratings.index + 1
         old_ratings = all_team_ratings[all_team_ratings[
                                            'League'] == league]  # UPDATED - Instead of reading from file, use all_team_ratings dataset and filter by league
-        old_ratings = old_ratings[
-            old_ratings['Date'] == old_ratings['Date'].max()]  # NEW - Get the most recent ratings date
-        old_ratings.reset_index(drop=True, inplace=True)  # NEW - Reset index for old ratings
-        old_ratings['Rank'] = old_ratings.index + 1
-        for i in range(len(ratings)):
-            team = ratings.loc[i, 'Team']
-            old_rank = old_ratings.loc[old_ratings['Team'] == team, 'Rank'].values[0]
-            new_rank = ratings.loc[i, 'Rank']
-            ratings.loc[i, 'Movement'] = old_rank - new_rank
+        if len(old_ratings) > 0:
+            old_ratings = old_ratings[
+                old_ratings['Date'] == old_ratings['Date'].max()]  # NEW - Get the most recent ratings date
+            old_ratings.reset_index(drop=True, inplace=True)  # NEW - Reset index for old ratings
+            old_ratings['Rank'] = old_ratings.index + 1
+            for i in range(len(ratings)):
+                team = ratings.loc[i, 'Team']
+                match = old_ratings.loc[old_ratings['Team'] == team, 'Rank']
+                old_rank = match.values[0] if len(match) > 0 else ratings.loc[i, 'Rank']
+                new_rank = ratings.loc[i, 'Rank']
+                ratings.loc[i, 'Movement'] = old_rank - new_rank
+        else:
+            # New league with no historical ratings — no movement to calculate
+            ratings['Movement'] = 0
+            logger.info(f"[{league}] No historical ratings found — movement set to 0")
         ratings = ratings[['Team', 'Attack', 'Defense', 'Overall', 'Movement']]
 
         # In[ ]:
