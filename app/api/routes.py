@@ -9,6 +9,7 @@ import requests as http_requests
 
 class AllLeaguesRequest(BaseModel):
     leagues: Optional[List[str]] = None
+    fetch_first: Optional[bool] = False
 
 from app.services.premier_league_projections_service import PremierLeagueProjectionsService
 from app.services.projection_service import ProjectionService
@@ -63,9 +64,25 @@ def _league_to_competition_id(league: str) -> str:
     return league.lower().replace(' ', '-').replace('.', '')
 
 
-async def _run_all_leagues(leagues=None):
+async def _run_fetch_if_needed(fetch_first: bool):
+    """Run data fetch before projections when triggered from admin panel."""
+    if not fetch_first:
+        return
+    logger.info("fetch_first=True — fetching fresh data before projecting...")
+    try:
+        await fetch_all_data_service.import_all_tables()
+        # Invalidate cache so the next projection loads fresh CSVs
+        ProjectionService._cache.invalidate()
+        logger.info("fetch_first: data fetch complete, cache invalidated")
+    except Exception as e:
+        logger.error(f"fetch_first: data fetch FAILED: {e}", exc_info=True)
+        # Continue with projection anyway — better stale data than no projection
+
+
+async def _run_all_leagues(leagues=None, fetch_first=False):
     global _projection_running
     try:
+        await _run_fetch_if_needed(fetch_first)
         await projection_all_teams_service.projectionAllTeams(leagues=leagues)
     except Exception as e:
         logger.error(f"All-leagues projection FAILED: {e}", exc_info=True)
@@ -79,6 +96,7 @@ async def _run_single_league(request):
     competition_id = _league_to_competition_id(request.league)
     started_at = datetime.now(timezone.utc).isoformat()
     try:
+        await _run_fetch_if_needed(getattr(request, 'fetch_first', False))
         if EuroCompProjectionService.is_euro_comp(request.league):
             await euro_comp_service.projections(request)
         else:
@@ -150,9 +168,11 @@ async def all_leagues(background_tasks: BackgroundTasks, request: AllLeaguesRequ
         return {"status": "busy", "message": "A projection is already running. Wait for it to finish."}
     _projection_running = True
     leagues = request.leagues if request else None
-    background_tasks.add_task(_run_all_leagues, leagues)
+    fetch_first = request.fetch_first if request else False
+    background_tasks.add_task(_run_all_leagues, leagues, fetch_first)
     msg = f"leagues: {leagues}" if leagues else "all leagues"
-    return {"status": "started", "message": f"Projection started ({msg})"}
+    fetch_msg = " (fetching data first)" if fetch_first else ""
+    return {"status": "started", "message": f"Projection started ({msg}){fetch_msg}"}
 
 
 @router.post("/fetch-data")
