@@ -661,8 +661,7 @@ class ProjectionAllTeams:
                     ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance', 'MV Index',
                                           'MV Defense Underperformance %', 'MV Attack Underperformance %', 'MV Index Reverse'],
                                  inplace=True)
-
-                logger.info(f"[{league}] Step: market value adjustments applied")
+                    logger.info(f"[{league}] Step: market value adjustments applied")
                 # In[17]:
 
                 # Readjust so that 100 is the mean for Attack, Defense, and Overall
