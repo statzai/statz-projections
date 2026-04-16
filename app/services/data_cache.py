@@ -24,6 +24,7 @@ class DataCache:
         self.b365_odds = None
         self.stats_types = None
         self.league_weightings = None
+        self.projection_config = None
         self._loaded = False
 
     def load(self, data_folder_path: str):
@@ -71,6 +72,16 @@ class DataCache:
         self.stats_types = pd.read_csv(os.path.join(path, "stats_types.csv"))
 
         self.league_weightings = pd.read_excel(os.path.join(path, "League Weightings.xlsx"))
+
+        # DB-driven projection config (from competition_projection_config table).
+        # Falls back gracefully if the CSV doesn't exist yet (first fetch hasn't run).
+        config_path = os.path.join(path, "projection_config.csv")
+        if os.path.exists(config_path):
+            self.projection_config = pd.read_csv(config_path)
+            logger.info(f"DataCache: loaded projection_config.csv ({len(self.projection_config)} rows)")
+        else:
+            self.projection_config = pd.DataFrame()
+            logger.info("DataCache: projection_config.csv not found — using League Weightings.xlsx fallback")
 
         self._loaded = True
         logger.info("DataCache: all source data loaded successfully.")

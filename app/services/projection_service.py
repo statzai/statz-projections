@@ -89,49 +89,73 @@ class ProjectionService:
         ctx.date_from = pd.to_datetime('today')
         ctx.date_to = ctx.date_from + pd.DateOffset(days=ProjectionService.DAYS)
 
-        # League weightings
+        # League config — try DB config first (projection_config.csv from the fetch
+        # pipeline), fall back to League Weightings.xlsx for leagues not yet in the DB.
         if not ProjectionService._cache.is_loaded():
             ProjectionService._cache.load(str(ctx.data_folder_path))
 
-        league_weightings_df = ProjectionService._cache.league_weightings
-        league_row = league_weightings_df[league_weightings_df['League'] == league]
+        db_config = ProjectionService._cache.projection_config
+        db_row = db_config[db_config['league_name'] == league] if not db_config.empty else pd.DataFrame()
 
-        if len(league_row) > 0:
-            ctx.league_below = league_row['League Below'].values[0]
-            ctx.league_above = league_row['League Above'].values[0]
-            ctx.league_below_attack_weight = league_row['League Below Attack Weight'].values[0]
-            ctx.league_below_defense_weight = league_row['League Below Defense Weight'].values[0]
-            ctx.league_above_attack_weight = league_row['League Above Attack Weight'].values[0]
-            ctx.league_above_defense_weight = league_row['League Above Defense Weight'].values[0]
-            ctx.country_code = league_row['code'].values[0]
-            ctx.div = league_row['div'].values[0]
-            ctx.weightings = [ctx.league_above_attack_weight, ctx.league_above_defense_weight,
-                              ctx.league_below_attack_weight, ctx.league_below_defense_weight]
-            ctx.mv_beta = league_row['mv_beta'].values[0]
-            ctx.odds_beta = league_row['odds_beta'].values[0]
+        if len(db_row) > 0:
+            # DB-driven config (from admin panel)
+            r = db_row.iloc[0]
+            ctx.league_above = r.get('league_above_name') if pd.notna(r.get('league_above_name')) else None
+            ctx.league_below = r.get('league_below_name') if pd.notna(r.get('league_below_name')) else None
+            ctx.league_above_attack_weight = float(r.get('above_attack_weight', 1.0))
+            ctx.league_above_defense_weight = float(r.get('above_defense_weight', 1.0))
+            ctx.league_below_attack_weight = float(r.get('below_attack_weight', 1.0))
+            ctx.league_below_defense_weight = float(r.get('below_defense_weight', 1.0))
+            ctx.country_code = r.get('transfermarkt_code') if pd.notna(r.get('transfermarkt_code')) else None
+            ctx.div = r.get('transfermarkt_div') if pd.notna(r.get('transfermarkt_div')) else None
+            ctx.mv_beta = float(r.get('mv_beta', 0.15))
+            ctx.odds_beta = float(r.get('odds_beta', 0.3))
+            ctx.xG = bool(r.get('xg_enabled', False))
+            ctx.fpl = (league == 'Premier League')  # FPL is always PL-only
+            logger.info(f"[{league}] Config loaded from DB (projection_config.csv)")
         else:
-            ctx.league_below = None
-            ctx.league_above = None
-            ctx.league_below_attack_weight = 1.0
-            ctx.league_below_defense_weight = 1.0
-            ctx.league_above_attack_weight = 1.0
-            ctx.league_above_defense_weight = 1.0
-            ctx.country_code = None
-            ctx.div = None
-            ctx.weightings = [1.0, 1.0, 1.0, 1.0]
-            ctx.mv_beta = 0.0
-            ctx.odds_beta = 1.0
+            # Fallback to xlsx for leagues not yet in the DB config table
+            league_weightings_df = ProjectionService._cache.league_weightings
+            league_row = league_weightings_df[league_weightings_df['League'] == league]
 
-        # Feature flags
-        if league == 'Premier League':
-            ctx.xG = True
-            ctx.fpl = True
-        elif league == 'Championship':
-            ctx.xG = True
-            ctx.fpl = False
-        else:
-            ctx.xG = False
-            ctx.fpl = False
+            if len(league_row) > 0:
+                ctx.league_below = league_row['League Below'].values[0]
+                ctx.league_above = league_row['League Above'].values[0]
+                ctx.league_below_attack_weight = league_row['League Below Attack Weight'].values[0]
+                ctx.league_below_defense_weight = league_row['League Below Defense Weight'].values[0]
+                ctx.league_above_attack_weight = league_row['League Above Attack Weight'].values[0]
+                ctx.league_above_defense_weight = league_row['League Above Defense Weight'].values[0]
+                ctx.country_code = league_row['code'].values[0]
+                ctx.div = league_row['div'].values[0]
+                ctx.mv_beta = league_row['mv_beta'].values[0]
+                ctx.odds_beta = league_row['odds_beta'].values[0]
+                logger.info(f"[{league}] Config loaded from League Weightings.xlsx (fallback)")
+            else:
+                ctx.league_below = None
+                ctx.league_above = None
+                ctx.league_below_attack_weight = 1.0
+                ctx.league_below_defense_weight = 1.0
+                ctx.league_above_attack_weight = 1.0
+                ctx.league_above_defense_weight = 1.0
+                ctx.country_code = None
+                ctx.div = None
+                ctx.mv_beta = 0.0
+                ctx.odds_beta = 1.0
+                logger.warning(f"[{league}] No config found in DB or xlsx — using defaults")
+
+            # Feature flags from hardcoded logic (xlsx path only)
+            if league == 'Premier League':
+                ctx.xG = True
+                ctx.fpl = True
+            elif league == 'Championship':
+                ctx.xG = True
+                ctx.fpl = False
+            else:
+                ctx.xG = False
+                ctx.fpl = False
+
+        ctx.weightings = [ctx.league_above_attack_weight, ctx.league_above_defense_weight,
+                          ctx.league_below_attack_weight, ctx.league_below_defense_weight]
 
         # Load shared source data from cache. Everything is now .copy()ed to
         # prevent any in-place mutation inside a projection run from polluting

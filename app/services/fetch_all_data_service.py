@@ -209,6 +209,23 @@ class FetchAllDataService:
         return pd.DataFrame(rows, columns=cols)
 
     @staticmethod
+    async def _query_projection_config(conn):
+        async with conn.cursor() as cur:
+            await cur.execute("""
+                SELECT c.name AS league_name,
+                       ca.name AS league_above_name,
+                       cb.name AS league_below_name,
+                       cpc.*
+                FROM competition_projection_config cpc
+                JOIN competitions c ON c.id = cpc.competition_id
+                LEFT JOIN competitions ca ON ca.id = cpc.league_above_id
+                LEFT JOIN competitions cb ON cb.id = cpc.league_below_id
+            """)
+            rows = await cur.fetchall()
+            cols = [d[0] for d in cur.description]
+        return pd.DataFrame(rows, columns=cols)
+
+    @staticmethod
     def _make_fps_query(last_fetch):
         async def _query(conn):
             if last_fetch:
@@ -443,6 +460,15 @@ class FetchAllDataService:
             "stats_types",
             self._query_stats_types,
             f / "stats_types.csv",
+            incremental=False,
+            results=results,
+        )
+
+        logger.info("[projection_config] START")
+        await self._fetch_table(
+            "projection_config",
+            self._query_projection_config,
+            f / "projection_config.csv",
             incremental=False,
             results=results,
         )
