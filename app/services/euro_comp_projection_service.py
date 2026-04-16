@@ -222,6 +222,7 @@ class EuroCompProjectionService:
                 ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance', 'MV Index',
                                       'MV Defense Underperformance %', 'MV Attack Underperformance %', 'MV Index Reverse'],
                              inplace=True)
+                logger.info(f"[{league}] Step: market value adjustments applied")
             except Exception as _mv_err:
                 logger.warning(f"[{league}] Market value block failed for {league_name}: {_mv_err} — skipping MV adjustment")
 

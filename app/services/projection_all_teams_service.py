@@ -618,50 +618,53 @@ class ProjectionAllTeams:
                 # In[ ]:
 
                 if country_code is not None:
-                    market_values = get_market_value(league_dashed, div, country_code)
-                    market_values['MV Index'] = market_values['Market Value'].astype(float) / market_values['Market Value'].astype(
-                        float).median()
-                    market_values['MV Index'] = np.log1p(market_values['MV Index'])
-                    market_values['MV Index'] = market_values['MV Index'] / market_values['MV Index'].mean()
-                    max = market_values['MV Index'].max() if market_values['MV Index'].max() < 2.0 else 2.0  # NEW - Cap max at 2.0
-                    min = market_values['MV Index'].min() if market_values[
-                                                                 'MV Index'].min() > 0.5 else 0.5  # NEW - Floor min at 0.5
-                    market_values['MV Index'] = rescale_to_range(market_values['MV Index'], min,
-                                                                 max)  # NEW - Rescale to new range to avoid outliers
-                    market_values['MV Index'] = market_values['MV Index'] / market_values['MV Index'].mean()  # NEW - Re-normalize
-                    market_values['Team'] = market_values['Team'].replace(team_mapping)
-                    market_values['Team'] = market_values['Team'].str.strip()
+                    try:
+                        market_values = get_market_value(league_dashed, div, country_code)
+                        market_values['MV Index'] = market_values['Market Value'].astype(float) / market_values['Market Value'].astype(
+                            float).median()
+                        market_values['MV Index'] = np.log1p(market_values['MV Index'])
+                        market_values['MV Index'] = market_values['MV Index'] / market_values['MV Index'].mean()
+                        max = market_values['MV Index'].max() if market_values['MV Index'].max() < 2.0 else 2.0  # NEW - Cap max at 2.0
+                        min = market_values['MV Index'].min() if market_values[
+                                                                     'MV Index'].min() > 0.5 else 0.5  # NEW - Floor min at 0.5
+                        market_values['MV Index'] = rescale_to_range(market_values['MV Index'], min,
+                                                                     max)  # NEW - Rescale to new range to avoid outliers
+                        market_values['MV Index'] = market_values['MV Index'] / market_values['MV Index'].mean()  # NEW - Re-normalize
+                        market_values['Team'] = market_values['Team'].replace(team_mapping)
+                        market_values['Team'] = market_values['Team'].str.strip()
 
-                    ratings['Team'] = ratings['Team'].str.strip()
-                    ratings['MV Index'] = ratings['Team'].map(market_values.set_index('Team')['MV Index'])
-                    ratings['MV Index Reverse'] = (
-                                ratings['MV Index'].mean() / ratings['MV Index'])  # NEW - Inverse MV Index (for defence)
-                    ratings['MV Index Reverse'] = ratings['MV Index Reverse'] / ratings[
-                        'MV Index Reverse'].mean()  # NEW - Normalize
+                        ratings['Team'] = ratings['Team'].str.strip()
+                        ratings['MV Index'] = ratings['Team'].map(market_values.set_index('Team')['MV Index'])
+                        ratings['MV Index Reverse'] = (
+                                    ratings['MV Index'].mean() / ratings['MV Index'])  # NEW - Inverse MV Index (for defence)
+                        ratings['MV Index Reverse'] = ratings['MV Index Reverse'] / ratings[
+                            'MV Index Reverse'].mean()  # NEW - Normalize
 
-                    teams_to_map = ratings.loc[ratings['MV Index'].isna(), 'Team']  # NEW - Identify any teams not mapped
+                        teams_to_map = ratings.loc[ratings['MV Index'].isna(), 'Team']  # NEW - Identify any teams not mapped
 
-                    if len(teams_to_map) > 0:
-                        market_values_not_mapped = market_values[~market_values['Team'].isin(ratings['Team'])]
-                        logger.warning(f"[{league}] Team mapping missing — using neutral MV Index (1.0) for: {teams_to_map.tolist()} | Unmatched Transfermarkt names: {market_values_not_mapped['Team'].tolist()}")
-                        ratings['MV Index'] = ratings['MV Index'].fillna(1.0)
+                        if len(teams_to_map) > 0:
+                            market_values_not_mapped = market_values[~market_values['Team'].isin(ratings['Team'])]
+                            logger.warning(f"[{league}] Team mapping missing — using neutral MV Index (1.0) for: {teams_to_map.tolist()} | Unmatched Transfermarkt names: {market_values_not_mapped['Team'].tolist()}")
+                            ratings['MV Index'] = ratings['MV Index'].fillna(1.0)
 
-                    total_match_perc = 38 / total_matches
-                    mv_beta = league_weightings_df[league_weightings_df['League'] == league]['mv_beta'].values[0]
-                    mv_beta = (mv_beta * (0.95 ** (matches_played * total_match_perc)))
+                        total_match_perc = 38 / total_matches
+                        mv_beta = league_weightings_df[league_weightings_df['League'] == league]['mv_beta'].values[0]
+                        mv_beta = (mv_beta * (0.95 ** (matches_played * total_match_perc)))
 
-                    ratings['MV Attack Underperformance'] = (ratings['MV Index'] - ratings['Attack'] / ratings[
-                        'Attack'].mean()) * mv_beta
-                    ratings['MV Attack Underperformance %'] = ratings['MV Attack Underperformance'] / ratings['Attack']
-                    ratings['MV Defense Underperformance'] = (ratings['MV Index Reverse'] - ratings['Defense'] / ratings[
-                        'Defense'].mean()) * mv_beta
-                    ratings['MV Defense Underperformance %'] = ratings['MV Defense Underperformance'] / ratings['Defense']
-                    ratings['Attack'] = ratings['Attack'] * (1 + ratings['MV Attack Underperformance %'])
-                    ratings['Defense'] = ratings['Defense'] * (1 + ratings['MV Defense Underperformance %'])
-                    ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance', 'MV Index',
-                                          'MV Defense Underperformance %', 'MV Attack Underperformance %', 'MV Index Reverse'],
-                                 inplace=True)
-                    logger.info(f"[{league}] Step: market value adjustments applied")
+                        ratings['MV Attack Underperformance'] = (ratings['MV Index'] - ratings['Attack'] / ratings[
+                            'Attack'].mean()) * mv_beta
+                        ratings['MV Attack Underperformance %'] = ratings['MV Attack Underperformance'] / ratings['Attack']
+                        ratings['MV Defense Underperformance'] = (ratings['MV Index Reverse'] - ratings['Defense'] / ratings[
+                            'Defense'].mean()) * mv_beta
+                        ratings['MV Defense Underperformance %'] = ratings['MV Defense Underperformance'] / ratings['Defense']
+                        ratings['Attack'] = ratings['Attack'] * (1 + ratings['MV Attack Underperformance %'])
+                        ratings['Defense'] = ratings['Defense'] * (1 + ratings['MV Defense Underperformance %'])
+                        ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance', 'MV Index',
+                                              'MV Defense Underperformance %', 'MV Attack Underperformance %', 'MV Index Reverse'],
+                                     inplace=True)
+                        logger.info(f"[{league}] Step: market value adjustments applied")
+                    except Exception as _mv_err:
+                        logger.warning(f"[{league}] Market value block failed: {_mv_err} — skipping MV adjustment")
                 # In[17]:
 
                 # Readjust so that 100 is the mean for Attack, Defense, and Overall
