@@ -152,24 +152,6 @@ class ProjectionService:
         ctx.b365_odds = ProjectionService._cache.b365_odds.copy()
         ctx.stats_types = ProjectionService._cache.stats_types.copy()
 
-        # TEMP DEBUG (2026-04-15): log row counts of the cache itself (not the
-        # copies) so we can see whether the SHARED cache state is drifting
-        # between runs. If these counts change run-to-run, pollution is
-        # happening directly on the cache dataframes. Remove once verified.
-        logger.info(
-            f"[{league}] cache rows: "
-            f"player_stats={len(ProjectionService._cache.player_stats)} "
-            f"team_stats={len(ProjectionService._cache.team_stats)} "
-            f"fixtures_df={len(ProjectionService._cache.fixtures_df)} "
-            f"teams={len(ProjectionService._cache.teams)} "
-            f"comps={len(ProjectionService._cache.comps)} "
-            f"comp_teams={len(ProjectionService._cache.comp_teams)} "
-            f"seasons={len(ProjectionService._cache.seasons)} "
-            f"b365_odds={len(ProjectionService._cache.b365_odds)} "
-            f"stats_types={len(ProjectionService._cache.stats_types)} "
-            f"standings={len(ProjectionService._cache.standings)}"
-        )
-
         # Model and accuracy datasets
         ctx.model_dataset_all = ProjectionService._read_df(
             os.path.join(ctx.data_folder_path, "all_leagues_model_dataset_with_history"))
