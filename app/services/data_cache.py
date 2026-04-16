@@ -85,14 +85,14 @@ class DataCache:
             self.projection_config = pd.DataFrame()
             logger.info("DataCache: projection_config.csv not found — using League Weightings.xlsx fallback")
 
-        # DB-driven Transfermarkt team name mappings (replaces team_mappings.py).
+        # DB-driven Transfermarkt team name mappings (sole source of truth).
         tm_path = os.path.join(path, "transfermarkt_team_mappings.csv")
         if os.path.exists(tm_path):
             self.transfermarkt_team_mappings = pd.read_csv(tm_path)
             logger.info(f"DataCache: loaded transfermarkt_team_mappings.csv ({len(self.transfermarkt_team_mappings)} rows)")
         else:
             self.transfermarkt_team_mappings = pd.DataFrame()
-            logger.info("DataCache: transfermarkt_team_mappings.csv not found — using team_mappings.py fallback")
+            logger.warning("DataCache: transfermarkt_team_mappings.csv not found — MV adjustment will run unmapped")
 
         # DB-driven promoted team ratings (replaces per-league xlsx files).
         promoted_path = os.path.join(path, "promoted_team_ratings.csv")

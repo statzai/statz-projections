@@ -14,7 +14,6 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
 import numpy as np
 from .statz_functions import *
-from app.services.team_mappings import TEAM_MAPPING
 from pathlib import Path
 import os
 
@@ -189,8 +188,13 @@ class EuroCompProjectionService:
             except:
                 pass
 
-            # Market value adjustment
-            team_mapping = TEAM_MAPPING
+            # Market value adjustment — mappings come from the DB cache (shared with domestic projections)
+            db_mappings = EuroCompProjectionService._cache.transfermarkt_team_mappings
+            if not db_mappings.empty:
+                team_mapping = dict(zip(db_mappings['from_name'], db_mappings['to_name']))
+            else:
+                team_mapping = {}
+                logger.warning(f"[{league}] Team mappings: DB empty — MV adjustment will run unmapped")
 
             try:
                 market_values = get_market_value(league_dashed, div, country_code)

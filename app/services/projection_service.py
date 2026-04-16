@@ -14,7 +14,6 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
 import numpy as np
 from .statz_functions import *
-from app.services.team_mappings import TEAM_MAPPING
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 import os
@@ -489,16 +488,14 @@ class ProjectionService:
         ratings.to_csv(f"{save_file_path}/{league} Get Ratings.csv", index=False)
         # In[12]:
 
-        # Build team_mapping dict: DB mappings first, then team_mappings.py as fallback
+        # Team-name mapping: all mappings live in transfermarkt_team_mappings DB table.
         db_mappings = ProjectionService._cache.transfermarkt_team_mappings
         if not db_mappings.empty:
             team_mapping = dict(zip(db_mappings['from_name'], db_mappings['to_name']))
-            # Merge with Python dict fallback (DB takes precedence)
-            team_mapping = {**TEAM_MAPPING, **team_mapping}
-            logger.info(f"[{league}] Team mappings: {len(team_mapping)} entries (DB + fallback)")
+            logger.info(f"[{league}] Team mappings: {len(team_mapping)} entries (DB)")
         else:
-            team_mapping = TEAM_MAPPING
-            logger.info(f"[{league}] Team mappings: {len(team_mapping)} entries (fallback only)")
+            team_mapping = {}
+            logger.warning(f"[{league}] Team mappings: DB empty — MV adjustment will run unmapped")
 
         # In[13]:
 
