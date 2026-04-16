@@ -487,7 +487,16 @@ class ProjectionService:
         ratings.to_csv(f"{save_file_path}/{league} Get Ratings.csv", index=False)
         # In[12]:
 
-        team_mapping = TEAM_MAPPING
+        # Build team_mapping dict: DB mappings first, then team_mappings.py as fallback
+        db_mappings = ProjectionService._cache.transfermarkt_team_mappings
+        if not db_mappings.empty:
+            team_mapping = dict(zip(db_mappings['from_name'], db_mappings['to_name']))
+            # Merge with Python dict fallback (DB takes precedence)
+            team_mapping = {**TEAM_MAPPING, **team_mapping}
+            logger.info(f"[{league}] Team mappings: {len(team_mapping)} entries (DB + fallback)")
+        else:
+            team_mapping = TEAM_MAPPING
+            logger.info(f"[{league}] Team mappings: {len(team_mapping)} entries (fallback only)")
 
         # In[13]:
 
@@ -571,16 +580,43 @@ class ProjectionService:
 
             teams_to_map = ratings.loc[ratings['MV Index'].isna(), 'Team']  # NEW - Identify any teams not mapped
 
-            ## NEW - Raise error if any teams not mapped
-
             if len(teams_to_map) > 0:
-                logger.warning('Statz Team Names to Map:')
-                logger.warning(teams_to_map.to_string(index=False))
                 market_values_not_mapped = market_values[~market_values['Team'].isin(ratings['Team'])]
-                # debug print removed
-                logger.warning(market_values_not_mapped['Team'].to_string(index=False))
-                raise ValueError(
-                    'Mapping Error for the teams above. Please Update the team_mapping dictionary in the code.')
+                unmapped_names = market_values_not_mapped['Team'].tolist()
+                logger.warning(f"[{league}] {len(unmapped_names)} unmapped Transfermarkt teams: {unmapped_names}")
+
+                # Save unmapped teams to DB as pending mappings (to_name=NULL)
+                # so the admin panel can show them for resolution
+                try:
+                    import aiomysql
+                    from app.database import get_connection
+                    import asyncio
+
+                    async def _save_unmapped():
+                        conn = await asyncio.wait_for(get_connection(), timeout=10)
+                        try:
+                            async with conn.cursor() as cur:
+                                for name in unmapped_names:
+                                    await cur.execute(
+                                        "INSERT IGNORE INTO transfermarkt_team_mappings "
+                                        "(competition_id, from_name, to_name, created_at, updated_at) "
+                                        "VALUES ((SELECT id FROM competitions WHERE name = %s LIMIT 1), %s, NULL, NOW(), NOW())",
+                                        (league, name)
+                                    )
+                                await conn.commit()
+                            logger.info(f"[{league}] Saved {len(unmapped_names)} unmapped teams to DB for admin resolution")
+                        finally:
+                            import app.database as _db
+                            if _db.pool:
+                                _db.pool.release(conn)
+
+                    asyncio.get_event_loop().run_until_complete(_save_unmapped())
+                except Exception as save_err:
+                    logger.warning(f"[{league}] Could not save unmapped teams to DB: {save_err}")
+
+                # Fill unmapped teams with neutral MV Index (1.0) instead of crashing
+                ratings['MV Index'] = ratings['MV Index'].fillna(1.0)
+                ratings['MV Index Reverse'] = ratings['MV Index Reverse'].fillna(1.0)
 
             total_match_perc = 38 / total_matches  # NEW - This calculates the percentage of total matches played so far in the season compared to Premier League
             # mv_beta is already passed in from _setup_league (line 654: mv_beta = ctx.mv_beta),

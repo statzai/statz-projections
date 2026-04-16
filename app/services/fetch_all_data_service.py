@@ -209,6 +209,19 @@ class FetchAllDataService:
         return pd.DataFrame(rows, columns=cols)
 
     @staticmethod
+    async def _query_transfermarkt_team_mappings(conn):
+        async with conn.cursor() as cur:
+            await cur.execute("""
+                SELECT c.name AS league_name, ttm.*
+                FROM transfermarkt_team_mappings ttm
+                JOIN competitions c ON c.id = ttm.competition_id
+                WHERE ttm.to_name IS NOT NULL
+            """)
+            rows = await cur.fetchall()
+            cols = [d[0] for d in cur.description]
+        return pd.DataFrame(rows, columns=cols)
+
+    @staticmethod
     async def _query_promoted_team_ratings(conn):
         async with conn.cursor() as cur:
             await cur.execute("""
@@ -490,6 +503,15 @@ class FetchAllDataService:
             "promoted_team_ratings",
             self._query_promoted_team_ratings,
             f / "promoted_team_ratings.csv",
+            incremental=False,
+            results=results,
+        )
+
+        logger.info("[transfermarkt_team_mappings] START")
+        await self._fetch_table(
+            "transfermarkt_team_mappings",
+            self._query_transfermarkt_team_mappings,
+            f / "transfermarkt_team_mappings.csv",
             incremental=False,
             results=results,
         )
