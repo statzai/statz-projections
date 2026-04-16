@@ -348,31 +348,15 @@ class ProjectionService:
             # Putanja do modela po ligi
             file_path = os.path.join(model_file_path, league, f"{league}_{stat}_model.sav")
 
-            if os.path.exists(file_path):
-                with open(file_path, 'rb') as f:
-                    model = pickle.load(f)
-            else:
-                predictors = ['Team ' + stat + ' History', 'Opponent ' + stat + ' History Against']
-                target = 'Team ' + stat
-                X = league_training_dataset[predictors]
-                y = league_training_dataset[target]
-                X_train, X_test, y_train, y_test = train_test_split(X, y)
-
-                if stat in ['Passes', 'Successful Passes']:
-                    model = fit_model(X_train, y_train)
-                else:
-                    model = grid_search(X_train, y_train)
-
-                # Snimanje modela
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                with open(file_path, 'wb') as f:
-                    pickle.dump(model, f)
-
-            # Isto za model svih liga
+            # All Leagues model path (always needed, used as fallback for new leagues)
             folder_path = os.path.join(model_file_path, "All Leagues")
             os.makedirs(folder_path, exist_ok=True)
             file_path_all = os.path.join(folder_path, f"All_Leagues_{stat}_model.sav")
 
+            predictors = ['Team ' + stat + ' History', 'Opponent ' + stat + ' History Against']
+            target = 'Team ' + stat
+
+            # Load or train the All Leagues model
             if os.path.exists(file_path_all):
                 with open(file_path_all, 'rb') as f:
                     model_all = pickle.load(f)
@@ -385,6 +369,15 @@ class ProjectionService:
                 with open(file_path_all, 'wb') as f:
                     pickle.dump(model_all, f)
                 logger.info(f"[{league}] Trained and saved All_Leagues_{stat}_model.sav")
+
+            # Load league-specific model, or fall back to All Leagues model.
+            # No retraining from scratch — that's a planned future task.
+            if os.path.exists(file_path):
+                with open(file_path, 'rb') as f:
+                    model = pickle.load(f)
+            else:
+                model = model_all
+                logger.info(f"[{league}] No league model for {stat} — using All Leagues model")
 
             # ## **Re-Calculate Accuracy**
 
