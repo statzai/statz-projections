@@ -674,18 +674,26 @@ class ProjectionAllTeams:
                 ratings.reset_index(drop=True, inplace=True)
                 ratings = ratings.round(1)
                 ratings['Rank'] = ratings.index + 1
-                old_ratings = all_team_ratings[all_team_ratings[
-                                                   'League'] == league]  # UPDATED - Instead of reading from file, use all_team_ratings dataset and filter by league
-                old_ratings = old_ratings[
-                    old_ratings['Date'] == old_ratings['Date'].max()]  # NEW - Get the most recent ratings date
-                old_ratings.reset_index(drop=True, inplace=True)  # NEW - Reset index for old ratings
-                old_ratings['Rank'] = old_ratings.index + 1
-                for i in range(len(ratings)):
-                    team = ratings.loc[i, 'Team']
-                    old_rank_vals = old_ratings.loc[old_ratings['Team'] == team, 'Rank'].values
-                    old_rank = old_rank_vals[0] if len(old_rank_vals) > 0 else ratings.loc[i, 'Rank']
-                    new_rank = ratings.loc[i, 'Rank']
-                    ratings.loc[i, 'Movement'] = old_rank - new_rank
+                # Movement = rank change vs most recent snapshot at least 7 days old.
+                # See projection_service.py for rationale (matchday-cadence proxy).
+                from datetime import timedelta
+                cutoff = pd.to_datetime('today').date() - timedelta(days=7)
+                old_league = all_team_ratings[all_team_ratings['League'] == league]
+                old_week_ago = old_league[old_league['Date'] <= cutoff]
+
+                if len(old_week_ago) > 0:
+                    old_ratings = old_week_ago[old_week_ago['Date'] == old_week_ago['Date'].max()].copy()
+                    old_ratings.reset_index(drop=True, inplace=True)
+                    old_ratings['Rank'] = old_ratings.index + 1
+                    for i in range(len(ratings)):
+                        team = ratings.loc[i, 'Team']
+                        old_rank_vals = old_ratings.loc[old_ratings['Team'] == team, 'Rank'].values
+                        old_rank = old_rank_vals[0] if len(old_rank_vals) > 0 else ratings.loc[i, 'Rank']
+                        new_rank = ratings.loc[i, 'Rank']
+                        ratings.loc[i, 'Movement'] = old_rank - new_rank
+                else:
+                    ratings['Movement'] = 0
+                    logger.info(f"[{league}] No ratings snapshot older than 7 days — movement set to 0")
                 ratings = ratings[['Team', 'Attack', 'Defense', 'Overall', 'Movement']]
 
                 # In[ ]:

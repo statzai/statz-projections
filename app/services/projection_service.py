@@ -657,12 +657,20 @@ class ProjectionService:
         ratings.reset_index(drop=True, inplace=True)
         ratings = ratings.round(1)
         ratings['Rank'] = ratings.index + 1
-        old_ratings = all_team_ratings[all_team_ratings[
-                                           'League'] == league]  # UPDATED - Instead of reading from file, use all_team_ratings dataset and filter by league
-        if len(old_ratings) > 0:
-            old_ratings = old_ratings[
-                old_ratings['Date'] == old_ratings['Date'].max()]  # NEW - Get the most recent ratings date
-            old_ratings.reset_index(drop=True, inplace=True)  # NEW - Reset index for old ratings
+        # Movement = rank change vs most recent snapshot at least 7 days old.
+        # Rationale: matches football's natural matchday cadence. Looking only
+        # at yesterday's snapshot (the prior default) produced noisy day-over-
+        # day movement; a 7-day window captures "since last week's matchday"
+        # across every league + euro comp we project. Falls back to 0 when
+        # there's no snapshot that old (new league / first run).
+        from datetime import timedelta
+        cutoff = pd.to_datetime('today').date() - timedelta(days=7)
+        old_league = all_team_ratings[all_team_ratings['League'] == league]
+        old_week_ago = old_league[old_league['Date'] <= cutoff]
+
+        if len(old_week_ago) > 0:
+            old_ratings = old_week_ago[old_week_ago['Date'] == old_week_ago['Date'].max()].copy()
+            old_ratings.reset_index(drop=True, inplace=True)
             old_ratings['Rank'] = old_ratings.index + 1
             for i in range(len(ratings)):
                 team = ratings.loc[i, 'Team']
@@ -671,9 +679,9 @@ class ProjectionService:
                 new_rank = ratings.loc[i, 'Rank']
                 ratings.loc[i, 'Movement'] = old_rank - new_rank
         else:
-            # New league with no historical ratings — no movement to calculate
+            # Not enough history (new league or <7 days since start) — skip movement.
             ratings['Movement'] = 0
-            logger.info(f"[{league}] No historical ratings found — movement set to 0")
+            logger.info(f"[{league}] No ratings snapshot older than 7 days — movement set to 0")
         ratings = ratings[['Team', 'Attack', 'Defense', 'Overall', 'Movement']]
 
         # In[ ]:
