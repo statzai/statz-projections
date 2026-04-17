@@ -222,6 +222,30 @@ class FetchAllDataService:
         return pd.DataFrame(rows, columns=cols)
 
     @staticmethod
+    async def _query_team_ratings(conn):
+        """Historical team ratings per (league, team, date). Projection services
+        join new computations onto this to compute Movement week-over-week."""
+        async with conn.cursor() as cur:
+            await cur.execute("""
+                SELECT c.name AS League,
+                       t.name AS Team,
+                       tr.date AS Date,
+                       tr.attack AS Attack,
+                       tr.defense AS Defense,
+                       tr.overall AS Overall,
+                       tr.movement AS Movement,
+                       tr.inverse AS Inverse,
+                       tr.team_id,
+                       tr.competition_id
+                FROM team_ratings tr
+                JOIN competitions c ON c.id = tr.competition_id
+                JOIN teams t ON t.id = tr.team_id
+            """)
+            rows = await cur.fetchall()
+            cols = [d[0] for d in cur.description]
+        return pd.DataFrame(rows, columns=cols)
+
+    @staticmethod
     async def _query_promoted_team_ratings(conn):
         async with conn.cursor() as cur:
             await cur.execute("""
@@ -508,6 +532,15 @@ class FetchAllDataService:
             "promoted_team_ratings",
             self._query_promoted_team_ratings,
             f / "promoted_team_ratings.csv",
+            incremental=False,
+            results=results,
+        )
+
+        logger.info("[team_ratings] START")
+        await self._fetch_table(
+            "team_ratings",
+            self._query_team_ratings,
+            f / "team_ratings.csv",
             incremental=False,
             results=results,
         )

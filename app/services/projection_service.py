@@ -177,10 +177,8 @@ class ProjectionService:
         ctx.projection_accuracy_dataset_all = ProjectionService._read_df(
             os.path.join(ctx.data_folder_path, "all_leagues_accuracy_dataset"))
 
-        # Team ratings
-        ctx.all_team_ratings = ProjectionService._read_df(
-            os.path.join(ctx.data_folder_path, "Team Ratings"))
-        ctx.all_team_ratings['Date'] = pd.to_datetime(ctx.all_team_ratings['Date']).dt.date
+        # Team ratings — sourced from DB via DataCache (was parquet file).
+        ctx.all_team_ratings = ProjectionService._cache.team_ratings.copy()
 
         # League / season IDs
         if league == 'Brazil Serie A':
@@ -226,7 +224,7 @@ class ProjectionService:
 
         return ctx
 
-    def _prepare_league(self, league, data_folder_path, model_file_path, save_file_path,
+    async def _prepare_league(self, league, data_folder_path, model_file_path, save_file_path,
                         league_id, league_dashed, model_dataset_all, model_dataset_league,
                         projection_accuracy_dataset_all, projection_accuracy_dataset_league,
                         all_team_ratings, team_stats, player_stats, teams, stats_types, stat_list,
@@ -680,17 +678,15 @@ class ProjectionService:
 
         # In[ ]:
 
-        ## NEW - Update and save ratings to the all_team_ratings dataset
-
+        ## NEW - Save ratings to the team_ratings DB table (was parquet).
         ratings['Date'] = pd.to_datetime('today').date()
         ratings['League'] = league
-        all_team_ratings = pd.concat([all_team_ratings, ratings], ignore_index=True)
-        all_team_ratings.drop_duplicates(subset=['Team', 'League', 'Date'], keep='last', inplace=True)
-        all_team_ratings.reset_index(drop=True, inplace=True)
-        # all_team_ratings.to_excel(rf"{data_folder_path}\Team Ratings.xlsx", index=False)
-        ProjectionService._write_df(all_team_ratings, f"{data_folder_path}/Team Ratings")
+        from app.repository.team_ratings_repo import insert_team_ratings_async
+        await insert_team_ratings_async(
+            ratings, league, league_id, ProjectionService._cache.teams
+        )
 
-        logger.info(f"[{league}] Step: team ratings calculated")
+        logger.info(f"[{league}] Step: team ratings calculated + saved to DB")
         
 
         all_team_ratings[all_team_ratings['League'] == league].to_csv(f"{save_file_path}/{league} Team Ratings.csv", index=False)
@@ -755,7 +751,7 @@ class ProjectionService:
         previous_season_id_above = ctx.previous_season_id_above
         stat_list = ctx.stat_list
 
-        ratings = self._prepare_league(
+        ratings = await self._prepare_league(
             league=league, data_folder_path=data_folder_path, model_file_path=model_file_path,
             save_file_path=save_file_path, league_id=league_id, league_dashed=league_dashed,
             model_dataset_all=model_dataset_all, model_dataset_league=model_dataset_league,
@@ -1449,7 +1445,7 @@ class ProjectionService:
         previous_season_id_above = ctx.previous_season_id_above
         stat_list = ctx.stat_list
 
-        ratings = self._prepare_league(
+        ratings = await self._prepare_league(
             league=league, data_folder_path=data_folder_path, model_file_path=model_file_path,
             save_file_path=save_file_path, league_id=league_id, league_dashed=league_dashed,
             model_dataset_all=model_dataset_all, model_dataset_league=model_dataset_league,
@@ -1639,7 +1635,7 @@ class ProjectionService:
         previous_season_id_above = ctx.previous_season_id_above
         stat_list = ctx.stat_list
 
-        ratings = self._prepare_league(
+        ratings = await self._prepare_league(
             league=league, data_folder_path=data_folder_path, model_file_path=model_file_path,
             save_file_path=save_file_path, league_id=league_id, league_dashed=league_dashed,
             model_dataset_all=model_dataset_all, model_dataset_league=model_dataset_league,
@@ -1973,7 +1969,7 @@ class ProjectionService:
         previous_season_id_above = ctx.previous_season_id_above
         stat_list = ctx.stat_list
 
-        ratings = self._prepare_league(
+        ratings = await self._prepare_league(
             league=league, data_folder_path=data_folder_path, model_file_path=model_file_path,
             save_file_path=save_file_path, league_id=league_id, league_dashed=league_dashed,
             model_dataset_all=model_dataset_all, model_dataset_league=model_dataset_league,
@@ -2427,7 +2423,7 @@ class ProjectionService:
         previous_season_id_above = ctx.previous_season_id_above
         stat_list = ctx.stat_list
 
-        ratings = self._prepare_league(
+        ratings = await self._prepare_league(
             league=league, data_folder_path=data_folder_path, model_file_path=model_file_path,
             save_file_path=save_file_path, league_id=league_id, league_dashed=league_dashed,
             model_dataset_all=model_dataset_all, model_dataset_league=model_dataset_league,
@@ -3055,7 +3051,7 @@ class ProjectionService:
         previous_season_id_above = ctx.previous_season_id_above
         stat_list = ctx.stat_list
 
-        ratings = self._prepare_league(
+        ratings = await self._prepare_league(
             league=league, data_folder_path=data_folder_path, model_file_path=model_file_path,
             save_file_path=save_file_path, league_id=league_id, league_dashed=league_dashed,
             model_dataset_all=model_dataset_all, model_dataset_league=model_dataset_league,

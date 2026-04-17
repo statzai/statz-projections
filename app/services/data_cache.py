@@ -27,6 +27,7 @@ class DataCache:
         self.projection_config = None
         self.promoted_team_ratings = None
         self.transfermarkt_team_mappings = None
+        self.team_ratings = None
         self._loaded = False
 
     def load(self, data_folder_path: str):
@@ -102,6 +103,18 @@ class DataCache:
         else:
             self.promoted_team_ratings = pd.DataFrame()
             logger.info("DataCache: promoted_team_ratings.csv not found — using xlsx fallback")
+
+        # DB-driven team ratings (replaces Team Ratings.parquet / Team Ratings.xlsx).
+        # Single source of truth shared by all 4 projection services (domestic,
+        # all-teams, euro-comp, premier-league-legacy).
+        tr_path = os.path.join(path, "team_ratings.csv")
+        if os.path.exists(tr_path):
+            self.team_ratings = pd.read_csv(tr_path)
+            self.team_ratings['Date'] = pd.to_datetime(self.team_ratings['Date']).dt.date
+            logger.info(f"DataCache: loaded team_ratings.csv ({len(self.team_ratings)} rows)")
+        else:
+            self.team_ratings = pd.DataFrame(columns=['League', 'Team', 'Date', 'Attack', 'Defense', 'Overall', 'Movement', 'Inverse', 'team_id', 'competition_id'])
+            logger.warning("DataCache: team_ratings.csv not found — all ratings will compute as first-entries with Movement=NULL")
 
         self._loaded = True
         logger.info("DataCache: all source data loaded successfully.")

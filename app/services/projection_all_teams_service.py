@@ -158,9 +158,8 @@ class ProjectionAllTeams:
                 projection_accuracy_dataset_league = ProjectionService._read_df_with_fallback(os.path.join(data_folder_path, f"{league}_accuracy_dataset"), os.path.join(data_folder_path, "all_leagues_accuracy_dataset"))
                 projection_accuracy_dataset_all = ProjectionService._read_df(os.path.join(data_folder_path, "all_leagues_accuracy_dataset"))
 
-                # Ratings Dataset
-                all_team_ratings = ProjectionService._read_df(os.path.join(data_folder_path, "Team Ratings"))
-                all_team_ratings['Date'] = pd.to_datetime(all_team_ratings['Date']).dt.date
+                # Ratings Dataset — DB-sourced via DataCache (was parquet).
+                all_team_ratings = ProjectionService._cache.team_ratings.copy()
 
                 # In[9]: Use shared cache (loaded once before loop)
                 player_stats = ProjectionService._cache.player_stats.copy()
@@ -695,13 +694,12 @@ class ProjectionAllTeams:
 
                 ratings['Date'] = pd.to_datetime('today').date()
                 ratings['League'] = league
-                all_team_ratings = pd.concat([all_team_ratings, ratings], ignore_index=True)
-                all_team_ratings.drop_duplicates(subset=['Team', 'League', 'Date'], keep='last', inplace=True)
-                all_team_ratings.reset_index(drop=True, inplace=True)
-                # all_team_ratings.to_excel(rf"{data_folder_path}\Team Ratings.xlsx", index=False)
-                ProjectionService._write_df(all_team_ratings, f"{data_folder_path}/Team Ratings")
+                from app.repository.team_ratings_repo import insert_team_ratings_async
+                await insert_team_ratings_async(
+                    ratings, league, league_id, ProjectionService._cache.teams
+                )
 
-                logger.info(f"[{league}] Step: all_team_ratings dataset updated")
+                logger.info(f"[{league}] Step: team ratings saved to DB")
 
 
                 all_team_ratings[all_team_ratings['League'] == league].to_csv(f"{save_file_path}/{league} Team Ratings.csv", index=False)

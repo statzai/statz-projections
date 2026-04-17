@@ -93,9 +93,8 @@ class EuroCompProjectionService:
         players['display_name'] = players['display_name'].str.strip()
         logger.info(f"[{league}] Loaded {len(players)} players")
 
-        # Ratings Dataset
-        all_team_ratings = EuroCompProjectionService._read_df(os.path.join(data_folder_path, "Team Ratings"))
-        all_team_ratings['Date'] = pd.to_datetime(all_team_ratings['Date']).dt.date
+        # Ratings Dataset — DB-sourced via DataCache (was parquet).
+        all_team_ratings = EuroCompProjectionService._cache.team_ratings.copy()
 
         # League Weightings (for domestic rating calculations)
         league_weightings_df = EuroCompProjectionService._cache.league_weightings if EuroCompProjectionService._cache.is_loaded() else pd.read_excel(os.path.join(data_folder_path, "League Weightings.xlsx"))
@@ -251,6 +250,16 @@ class EuroCompProjectionService:
         ratings = ratings_df.copy()
 
         logger.info(f'[{league}] Ratings built for {len(ratings)} teams across {len(EuroCompProjectionService.LEAGUE_COUNTRY_DICT)} leagues')
+
+        # Save UEFA-coefficient-adjusted ratings to the team_ratings DB table
+        # under the euro comp's competition_id. This replaces the previous
+        # no-op (euro_comp_service never wrote ratings → Champions League
+        # and Europa League hadn't been updated since Mar 20).
+        from app.repository.team_ratings_repo import insert_team_ratings_async
+        await insert_team_ratings_async(
+            ratings[['Team', 'Attack', 'Defense', 'Overall']].copy(),
+            league, comp_id, EuroCompProjectionService._cache.teams
+        )
 
         # ── Fixture projections ──
 
