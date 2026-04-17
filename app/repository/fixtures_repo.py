@@ -37,13 +37,15 @@ async def insert_fixtures_async(data_list, teams=None):
         if col in api_score_preds.columns:
             api_score_preds[col] = api_score_preds[col].apply(clean_percentage)
 
+    # Note: row['home_team_name'] / row['away_team_name'] are still used as
+    # input to resolve_team_id() to look up the FK, but are no longer written
+    # to the DB — the team_id FK replaces them (see nullable migration
+    # 2026_04_17_120000 and the Phase 2 cleanup plan).
     values = [
         (
             row['fixture_id'],
             resolve_team_id(row['home_team_name'], teams) if teams is not None else None,
             resolve_team_id(row['away_team_name'], teams) if teams is not None else None,
-            row['home_team_name'],
-            row['away_team_name'],
             row['home_goals'],
             row['away_goals'],
             row['home_win_percent'],
@@ -62,7 +64,7 @@ async def insert_fixtures_async(data_list, teams=None):
     sql = """
     INSERT INTO fixture_projections (
         fixture_id, home_team_id, away_team_id,
-        home_team_name, away_team_name, home_goals, away_goals,
+        home_goals, away_goals,
         home_win_percent, away_win_percent, draw_percent,
         home_clean_sheet_percent, away_clean_sheet_percent,
         over_15_goals_percent, over_25_goals_percent, both_teams_shore_percent,
@@ -70,7 +72,7 @@ async def insert_fixtures_async(data_list, teams=None):
         created_at, updated_at
     ) VALUES (
         %s, %s, %s,
-        %s, %s, %s, %s,
+        %s, %s,
         %s, %s, %s,
         %s, %s,
         %s, %s, %s,
@@ -80,8 +82,6 @@ async def insert_fixtures_async(data_list, teams=None):
     ON DUPLICATE KEY UPDATE
         home_team_id = VALUES(home_team_id),
         away_team_id = VALUES(away_team_id),
-        home_team_name = VALUES(home_team_name),
-        away_team_name = VALUES(away_team_name),
         home_goals = VALUES(home_goals),
         away_goals = VALUES(away_goals),
         home_win_percent = VALUES(home_win_percent),

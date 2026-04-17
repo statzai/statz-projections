@@ -294,12 +294,17 @@ class FetchAllDataService:
 
     @staticmethod
     def _make_fixtures_query(last_fetch):
+        # Exclude cancelled fixtures (Sportmonks state_id = 10) to avoid
+        # projecting ghost fixtures. NULL state_id is treated as scheduled
+        # (default) and included. Matches the filter Laravel uses
+        # elsewhere (e.g. FixtureService::getFixtures()).
+        state_filter = "(state_id != 10 OR state_id IS NULL)"
         async def _query(conn):
             if last_fetch:
-                sql = "SELECT * FROM fixtures WHERE updated_at > %s"
+                sql = f"SELECT * FROM fixtures WHERE updated_at > %s AND {state_filter}"
                 params = (last_fetch,)
             else:
-                sql = "SELECT * FROM fixtures"
+                sql = f"SELECT * FROM fixtures WHERE {state_filter}"
                 params = ()
             async with conn.cursor() as cur:
                 await cur.execute(sql, params)

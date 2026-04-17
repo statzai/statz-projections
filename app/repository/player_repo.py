@@ -54,6 +54,10 @@ async def insert_player_async(data_list, teams=None):
 
     now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 
+    # Note: row.get("team") / row.get("opponent") / row.get("player_name")
+    # remain as input (resolve_team_id needs the names), but the string
+    # columns are no longer written to the DB. See nullable migration
+    # 2026_04_17_120000.
     records = []
     for _, row in api_pl_projections.iterrows():
         # Resolve team IDs once per row (each row spawns ~15 stat records)
@@ -68,12 +72,9 @@ async def insert_player_async(data_list, teams=None):
                     row.get("fixture_id"),
                     row.get("player_id"),
                     stat_id,
-                    row.get("player_name"),
                     row.get("position"),
                     row_team_id,
                     row_opponent_id,
-                    row.get("team"),
-                    row.get("opponent"),
                     row.get("venue"),
                     convert_start(row.get("start")),
                     float(value),
@@ -84,17 +85,14 @@ async def insert_player_async(data_list, teams=None):
 
     sql = """
     INSERT INTO player_projections (
-        fixture_id, player_id, stats_type_id, player_name, position,
-        team_id, opponent_id, team, opponent,
+        fixture_id, player_id, stats_type_id, position,
+        team_id, opponent_id,
         venue, start, stats_value, kickoff_datetime, created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE
-        player_name = VALUES(player_name),
         position = VALUES(position),
         team_id = VALUES(team_id),
         opponent_id = VALUES(opponent_id),
-        team = VALUES(team),
-        opponent = VALUES(opponent),
         venue = VALUES(venue),
         start = VALUES(start),
         stats_value = VALUES(stats_value),

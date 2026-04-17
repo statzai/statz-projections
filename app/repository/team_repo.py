@@ -25,13 +25,14 @@ async def insert_teams_async(data_list, teams=None):
 
     api_team_projections_save['kickoff_datetime'] = api_team_projections_save['kickoff_datetime'].dt.strftime('%Y-%m-%dT%H:%M:%S')
 
+    # Note: row['team'] / row['opponent'] remain as input to resolve_team_id()
+    # but are no longer written to the DB — team_id / opponent_id replace
+    # them. See nullable migration 2026_04_17_120000.
     values = [
         (
             row['fixture_id'],
             resolve_team_id(row['team'], teams) if teams is not None else None,
             resolve_team_id(row['opponent'], teams) if teams is not None else None,
-            row['team'],
-            row['opponent'],
             row['venue'],
             row['goals'],
             row['shots_total'],
@@ -51,16 +52,15 @@ async def insert_teams_async(data_list, teams=None):
     sql = """
     INSERT INTO team_projections (
         fixture_id, team_id, opponent_id,
-        team, opponent, venue, goals,
+        venue, goals,
         shots_total, shots_on_target, corners,
         fouls, yellowcards, tackles, passes,
         total_crosses, offsides, kickoff_datetime,
         created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     ON DUPLICATE KEY UPDATE
         team_id = VALUES(team_id),
         opponent_id = VALUES(opponent_id),
-        opponent = VALUES(opponent),
         venue = VALUES(venue),
         goals = VALUES(goals),
         shots_total = VALUES(shots_total),

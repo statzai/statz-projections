@@ -46,6 +46,9 @@ async def insert_players_stats_async(data_list, teams=None):
         lambda x: float(str(x).replace('%', '').strip()) if x is not None and x != '' else None
     )
 
+    # Note: player_name / team / opponent strings are no longer written to
+    # the DB — team_id / opponent_id / player_id FKs replace them. See
+    # nullable migration 2026_04_17_120000.
     values = []
     for _, row in api_pl_projections.iterrows():
         market_name = row.get("market_name")
@@ -53,12 +56,9 @@ async def insert_players_stats_async(data_list, teams=None):
         values.append((
             row.get("fixture_id"),
             row.get("player_id"),
-            row.get("player_name"),
             row.get("position"),
             resolve_team_id(row.get("team"), teams) if teams is not None else None,
             resolve_team_id(row.get("opponent"), teams) if teams is not None else None,
-            row.get("team"),
-            row.get("opponent"),
             row.get("venue"),
             market_name,
             stats_type_id,
@@ -69,19 +69,15 @@ async def insert_players_stats_async(data_list, teams=None):
 
     sql = """
     INSERT INTO player_prop_projections (
-        fixture_id, player_id, player_name, position,
+        fixture_id, player_id, position,
         team_id, opponent_id,
-        team, opponent,
         venue, market_name, stats_type_id, prop, projection_percent,
         kickoff_datetime, created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     ON DUPLICATE KEY UPDATE
-        player_name = VALUES(player_name),
         position = VALUES(position),
         team_id = VALUES(team_id),
         opponent_id = VALUES(opponent_id),
-        team = VALUES(team),
-        opponent = VALUES(opponent),
         venue = VALUES(venue),
         stats_type_id = VALUES(stats_type_id),
         projection_percent = VALUES(projection_percent),
