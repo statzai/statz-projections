@@ -663,7 +663,12 @@ class ProjectionService:
         ratings['Overall'] = ratings['Attack'] - ratings['Defense']  # UPDATED - Overall is now Attack minus Defense
         ratings.sort_values('Overall', ascending=False, inplace=True)
         ratings.reset_index(drop=True, inplace=True)
-        ratings = ratings.round(1)
+        # Indexed columns stay at 1dp (legacy precision). xG/game columns
+        # go to 2dp so values like 1.85 don't flatten to 1.9.
+        ratings[['Attack', 'Defense', 'Overall']] = ratings[['Attack', 'Defense', 'Overall']].round(1)
+        for _xg_col in ('Attack_xG', 'Defense_xG', 'Overall_xG'):
+            if _xg_col in ratings.columns:
+                ratings[_xg_col] = ratings[_xg_col].round(2)
         ratings['Rank'] = ratings.index + 1
         # Movement = rank change vs most recent snapshot at least 7 days old.
         # Rationale: matches football's natural matchday cadence. Looking only
