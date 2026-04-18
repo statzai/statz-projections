@@ -647,6 +647,18 @@ class ProjectionService:
             logger.info(f"[{league}] Step: market value adjustments applied")
         except Exception as _mv_err:
             logger.warning(f"[{league}] Market value block failed for {league}: {_mv_err} — skipping MV adjustment")
+
+        # Diagnostic: dump the post-MV, pre-rescale ratings so we can eyeball
+        # the xG/game units before switching team_ratings to store these.
+        # Remove once the schema change lands.
+        try:
+            _snap = ratings[['Team', 'Attack', 'Defense']].copy()
+            _snap['Overall'] = _snap['Attack'] - _snap['Defense']
+            _snap = _snap.sort_values('Overall', ascending=False).round(3)
+            logger.info(f"[{league}] xG/game ratings (post-MV, pre-rescale):\n{_snap.to_string(index=False)}")
+        except Exception as _log_err:
+            logger.warning(f"[{league}] Could not dump xG/game ratings: {_log_err}")
+
         # In[17]:
 
         # Readjust so that 100 is the mean for Attack, Defense, and Overall
