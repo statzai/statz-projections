@@ -664,6 +664,12 @@ class ProjectionAllTeams:
                         logger.info(f"[{league}] Step: market value adjustments applied")
                     except Exception as _mv_err:
                         logger.warning(f"[{league}] Market value block failed: {_mv_err} — skipping MV adjustment")
+
+                # Snapshot post-MV, pre-rescale ratings in xG/game units.
+                ratings['Attack_xG'] = ratings['Attack']
+                ratings['Defense_xG'] = ratings['Defense']
+                ratings['Overall_xG'] = ratings['Attack'] - ratings['Defense']
+
                 # In[17]:
 
                 # Readjust so that 100 is the mean for Attack, Defense, and Overall

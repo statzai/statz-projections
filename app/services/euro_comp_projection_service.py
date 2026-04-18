@@ -229,20 +229,30 @@ class EuroCompProjectionService:
             except Exception as _mv_err:
                 logger.warning(f"[{league}] Market value block failed for {league_name}: {_mv_err} — skipping MV adjustment")
 
+            # Snapshot post-MV, pre-rescale ratings in xG/game units.
+            ratings['Attack_xG'] = ratings['Attack']
+            ratings['Defense_xG'] = ratings['Defense']
+            ratings['Overall_xG'] = ratings['Attack'] - ratings['Defense']
+
             for col in ['Attack', 'Defense']:
                 ratings[col] = (ratings[col] / ratings[col].mean()) * 100
 
             ratings['Overall'] = ratings['Attack'] - ratings['Defense']
             ratings.sort_values('Overall', ascending=False, inplace=True)
             ratings.reset_index(drop=True, inplace=True)
-            ratings = ratings[['Team', 'Attack', 'Defense', 'Overall']]
+            ratings = ratings[['Team', 'Attack', 'Defense', 'Overall', 'Attack_xG', 'Defense_xG', 'Overall_xG']]
 
-            # Apply UEFA coefficient
+            # Apply UEFA coefficient — same scaling applies to both the
+            # indexed and the xG/game columns so euro-comp rankings stay
+            # cross-league comparable.
             coef = uefa_coef[uefa_coef['League'] == league_name]['Coefficient Index'].values[0]
             ratings['League'] = league_name
             ratings['coef'] = coef
             ratings['Attack'] *= coef
             ratings['Defense'] /= coef
+            ratings['Attack_xG'] *= coef
+            ratings['Defense_xG'] /= coef
+            ratings['Overall_xG'] = ratings['Attack_xG'] - ratings['Defense_xG']
             ratings_df = pd.concat([ratings_df, ratings], ignore_index=True)
 
         ratings_df['Overall'] = ratings_df['Attack'] - ratings_df['Defense']
@@ -257,7 +267,7 @@ class EuroCompProjectionService:
         # and Europa League hadn't been updated since Mar 20).
         from app.repository.team_ratings_repo import insert_team_ratings_async
         await insert_team_ratings_async(
-            ratings[['Team', 'Attack', 'Defense', 'Overall']].copy(),
+            ratings[['Team', 'Attack', 'Defense', 'Overall', 'Attack_xG', 'Defense_xG', 'Overall_xG']].copy(),
             league, comp_id, EuroCompProjectionService._cache.teams
         )
 

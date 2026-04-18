@@ -33,7 +33,7 @@ async def insert_team_ratings_async(ratings_df, league_name, competition_id, tea
     df = ratings_df.copy()
 
     # Ensure the columns we need exist — callers may pass a reduced frame.
-    for col in ('Attack', 'Defense', 'Overall', 'Movement'):
+    for col in ('Attack', 'Defense', 'Overall', 'Attack_xG', 'Defense_xG', 'Overall_xG', 'Movement'):
         if col not in df.columns:
             df[col] = None
 
@@ -65,6 +65,9 @@ async def insert_team_ratings_async(ratings_df, league_name, competition_id, tea
             _val(row.get('Attack')),
             _val(row.get('Defense')),
             _val(row.get('Overall')),
+            _val(row.get('Attack_xG')),
+            _val(row.get('Defense_xG')),
+            _val(row.get('Overall_xG')),
             _val(row.get('Movement')),
             _val(row.get('Inverse')),
         ))
@@ -79,13 +82,18 @@ async def insert_team_ratings_async(ratings_df, league_name, competition_id, tea
     sql = """
     INSERT INTO team_ratings (
         competition_id, team_id, date,
-        attack, defense, overall, movement, inverse,
+        attack, defense, overall,
+        attack_xg, defense_xg, overall_xg,
+        movement, inverse,
         created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     ON DUPLICATE KEY UPDATE
         attack = VALUES(attack),
         defense = VALUES(defense),
         overall = VALUES(overall),
+        attack_xg = VALUES(attack_xg),
+        defense_xg = VALUES(defense_xg),
+        overall_xg = VALUES(overall_xg),
         movement = VALUES(movement),
         inverse = VALUES(inverse),
         updated_at = NOW()
