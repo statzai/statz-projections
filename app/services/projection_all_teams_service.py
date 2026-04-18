@@ -700,7 +700,7 @@ class ProjectionAllTeams:
                 else:
                     ratings['Movement'] = 0
                     logger.info(f"[{league}] No ratings snapshot older than 7 days — movement set to 0")
-                ratings = ratings[['Team', 'Attack', 'Defense', 'Overall', 'Movement']]
+                ratings = ratings[['Team', 'Attack', 'Defense', 'Overall', 'Attack_xG', 'Defense_xG', 'Overall_xG', 'Movement']]
 
                 # In[ ]:
 
