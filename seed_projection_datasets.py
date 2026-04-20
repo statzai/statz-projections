@@ -217,10 +217,8 @@ def build_model_dataset_rows(df, teams, fixtures, comp_teams):
     unresolved_team = 0
     unresolved_opponent = 0
     missing_fixture = 0
+    contamination_skipped = 0
 
-    # Group by parquet's claimed comp_id to scope comp_teams for name
-    # disambiguation — but only as the PREFERENCE; actual comp_id used
-    # for insertion is taken from the fixtures table.
     for claimed_comp_id, comp_df in df.groupby("comp_id"):
         scoped_ids = comp_teams.loc[
             comp_teams["competition_id"] == int(claimed_comp_id), "team_id"
@@ -234,6 +232,16 @@ def build_model_dataset_rows(df, teams, fixtures, comp_teams):
                 continue
             actual_season_id, actual_comp_id = fix_info
 
+            # Contamination check: if the parquet claims this row belongs
+            # to comp X but the fixture actually belongs to comp Y, SKIP.
+            # These are rows that got pooled into the wrong league's parquet
+            # file (e.g. MLS fixtures sitting in Eredivisie parquet). The
+            # correct data for that fixture lives in the other league's
+            # parquet, so skipping here avoids overwriting it.
+            if int(claimed_comp_id) != actual_comp_id:
+                contamination_skipped += 1
+                continue
+
             team_id = resolve_team_id_scoped(row["Team"], teams, scoped_ids)
             opponent_id = resolve_team_id_scoped(row["Opponent"], teams, scoped_ids)
 
@@ -246,8 +254,8 @@ def build_model_dataset_rows(df, teams, fixtures, comp_teams):
 
             tup = [
                 fixture_id,
-                actual_comp_id,       # from fixtures DB, not parquet
-                actual_season_id,     # from fixtures DB
+                actual_comp_id,
+                actual_season_id,
                 team_id,
                 opponent_id,
                 to_val(row["Team"]),
@@ -274,6 +282,7 @@ def build_model_dataset_rows(df, teams, fixtures, comp_teams):
         "unresolved_team": unresolved_team,
         "unresolved_opponent": unresolved_opponent,
         "missing_fixture": missing_fixture,
+        "contamination_skipped": contamination_skipped,
     }
 
 
@@ -366,7 +375,8 @@ async def seed_model_dataset(teams, fixtures, comp_teams, dry_run):
 
     total_rows_in = 0
     total_rows_out = 0
-    total_unresolved = {"unresolved_team": 0, "unresolved_opponent": 0, "missing_fixture": 0}
+    total_unresolved = {"unresolved_team": 0, "unresolved_opponent": 0,
+                        "missing_fixture": 0, "contamination_skipped": 0}
 
     for path in files:
         league = os.path.basename(path).replace("_model_dataset_with_history.parquet", "")
@@ -377,7 +387,8 @@ async def seed_model_dataset(teams, fixtures, comp_teams, dry_run):
             total_unresolved[k] += stats[k]
         logger.info(
             f"  {league}: parquet={len(df)} resolved={len(rows)} "
-            f"dropped(team={stats['unresolved_team']} opp={stats['unresolved_opponent']} missing_fixture={stats['missing_fixture']})"
+            f"dropped(team={stats['unresolved_team']} opp={stats['unresolved_opponent']} "
+            f"missing_fixture={stats['missing_fixture']} contaminated={stats['contamination_skipped']})"
         )
         if not dry_run and rows:
             await insert_chunks(MODEL_DATASET_INSERT_SQL, rows, label=f"[model {league}]")
@@ -404,6 +415,7 @@ def build_accuracy_rows(df, teams, fixtures, comp_teams):
     unresolved_home = 0
     unresolved_away = 0
     missing_fixture = 0
+    contamination_skipped = 0
 
     for claimed_comp_id, comp_df in df.groupby("comp_id"):
         scoped_ids = comp_teams.loc[
@@ -415,6 +427,10 @@ def build_accuracy_rows(df, teams, fixtures, comp_teams):
             actual_comp_id = fix_by_id.get(fixture_id)
             if actual_comp_id is None:
                 missing_fixture += 1
+                continue
+            # Same contamination rule as model_dataset.
+            if int(claimed_comp_id) != actual_comp_id:
+                contamination_skipped += 1
                 continue
 
             home_id = resolve_team_id_scoped(row.get("Home Team"), teams, scoped_ids)
@@ -428,7 +444,7 @@ def build_accuracy_rows(df, teams, fixtures, comp_teams):
 
             tup = [
                 fixture_id,
-                actual_comp_id,  # from fixtures DB, not parquet
+                actual_comp_id,
                 home_id,
                 away_id,
                 to_val(row.get("Home Team")),
@@ -469,6 +485,7 @@ def build_accuracy_rows(df, teams, fixtures, comp_teams):
         "unresolved_home": unresolved_home,
         "unresolved_away": unresolved_away,
         "missing_fixture": missing_fixture,
+        "contamination_skipped": contamination_skipped,
     }
 
 
@@ -515,7 +532,8 @@ async def seed_accuracy_dataset(teams, fixtures, comp_teams, dry_run):
 
     total_rows_in = 0
     total_rows_out = 0
-    total_unresolved = {"unresolved_home": 0, "unresolved_away": 0, "missing_fixture": 0}
+    total_unresolved = {"unresolved_home": 0, "unresolved_away": 0,
+                        "missing_fixture": 0, "contamination_skipped": 0}
 
     for path in files:
         league = os.path.basename(path).replace("_accuracy_dataset.parquet", "")
@@ -526,7 +544,8 @@ async def seed_accuracy_dataset(teams, fixtures, comp_teams, dry_run):
             total_unresolved[k] += stats[k]
         logger.info(
             f"  {league}: parquet={len(df)} resolved={len(rows)} "
-            f"dropped(home={stats['unresolved_home']} away={stats['unresolved_away']} missing_fixture={stats['missing_fixture']})"
+            f"dropped(home={stats['unresolved_home']} away={stats['unresolved_away']} "
+            f"missing_fixture={stats['missing_fixture']} contaminated={stats['contamination_skipped']})"
         )
         if not dry_run and rows:
             await insert_chunks(ACCURACY_DATASET_INSERT_SQL, rows, label=f"[acc {league}]")
