@@ -31,6 +31,7 @@ from datetime import datetime
 import pandas as pd
 
 from app.database import init_db_pool, get_connection
+from app.repository.db_utils import execute_chunked
 from app.source_database import source_init_db_pool, get_source_connection, release_source_connection
 
 logging.basicConfig(
@@ -641,24 +642,13 @@ async def seed_projection_models(comps_df, dry_run):
 #  Helpers
 # ──────────────────────────────────────────────────────────────────────────
 
-CHUNK_SIZE = 500
-
-
 async def insert_chunks(sql, values, label=""):
-    conn = await get_connection()
-    try:
-        total = 0
-        n_chunks = (len(values) + CHUNK_SIZE - 1) // CHUNK_SIZE
-        for i in range(0, len(values), CHUNK_SIZE):
-            chunk = values[i:i + CHUNK_SIZE]
-            async with conn.cursor() as cur:
-                affected = await cur.executemany(sql, chunk)
-            await conn.commit()
-            total += (affected or 0)
-            logger.info(f"  {label} chunk {i // CHUNK_SIZE + 1}/{n_chunks}: {affected} rows affected")
-        logger.info(f"  {label} total affected: {total}")
-    finally:
-        conn.close()
+    """Thin wrapper around the shared execute_chunked helper (which uses
+    pool.release, async timeouts, and retry semantics — avoids the pool-
+    exhaustion hang we saw with the naïve conn.close() pattern)."""
+    if not values:
+        return 0
+    return await execute_chunked(sql, values, label=label)
 
 
 async def fetch_comps():
