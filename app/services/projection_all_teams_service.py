@@ -1334,7 +1334,8 @@ class ProjectionAllTeams:
                             try:
                                 _cbit, _cbit_avg, _clr, _blk, _rec, _twon, _fmhr = get_extra_stats(
                                     _player, _pos, _team, teams, players, player_stats, fixtures_df, stats_types,
-                                    weight=0.96, mins=50, games=50)
+                                    weight=0.96, mins=50, games=50,
+                                    competition_id=league_id, comp_teams=comp_teams)
                                 _mask = (pl_projections['Player'] == _player) & (pl_projections['Team'] == _team)
                                 pl_projections.loc[_mask, 'CBIT Hit Rate'] = _cbit
                                 pl_projections.loc[_mask, 'CBIT Average'] = _cbit_avg

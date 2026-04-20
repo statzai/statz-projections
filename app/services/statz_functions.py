@@ -1023,7 +1023,11 @@ def adjust_shots_projection(projected_goals, projected_shots, projected_shots_on
 def player_criteria(player, team, fixtures, player_stats, players, teams, season_id=None, competition_id=None, comp_teams=None):
     import pandas as pd
     fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])  # NEW - ensure datetime format
-    team_fixtures = get_team_fixtures(team, fixtures, teams, season_id=season_id, comp_id=competition_id, comp_teams=comp_teams)
+    # Pre-filter comp_teams for disambiguation only. Do NOT pass comp_id to
+    # get_team_fixtures — that would activate its fixture filter and drop
+    # cross-comp matches (same reasoning as get_ratings).
+    scoped_comp_teams = comp_teams[comp_teams['competition_id'] == competition_id] if (competition_id is not None and comp_teams is not None and 'competition_id' in comp_teams.columns) else comp_teams
+    team_fixtures = get_team_fixtures(team, fixtures, teams, season_id=season_id, comp_teams=scoped_comp_teams)
     todays_date = pd.to_datetime('today')
     team_fixtures['kickoff_datetime'] = pd.to_datetime(team_fixtures['kickoff_datetime'])
     team_fixtures = team_fixtures[team_fixtures['kickoff_datetime'] < todays_date]
@@ -1421,9 +1425,9 @@ def get_poisson_probs(projections, stats, numbers):
 ## THE FOLLOWING FUNCTIONS ARE FOR THE PREMIER LEAGUE SCRIPT
 
 def get_extra_stats(player, position, team, teams, players, player_stats, fixtures, stats_types, weight=0.98, mins=50,
-                    games=50):
+                    games=50, competition_id=None, comp_teams=None):
     import pandas as pd
-    player_id = get_player_id(player, players, team, teams)
+    player_id = get_player_id(player, players, team, teams, competition_id, comp_teams)
     player_stats = player_stats[player_stats['player_id'] == player_id]
     player_df = player_stats[player_stats['stats_type_id'] == get_stat_id('Minutes Played', stats_types)]
     player_df = player_df[player_df['value'] >= mins]

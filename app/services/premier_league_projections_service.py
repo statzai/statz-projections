@@ -1197,7 +1197,8 @@ class PremierLeagueProjectionsService:
             try:
                 player_cbit_perc, player_cbit_avg, player_clearances_avg, player_blocked_shots_avg, player_recovery_avg, tackles_won_avg, full_match_hit_rate = get_extra_stats(
                     player, position, team, teams, players, player_stats, fixtures_df, stats_types, weight=0.96, mins=50,
-                    games=50)
+                    games=50,
+                    competition_id=league_id, comp_teams=comp_teams)
                 pl_projections.loc[
                     (pl_projections['Player'] == player) & (pl_projections['Team'] == team), 'CBIT Hit Rate'] = player_cbit_perc
                 pl_projections.loc[
