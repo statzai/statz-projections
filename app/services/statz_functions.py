@@ -35,10 +35,40 @@ TEAM_NAME_FIXES = {
     "Milan": "AC Milan",
 }
 
-def get_team_id(team_name, teams):
+def get_team_id(team_name, teams, competition_id=None, comp_teams=None):
+    """
+    Resolve a team name to its id. When competition_id + comp_teams are
+    provided, the lookup is restricted to teams registered in that comp via
+    the competition_season_teams mapping — fixes the duplicate-name bug
+    where "Nacional" can mean either CD Nacional (Portugal id=7035) or
+    Club Nacional (Uruguay id=828). Falls back to the global first-match
+    if the scoped lookup misses (keeps the same signature-optional semantics
+    as resolve_team_id in db_utils).
+    """
+    import logging
+    _log = logging.getLogger("statz_functions")
     team_name = TEAM_NAME_FIXES.get(team_name, team_name)
-    team_id = teams[teams['name'] == team_name]['id'].values[0]
-    return team_id
+
+    if competition_id is not None and comp_teams is not None and not comp_teams.empty:
+        scoped_ids = comp_teams.loc[
+            comp_teams['competition_id'] == competition_id, 'team_id'
+        ].unique()
+        if len(scoped_ids) > 0:
+            scoped = teams[(teams['id'].isin(scoped_ids)) & (teams['name'] == team_name)]['id']
+            if not scoped.empty:
+                return int(scoped.iloc[0])
+        _log.warning(
+            f"get_team_id({team_name!r}): no match within competition {competition_id} scope — falling back to global lookup"
+        )
+
+    matches = teams[teams['name'] == team_name]['id']
+    if matches.empty:
+        raise IndexError(f"get_team_id: no team named {team_name!r} in teams table")
+    if len(matches) > 1:
+        _log.warning(
+            f"get_team_id({team_name!r}): ambiguous — {len(matches)} global matches ({list(matches)}), picking first (comp_id={competition_id})"
+        )
+    return int(matches.iloc[0])
 
 
 def get_stat_id(stat_name, stats_types):
@@ -78,8 +108,8 @@ def get_comp_teams(league_id, season_id, comp_teams, teams):
     return team_names
 
 
-def get_team_fixtures(team_name, fixtures, teams, comp_id=None, season_id=None):
-    team_id = get_team_id(team_name, teams)
+def get_team_fixtures(team_name, fixtures, teams, comp_id=None, season_id=None, comp_teams=None):
+    team_id = get_team_id(team_name, teams, comp_id, comp_teams)
     fixtures = fixtures[(fixtures['home_team_id'] == team_id) | (fixtures['away_team_id'] == team_id)].reset_index(
         drop=True)
     fixtures[['home_team', 'away_team']] = fixtures['name'].str.split(' vs ', expand=True)
@@ -103,19 +133,19 @@ def get_team_fixtures(team_name, fixtures, teams, comp_id=None, season_id=None):
 
 
 def get_team_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Yes', comp_id=None, season_id=None,
-                   games=None):
+                   games=None, comp_teams=None):
     team_stats.drop_duplicates(subset=['fixture_id', 'stats_type_id', 'team_id'], inplace=True)
-    team_id = teams[teams['name'] == team]['id'].values[0]  # NEW - get team_id
+    team_id = get_team_id(team, teams, comp_id, comp_teams)
     fixtures = get_team_fixtures(team, fixtures, teams, comp_id=comp_id,
-                                 season_id=season_id)  # UPDATED - make sure to add comp_id=comp_id and season_id=season_id
+                                 season_id=season_id, comp_teams=comp_teams)
     if stat == 'Fouls Drawn':
         team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
                                 (team_stats['stats_type_id'] == get_stat_id('Fouls', stats_types)) &
-                                (team_stats['team_id'] != get_team_id(team, teams))].reset_index(drop=True)
+                                (team_stats['team_id'] != team_id)].reset_index(drop=True)
     else:
         team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
                                 (team_stats['stats_type_id'] == get_stat_id(stat, stats_types)) &
-                                (team_stats['team_id'] == get_team_id(team, teams))].reset_index(drop=True)
+                                (team_stats['team_id'] == team_id)].reset_index(drop=True)
     team_stats = team_stats[['fixture_id', 'value', 'team_id']]
     team_stats = team_stats.merge(fixtures, left_on='fixture_id', right_on='id',
                                   how='right')  # UPDATED - changed to right join to include all fixtures
@@ -141,19 +171,19 @@ def get_team_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='
 
 
 def get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Yes', comp_id=None, season_id=None,
-                  games=None):
+                  games=None, comp_teams=None):
     team_stats.drop_duplicates(subset=['fixture_id', 'stats_type_id', 'team_id'], inplace=True)
-    team_id = teams[teams['name'] == team]['id'].values[0]  # NEW - get team_id
+    team_id = get_team_id(team, teams, comp_id, comp_teams)
     fixtures = get_team_fixtures(team, fixtures, teams, comp_id=comp_id,
-                                 season_id=season_id)  # UPDATED - make sure to add comp_id=comp_id and season_id=season_id
+                                 season_id=season_id, comp_teams=comp_teams)
     if stat == 'Fouls Drawn':
         team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
                                 (team_stats['stats_type_id'] == get_stat_id('Fouls', stats_types)) &
-                                (team_stats['team_id'] == get_team_id(team, teams))].reset_index(drop=True)
+                                (team_stats['team_id'] == team_id)].reset_index(drop=True)
     else:
         team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
                                 (team_stats['stats_type_id'] == get_stat_id(stat, stats_types)) &
-                                (team_stats['team_id'] != get_team_id(team, teams))].reset_index(drop=True)
+                                (team_stats['team_id'] != team_id)].reset_index(drop=True)
     team_stats = team_stats[['fixture_id', 'value', 'team_id']]
     team_stats = team_stats.merge(fixtures, left_on='fixture_id', right_on='id',
                                   how='right')  # UPDATED - changed to right join to include all fixtures
@@ -182,18 +212,22 @@ def get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Y
 def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_ids, comp_teams, teams_df, fixtures_df,
                 team_stats, stats_types, weight, games, weightings):
     import pandas as pd
+    # Keep the original comp_teams dataframe for scoped team-id lookups — the
+    # name-list version (replaces comp_teams below) is what the main loop
+    # iterates over, but the raw dataframe is still needed for scoping.
+    comp_teams_df = comp_teams
     comp_teams = get_comp_teams(league_id, current_season_id, comp_teams, teams=teams_df)
     team_ratings = []
     for team in comp_teams:
         xG = get_team_stats('Expected Goals (xG)', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
-                            season_id=all_season_ids)  # UPDATED - games=games
+                            season_id=all_season_ids, comp_id=league_id, comp_teams=comp_teams_df)
         xGA = get_opp_stats('Expected Goals (xG)', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
-                            season_id=all_season_ids)  # UPDATED - games=games
+                            season_id=all_season_ids, comp_id=league_id, comp_teams=comp_teams_df)
         xGA = xGA.rename(columns={'Team Expected Goals (xG)': 'Opponent Expected Goals (xG)'})
         GF = get_team_stats('Goals', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
-                            season_id=all_season_ids)  # UPDATED - games=games
+                            season_id=all_season_ids, comp_id=league_id, comp_teams=comp_teams_df)
         GA = get_opp_stats('Goals', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
-                           season_id=all_season_ids)  # UPDATED - games=games
+                           season_id=all_season_ids, comp_id=league_id, comp_teams=comp_teams_df)
         GA = GA.rename(columns={'Team Goals': 'Opponent Goals'})
         matches = GF.merge(xG[['kickoff_datetime', 'Team Expected Goals (xG)']], on='kickoff_datetime', how='left')
         matches = matches.merge(GA[['kickoff_datetime', 'Opponent Goals']], on='kickoff_datetime', how='left')
