@@ -507,13 +507,14 @@ class EuroCompProjectionService:
         logger.info(f'[{league}] Building player projections...')
 
         pl_projections = distribute_team_predictions_to_players(
-            player_stats, team_stats, team_projections, stats_types, fixtures_df, players, teams, comps, 0.97
+            player_stats, team_stats, team_projections, stats_types, fixtures_df, players, teams, comps, 0.97,
+            competition_id=comp_id, comp_teams=comp_teams,
         )
 
         player_pos = []
         player_saves = []
         for player, team in pl_projections[['Player', 'Team']].values:
-            pos = get_player_position(player, team, players, teams)
+            pos = get_player_position(player, team, players, teams, comp_id, comp_teams)
             if pos == 'GK':
                 player_saves.append(team_projections[team_projections['Team'] == team]['Saves'].values[0])
             else:
@@ -538,11 +539,11 @@ class EuroCompProjectionService:
             team = pl_projections['Team'].iloc[i]
             player_name = pl_projections['Player'].iloc[i]
             try:
-                player_id = get_player_id(player_name, players, team)
+                player_id = get_player_id(player_name, players, team, teams, comp_id, comp_teams)
             except:
                 start.append('No')
                 continue
-            team_starters = pred_starters[pred_starters['team_id'] == get_team_id(team, teams)]
+            team_starters = pred_starters[pred_starters['team_id'] == get_team_id(team, teams, comp_id, comp_teams)]
             if player_id in team_starters['player_id'].values:
                 start.append('Yes')
             else:

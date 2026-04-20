@@ -270,7 +270,7 @@ class PremierLeagueProjectionsService:
         for i in range(len(previous_fixtures)):
             fixture_id = previous_fixtures.iloc[i]['id']
             team = previous_fixtures.iloc[i]['Team']
-            team_id = get_team_id(previous_fixtures.iloc[i]['Team'], teams)
+            team_id = get_team_id(previous_fixtures.iloc[i]['Team'], teams, league_id, comp_teams)
             fixture_stats = team_stats[team_stats['fixture_id'] == fixture_id]
             for stat in stat_list:
                 if stat == 'Goals':
@@ -291,8 +291,8 @@ class PremierLeagueProjectionsService:
         previous_accuracy_fixtures = projection_accuracy_dataset_league[projection_accuracy_dataset_league.isnull().any(axis=1)]
         for i in range(len(previous_accuracy_fixtures)):
             fixture_id = previous_accuracy_fixtures.iloc[i]['fixture_id']
-            home_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Home Team'], teams)
-            away_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Away Team'], teams)
+            home_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Home Team'], teams, league_id, comp_teams)
+            away_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Away Team'], teams, league_id, comp_teams)
             fixture_stats = team_stats[team_stats['fixture_id'] == fixture_id]
             for stat in stat_list:
                 fixture_stat_df = fixture_stats[fixture_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
@@ -1085,14 +1085,15 @@ class PremierLeagueProjectionsService:
         pl_projections = distribute_team_predictions_to_players(player_stats, team_stats, team_projections, stats_types,
                                                                 fixtures_df, players, teams, comps, 0.97,
                                                                 season_id=[current_season_id, previous_season_id,
-                                                                           previous_season_id_above, previous_season_id_below])
+                                                                           previous_season_id_above, previous_season_id_below],
+                                                                competition_id=league_id, comp_teams=comp_teams)
 
         player_pos = []
         saves = []
         for i in range(len(pl_projections[['fixture_id', 'Player', 'Team']].values)):
             player = pl_projections['Player'].iloc[i]
             team = pl_projections['Team'].iloc[i]
-            pos = get_player_position(player, team, players, teams)
+            pos = get_player_position(player, team, players, teams, league_id, comp_teams)
             if pos == 'GK':
                 team_projections_fix = team_projections[team_projections['fixture_id'] == pl_projections['fixture_id'].iloc[i]]
                 saves.append(team_projections_fix[team_projections_fix['Team'] == team]['Saves'].values[0])
@@ -1125,11 +1126,11 @@ class PremierLeagueProjectionsService:
             team = pl_projections['Team'][i]
             player_name = pl_projections['Player'][i]
             try:
-                player_id = get_player_id(player_name, players, team)
+                player_id = get_player_id(player_name, players, team, teams, league_id, comp_teams)
             except:
                 start.append('No')
                 continue
-            team_starters = pred_starters[pred_starters['team_id'] == get_team_id(team, teams)]
+            team_starters = pred_starters[pred_starters['team_id'] == get_team_id(team, teams, league_id, comp_teams)]
             if player_id in team_starters['player_id'].values:
                 start.append('Yes')
             else:

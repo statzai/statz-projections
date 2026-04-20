@@ -258,7 +258,7 @@ class ProjectionService:
             fixture_id = previous_fixtures.iloc[i]['id']
             team = previous_fixtures.iloc[i]['Team']
             try:
-                team_id = get_team_id(team, teams)
+                team_id = get_team_id(team, teams, league_id, comp_teams)
             except IndexError:
                 logger.warning(f"Team not found in teams table: {team} — skipping fixture {fixture_id}")
                 continue
@@ -292,8 +292,8 @@ class ProjectionService:
                 previous_accuracy_fixtures['kickoff_datetime'] < pd.to_datetime('today')]
         for i in range(len(previous_accuracy_fixtures)):
             fixture_id = previous_accuracy_fixtures.iloc[i]['fixture_id']
-            home_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Home Team'], teams)
-            away_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Away Team'], teams)
+            home_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Home Team'], teams, league_id, comp_teams)
+            away_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Away Team'], teams, league_id, comp_teams)
             fixture_stats = team_stats[team_stats['fixture_id'] == fixture_id]
             for stat in stat_list:
                 fixture_stat_df = fixture_stats[fixture_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
@@ -1307,7 +1307,8 @@ class ProjectionService:
                                                                 fixtures_df, players, teams, comps, 0.97,
                                                                 season_id=[current_season_id, previous_season_id,
                                                                            previous_season_id_above,
-                                                                           previous_season_id_below])
+                                                                           previous_season_id_below],
+                                                                competition_id=league_id, comp_teams=comp_teams)
         logger.info(f"[{league}] Player projections computed - {len(pl_projections)} players ({time.time()-_t:.1f}s)")
 
         # Vectorized: build player lookup, merge, derive Position/Saves AND Start? in one pass
@@ -2946,7 +2947,8 @@ class ProjectionService:
                                                                 fixtures_df, players, teams, comps, 0.97,
                                                                 season_id=[current_season_id, previous_season_id,
                                                                            previous_season_id_above,
-                                                                           previous_season_id_below])
+                                                                           previous_season_id_below],
+                                                                competition_id=league_id, comp_teams=comp_teams)
 
         # Vectorized: build player lookup, merge, derive Position/Saves AND Start? in one pass
         _team_names = teams[['id', 'name']].rename(columns={'id': '_team_id', 'name': 'Team'})
@@ -3572,7 +3574,8 @@ class ProjectionService:
                                                                 fixtures_df, players, teams, comps, 0.97,
                                                                 season_id=[current_season_id, previous_season_id,
                                                                            previous_season_id_above,
-                                                                           previous_season_id_below])
+                                                                           previous_season_id_below],
+                                                                competition_id=league_id, comp_teams=comp_teams)
 
         # Vectorized: player_lookup merge + Position + Start? in one pass.
         # Saves=0 always in player_props (no GK lookup needed here).

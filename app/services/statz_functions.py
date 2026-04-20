@@ -1005,10 +1005,10 @@ def adjust_shots_projection(projected_goals, projected_shots, projected_shots_on
 
 
 # UPDATED - New Parameter: season_id
-def player_criteria(player, team, fixtures, player_stats, players, teams, season_id=None):
+def player_criteria(player, team, fixtures, player_stats, players, teams, season_id=None, competition_id=None, comp_teams=None):
     import pandas as pd
     fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])  # NEW - ensure datetime format
-    team_fixtures = get_team_fixtures(team, fixtures, teams, season_id=season_id)  # UPDATED - pass season_id
+    team_fixtures = get_team_fixtures(team, fixtures, teams, season_id=season_id, comp_id=competition_id, comp_teams=comp_teams)
     todays_date = pd.to_datetime('today')
     team_fixtures['kickoff_datetime'] = pd.to_datetime(team_fixtures['kickoff_datetime'])
     team_fixtures = team_fixtures[team_fixtures['kickoff_datetime'] < todays_date]
@@ -1016,7 +1016,7 @@ def player_criteria(player, team, fixtures, player_stats, players, teams, season
     last5_fixtures = last5_fixtures[last5_fixtures['kickoff_datetime'] > todays_date - pd.DateOffset(weeks=20)]
     last5_fixture_ids = last5_fixtures['id'].values
     try:
-        player_stats_df = player_stats[player_stats['player_id'] == get_player_id(player, players, team, teams)]
+        player_stats_df = player_stats[player_stats['player_id'] == get_player_id(player, players, team, teams, competition_id, comp_teams)]
         player_stats_df = player_stats_df[player_stats_df['stats_type_id'] == 119]
         player_stats_df = player_stats_df[player_stats_df['value'] > 45]  # NEW - filter out very low minutes
         player_stats_df = player_stats_df.merge(fixtures, left_on='fixture_id',
@@ -1043,8 +1043,8 @@ def player_criteria(player, team, fixtures, player_stats, players, teams, season
     return False
 
 
-def get_player_id(player_name, player_df, team, teams):
-    team_id = get_team_id(team, teams)
+def get_player_id(player_name, player_df, team, teams, competition_id=None, comp_teams=None):
+    team_id = get_team_id(team, teams, competition_id, comp_teams)
     player_df = player_df[player_df['current_team_id'] == team_id]
     player_id = player_df[player_df['display_name'] == player_name]['id']
     return player_id.values[0]
@@ -1226,7 +1226,7 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
 
 # UPDATED - New Parameters: season_id and comps, Removed xG parameter
 def distribute_team_predictions_to_players(player_stats, team_df, team_predictions, stats_types, fixtures, players,
-                                           teams, comps, weight, season_id=None):
+                                           teams, comps, weight, season_id=None, competition_id=None, comp_teams=None):
     import numpy as np
     import pandas as pd
     team_predictions = team_predictions.drop(columns=['Corners'])
@@ -1240,13 +1240,13 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
     for team in team_predictions['Team'].unique():  # UPDATED - loop through each team
         specific_team_predictions = team_predictions[
             team_predictions['Team'] == team]  # NEW - filter predictions for the specific team
-        team_id = get_team_id(team, teams)  # NEW - get team ID
+        team_id = get_team_id(team, teams, competition_id, comp_teams)
         # team_stat_values = row[1].values
         team_players = players[players['current_team_id'] == team_id]  # UPDATED - use team_id
         for name, id in team_players[['display_name', 'id']].values:
             # player_pred_stats = {}
             # UPDATED - New Parameter: season_id and we can now use team
-            if player_criteria(name, team, fixtures, player_stats, players, teams, season_id):
+            if player_criteria(name, team, fixtures, player_stats, players, teams, season_id, competition_id, comp_teams):
                 for stat in range(len(stat_list)):  # UPDATED - use stat instead of i
                     if stat_list[stat] == 'Goals':  # UPDATED - use stat_list[stat] instead of i
                         try:
@@ -1339,10 +1339,10 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
     existing_stats = [s for s in stat_list if s in df.columns]
     return df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Team', 'Opponent', 'Venue'] + existing_stats]
 
-def get_player_position(player, team, players, teams):
+def get_player_position(player, team, players, teams, competition_id=None, comp_teams=None):
     if player == 'Caoimhin Kelleher':
         return 'GK'
-    team_id = get_team_id(team, teams)
+    team_id = get_team_id(team, teams, competition_id, comp_teams)
     player_row = players[(players['display_name'] == player) & (players['current_team_id'] == team_id)]
     if player_row.empty:
         return None
