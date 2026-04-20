@@ -396,7 +396,8 @@ class EuroCompProjectionService:
 
         team_projections = get_team_round_predictions(
             next_fix, stat_list, fixtures_df, team_stats, teams, stats_types, models,
-            ratings=ratings, comp_id=league_ids, games=50
+            ratings=ratings, comp_id=league_ids, games=50,
+            comp_teams=comp_teams[comp_teams['competition_id'] == comp_id],
         )
 
         team_projections.drop(

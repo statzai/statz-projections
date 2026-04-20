@@ -1095,7 +1095,8 @@ class ProjectionService:
                                                                          league_below_defense_weight],
                                                       season_id=[current_season_id, previous_season_id,
                                                                  previous_season_id_above, previous_season_id_below],
-                                                      games=50)
+                                                      games=50,
+                                                      comp_teams=comp_teams[comp_teams['competition_id'] == league_id])
         team_projections.to_csv(f"{save_file_path}/{league} team projections.csv")
         # In[ ]:
 
@@ -2252,7 +2253,8 @@ class ProjectionService:
                                                                          league_below_defense_weight],
                                                       season_id=[current_season_id, previous_season_id,
                                                                  previous_season_id_above, previous_season_id_below],
-                                                      games=50)
+                                                      games=50,
+                                                      comp_teams=comp_teams[comp_teams['competition_id'] == league_id])
 
         # In[ ]:
 
@@ -2744,7 +2746,8 @@ class ProjectionService:
                                                                          league_below_defense_weight],
                                                       season_id=[current_season_id, previous_season_id,
                                                                  previous_season_id_above, previous_season_id_below],
-                                                      games=50)
+                                                      games=50,
+                                                      comp_teams=comp_teams[comp_teams['competition_id'] == league_id])
 
         # In[ ]:
 
@@ -3371,7 +3374,8 @@ class ProjectionService:
                                                                          league_below_defense_weight],
                                                       season_id=[current_season_id, previous_season_id,
                                                                  previous_season_id_above, previous_season_id_below],
-                                                      games=50)
+                                                      games=50,
+                                                      comp_teams=comp_teams[comp_teams['competition_id'] == league_id])
 
         # In[ ]:
 

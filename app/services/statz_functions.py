@@ -49,10 +49,18 @@ def get_team_id(team_name, teams, competition_id=None, comp_teams=None):
     _log = logging.getLogger("statz_functions")
     team_name = TEAM_NAME_FIXES.get(team_name, team_name)
 
-    if competition_id is not None and comp_teams is not None and not comp_teams.empty:
-        scoped_ids = comp_teams.loc[
-            comp_teams['competition_id'] == competition_id, 'team_id'
-        ].unique()
+    if comp_teams is not None and not comp_teams.empty:
+        # If competition_id is provided, narrow comp_teams to that comp first.
+        # Otherwise, treat comp_teams as already pre-filtered by the caller
+        # (e.g. get_ratings pre-filters so it can avoid triggering the
+        # fixture-filter side-effect in get_team_fixtures).
+        if competition_id is not None:
+            scoped_ids = comp_teams.loc[
+                comp_teams['competition_id'] == competition_id, 'team_id'
+            ].unique()
+        else:
+            scoped_ids = comp_teams['team_id'].unique() if 'team_id' in comp_teams.columns else []
+
         if len(scoped_ids) > 0:
             scoped = teams[(teams['id'].isin(scoped_ids)) & (teams['name'] == team_name)]['id']
             if not scoped.empty:
@@ -212,22 +220,24 @@ def get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Y
 def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_ids, comp_teams, teams_df, fixtures_df,
                 team_stats, stats_types, weight, games, weightings):
     import pandas as pd
-    # Keep the original comp_teams dataframe for scoped team-id lookups — the
-    # name-list version (replaces comp_teams below) is what the main loop
-    # iterates over, but the raw dataframe is still needed for scoping.
-    comp_teams_df = comp_teams
+    # Pre-filter comp_teams to THIS league's rows, so downstream get_team_id
+    # can disambiguate duplicate names (e.g. 'Nacional' Portugal vs Uruguay)
+    # without us having to pass comp_id — which would trigger the fixture
+    # filter in get_team_fixtures and drop the cross-comp previous-season data
+    # we deliberately rely on for promoted/relegated teams.
+    scoped_comp_teams = comp_teams[comp_teams['competition_id'] == league_id] if comp_teams is not None else None
     comp_teams = get_comp_teams(league_id, current_season_id, comp_teams, teams=teams_df)
     team_ratings = []
     for team in comp_teams:
         xG = get_team_stats('Expected Goals (xG)', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
-                            season_id=all_season_ids, comp_id=league_id, comp_teams=comp_teams_df)
+                            season_id=all_season_ids, comp_teams=scoped_comp_teams)
         xGA = get_opp_stats('Expected Goals (xG)', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
-                            season_id=all_season_ids, comp_id=league_id, comp_teams=comp_teams_df)
+                            season_id=all_season_ids, comp_teams=scoped_comp_teams)
         xGA = xGA.rename(columns={'Team Expected Goals (xG)': 'Opponent Expected Goals (xG)'})
         GF = get_team_stats('Goals', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
-                            season_id=all_season_ids, comp_id=league_id, comp_teams=comp_teams_df)
+                            season_id=all_season_ids, comp_teams=scoped_comp_teams)
         GA = get_opp_stats('Goals', team, fixtures_df, team_stats, teams_df, stats_types, games=games,
-                           season_id=all_season_ids, comp_id=league_id, comp_teams=comp_teams_df)
+                           season_id=all_season_ids, comp_teams=scoped_comp_teams)
         GA = GA.rename(columns={'Team Goals': 'Opponent Goals'})
         matches = GF.merge(xG[['kickoff_datetime', 'Team Expected Goals (xG)']], on='kickoff_datetime', how='left')
         matches = matches.merge(GA[['kickoff_datetime', 'Opponent Goals']], on='kickoff_datetime', how='left')
@@ -748,10 +758,11 @@ def load_all_models(stat_list, file_path, league):  # UPDATED - New Parameter: l
     return models
 
 def get_weighted_team_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', comp_id=None,
-                            season_id=None, games=None):
+                            season_id=None, games=None, comp_teams=None):
     import pandas as pd
     date_from = pd.to_datetime('today')
-    team_stats = get_team_stats(stat, team, fixtures, team_stats, teams, stats_types, venue, comp_id, season_id, games)
+    team_stats = get_team_stats(stat, team, fixtures, team_stats, teams, stats_types, venue, comp_id, season_id, games,
+                                comp_teams=comp_teams)
     team_stats = team_stats[pd.to_datetime(team_stats['kickoff_datetime']) < date_from].reset_index(drop=True)
     team_stats['Weeks Since Kickoff'] = (date_from - pd.to_datetime(team_stats['kickoff_datetime'])).dt.days // 7
     team_stats['Weight'] = weight ** (team_stats['Weeks Since Kickoff'])
@@ -760,9 +771,9 @@ def get_weighted_team_stats(stat, team, fixtures, team_stats, teams, stats_types
 
 
 def get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', ratings=None,
-                              comp_id=None, league_weightings=None, season_id=None, games=None):
+                              comp_id=None, league_weightings=None, season_id=None, games=None, comp_teams=None):
     team_stats_df = get_weighted_team_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue,
-                                            comp_id, season_id, games)
+                                            comp_id, season_id, games, comp_teams=comp_teams)
     stat_list = ['Shots Total', 'Shots On Target', 'Passes', 'Successful Passes', 'Corners', 'Total Crosses']
     if league_weightings is not None:
         if stat in stat_list:
@@ -791,10 +802,11 @@ def get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_typ
 
 
 def get_weighted_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', comp_id=None,
-                           season_id=None, games=None):
+                           season_id=None, games=None, comp_teams=None):
     import pandas as pd
     date_from = pd.to_datetime('today')
-    team_stats = get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue, comp_id, season_id, games)
+    team_stats = get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue, comp_id, season_id, games,
+                               comp_teams=comp_teams)
     team_stats = team_stats[pd.to_datetime(team_stats['kickoff_datetime']) < date_from].reset_index(drop=True)
     team_stats['Weeks Since Kickoff'] = (date_from - pd.to_datetime(team_stats['kickoff_datetime'])).dt.days // 7
     team_stats['Weight'] = weight ** (team_stats['Weeks Since Kickoff'])
@@ -803,9 +815,9 @@ def get_weighted_opp_stats(stat, team, fixtures, team_stats, teams, stats_types,
 
 
 def get_opp_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', ratings=None,
-                             comp_id=None, league_weightings=None, season_id=None, games=None):
+                             comp_id=None, league_weightings=None, season_id=None, games=None, comp_teams=None):
     team_stats_df = get_weighted_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue, comp_id,
-                                           season_id, games)
+                                           season_id, games, comp_teams=comp_teams)
     stat_list = ['Shots Total', 'Shots On Target', 'Passes', 'Successful Passes', 'Corners', 'Total Crosses']
     if league_weightings is not None:
         if stat in stat_list:
@@ -832,9 +844,9 @@ def get_opp_weighted_average(stat, team, fixtures, team_stats, teams, stats_type
 
 
 def calculate_team_venue_effect(team, stat, fixtures, team_stats_df, teams, stats_types, venue, comp_id=None,
-                                games=None, season_id=None):
+                                games=None, season_id=None, comp_teams=None):
     team_stats = get_team_stats(stat, team, fixtures, team_stats_df, teams, stats_types, 'Yes', comp_id=comp_id,
-                                games=games, season_id=season_id)
+                                games=games, season_id=season_id, comp_teams=comp_teams)
     if len(team_stats) < 5:
         if venue == 'H':
             return 1.1
@@ -850,9 +862,9 @@ def calculate_team_venue_effect(team, stat, fixtures, team_stats_df, teams, stat
 
 
 def calculate_opp_venue_effect(team, stat, fixtures, team_stats_df, teams, stats_types, venue, comp_id=None, games=None,
-                               season_id=None):
+                               season_id=None, comp_teams=None):
     team_stats = get_opp_stats(stat, team, fixtures, team_stats_df, teams, stats_types, 'Yes', comp_id=comp_id,
-                               games=games, season_id=season_id)
+                               games=games, season_id=season_id, comp_teams=comp_teams)
     if len(team_stats) < 5:
         if venue == 'H':
             return 0.9
@@ -868,20 +880,20 @@ def calculate_opp_venue_effect(team, stat, fixtures, team_stats_df, teams, stats
 
 
 def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, stats_types, model, ratings=None,
-                             venue=None, comp_id=None, league_weightings=None, season_id=None, games=None):
+                             venue=None, comp_id=None, league_weightings=None, season_id=None, games=None, comp_teams=None):
     import warnings
     if venue == None:
         team_history = get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, 0.98,
                                                  ratings=ratings, comp_id=comp_id, league_weightings=league_weightings,
-                                                 season_id=season_id, games=games)
+                                                 season_id=season_id, games=games, comp_teams=comp_teams)
         opponent_history = get_opp_weighted_average(stat, opponent, fixtures, team_stats, teams, stats_types, 0.98,
                                                     ratings=ratings, comp_id=comp_id,
                                                     league_weightings=league_weightings, season_id=season_id,
-                                                    games=games)
+                                                    games=games, comp_teams=comp_teams)
     else:
         team_history = get_team_weighted_average(stat, team, fixtures, team_stats, teams, stats_types, 0.98,
                                                  ratings=ratings, comp_id=comp_id, league_weightings=league_weightings,
-                                                 season_id=season_id, games=games) * calculate_team_venue_effect(team,
+                                                 season_id=season_id, games=games, comp_teams=comp_teams) * calculate_team_venue_effect(team,
                                                                                                                  stat,
                                                                                                                  fixtures,
                                                                                                                  team_stats,
@@ -890,7 +902,8 @@ def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, 
                                                                                                                  venue,
                                                                                                                  comp_id=comp_id,
                                                                                                                  games=games * 2,
-                                                                                                                 season_id=season_id)
+                                                                                                                 season_id=season_id,
+                                                                                                                 comp_teams=comp_teams)
         if venue == 'H':
             opponent_venue = 'A'
         else:
@@ -898,13 +911,14 @@ def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, 
         opponent_history = get_opp_weighted_average(stat, opponent, fixtures, team_stats, teams, stats_types, 0.98,
                                                     ratings=ratings, comp_id=comp_id,
                                                     league_weightings=league_weightings, season_id=season_id,
-                                                    games=games) * calculate_opp_venue_effect(opponent, stat, fixtures,
+                                                    games=games, comp_teams=comp_teams) * calculate_opp_venue_effect(opponent, stat, fixtures,
                                                                                               team_stats, teams,
                                                                                               stats_types,
                                                                                               opponent_venue,
                                                                                               comp_id=comp_id,
                                                                                               games=games * 2,
-                                                                                              season_id=season_id)
+                                                                                              season_id=season_id,
+                                                                                              comp_teams=comp_teams)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         team_stat = model.predict([[team_history, opponent_history]])
@@ -913,7 +927,7 @@ def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, 
 
 def get_team_all_stats_prediction(team, opponent, fixtures, stat_list, team_stats, teams, stats_types, models,
                                   ratings=None, venue=None, comp_id=None, league_weightings=None, season_id=None,
-                                  games=None):
+                                  games=None, comp_teams=None):
     predictions = {}
     predictions['Team'] = team
     predictions['Opponent'] = opponent
@@ -929,13 +943,14 @@ def get_team_all_stats_prediction(team, opponent, fixtures, stat_list, team_stat
                                                                                 ratings=ratings, venue=venue,
                                                                                 comp_id=comp_id,
                                                                                 league_weightings=league_weightings,
-                                                                                season_id=season_id, games=games)
+                                                                                season_id=season_id, games=games,
+                                                                                comp_teams=comp_teams)
     return predictions
 
 
 def get_team_round_predictions(next_fix, stat_list, fixtures, team_stats, teams, stats_types, models, goals=False,
                                ratings=None, comp_id=None, league_weightings=None, season_id=None, games=None,
-                               neutral_venue=False):
+                               neutral_venue=False, comp_teams=None):
     import pandas as pd
     if goals == False:
         stat_list.remove('Goals')
@@ -949,22 +964,22 @@ def get_team_round_predictions(next_fix, stat_list, fixtures, team_stats, teams,
             home_team_preds = get_team_all_stats_prediction(row['home_team'], row['away_team'], fixtures, stat_list,
                                                             team_stats, teams, stats_types, models, ratings=ratings,
                                                             comp_id=comp_id, league_weightings=league_weightings,
-                                                            season_id=season_id, games=games)
+                                                            season_id=season_id, games=games, comp_teams=comp_teams)
             away_team_preds = get_team_all_stats_prediction(row['away_team'], row['home_team'], fixtures, stat_list,
                                                             team_stats, teams, stats_types, models, ratings=ratings,
                                                             comp_id=comp_id, league_weightings=league_weightings,
-                                                            season_id=season_id, games=games)
+                                                            season_id=season_id, games=games, comp_teams=comp_teams)
         else:
             home_team_preds = get_team_all_stats_prediction(row['home_team'], row['away_team'], fixtures, stat_list,
                                                             team_stats, teams, stats_types, models, ratings=ratings,
                                                             venue='H', comp_id=comp_id,
                                                             league_weightings=league_weightings, season_id=season_id,
-                                                            games=games)
+                                                            games=games, comp_teams=comp_teams)
             away_team_preds = get_team_all_stats_prediction(row['away_team'], row['home_team'], fixtures, stat_list,
                                                             team_stats, teams, stats_types, models, ratings=ratings,
                                                             venue='A', comp_id=comp_id,
                                                             league_weightings=league_weightings, season_id=season_id,
-                                                            games=games)
+                                                            games=games, comp_teams=comp_teams)
         home_team_preds['Fouls Drawn'] = away_team_preds['Fouls']
         away_team_preds['Fouls Drawn'] = home_team_preds['Fouls']
         if goals == True:

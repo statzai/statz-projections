@@ -921,7 +921,8 @@ class PremierLeagueProjectionsService:
                                                                                  league_below_attack_weight,
                                                                                  league_below_defense_weight],
                                                       season_id=[current_season_id, previous_season_id,
-                                                                 previous_season_id_above, previous_season_id_below], games=50)
+                                                                 previous_season_id_above, previous_season_id_below], games=50,
+                                                      comp_teams=comp_teams[comp_teams['competition_id'] == league_id])
 
         # In[34]:
 

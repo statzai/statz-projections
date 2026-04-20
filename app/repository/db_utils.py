@@ -46,10 +46,16 @@ def resolve_team_id(team_name, teams, competition_id=None, comp_teams=None):
         name = TEAM_NAME_FIXES.get(team_name, team_name)
 
         # Scoped lookup first — restrict to teams registered in this competition.
-        if competition_id is not None and comp_teams is not None and not comp_teams.empty:
-            scoped_ids = comp_teams.loc[
-                comp_teams['competition_id'] == competition_id, 'team_id'
-            ].unique()
+        # If competition_id is None but comp_teams is non-empty, treat comp_teams
+        # as already pre-filtered by the caller.
+        if comp_teams is not None and not comp_teams.empty:
+            if competition_id is not None:
+                scoped_ids = comp_teams.loc[
+                    comp_teams['competition_id'] == competition_id, 'team_id'
+                ].unique()
+            else:
+                scoped_ids = comp_teams['team_id'].unique() if 'team_id' in comp_teams.columns else []
+
             if len(scoped_ids) > 0:
                 scoped = teams.loc[
                     (teams['id'].isin(scoped_ids)) & (teams['name'] == name), 'id'
