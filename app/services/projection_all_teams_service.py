@@ -714,7 +714,8 @@ class ProjectionAllTeams:
                 ratings['League'] = league
                 from app.repository.team_ratings_repo import insert_team_ratings_async
                 await insert_team_ratings_async(
-                    ratings, league, league_id, ProjectionService._cache.teams
+                    ratings, league, league_id, ProjectionService._cache.teams,
+                    comp_teams=comp_teams,
                 )
 
                 logger.info(f"[{league}] Step: team ratings saved to DB")
@@ -828,7 +829,7 @@ class ProjectionAllTeams:
 
                 logger.info(f"[{league}] Inserting fixtures into DB ({len(score_preds)} rows)...")
                 _t = time.time()
-                await insert_fixtures_async(score_preds, teams=teams)
+                await insert_fixtures_async(score_preds, teams=teams, competition_id=league_id, comp_teams=comp_teams)
                 logger.info(f"[{league}] Fixtures inserted ({time.time()-_t:.1f}s)")
 
                 # In[ ]:
@@ -1187,7 +1188,7 @@ class ProjectionAllTeams:
                 team_projections_save.to_csv(f"{save_file_path}/{league} Team.csv", index=False)
                 logger.info(f"[{league}] Inserting team projections into DB ({len(team_projections_save)} rows)...")
                 _t = time.time()
-                await insert_teams_async(team_projections_save, teams=teams)
+                await insert_teams_async(team_projections_save, teams=teams, competition_id=league_id, comp_teams=comp_teams)
                 logger.info(f"[{league}] Team projections inserted ({time.time()-_t:.1f}s)")
 
                 team_projections_save.rename(columns={'Accurate Passes': 'Successful Passes'},
@@ -1309,7 +1310,7 @@ class ProjectionAllTeams:
                 pl_projections.to_csv(f"{save_file_path}/{league} Player.csv", index=False)
                 logger.info(f"[{league}] Inserting player projections into DB ({len(pl_projections)} rows)...")
                 _t = time.time()
-                await insert_player_async(pl_projections, teams=teams)
+                await insert_player_async(pl_projections, teams=teams, competition_id=league_id, comp_teams=comp_teams)
                 logger.info(f"[{league}] Player projections inserted ({time.time()-_t:.1f}s)")
 
                 # ## **FPL Points** (Premier League only)
@@ -1462,7 +1463,7 @@ class ProjectionAllTeams:
                 # await insert_players_stats_async(pl_projections)
                 logger.info(f"[{league}] Inserting player stat probabilities into DB...")
                 _t = time.time()
-                await insert_players_stats_async(player_stat_probs, teams=teams)
+                await insert_players_stats_async(player_stat_probs, teams=teams, competition_id=league_id, comp_teams=comp_teams)
                 logger.info(f"[{league}] Player stat probs inserted ({time.time()-_t:.1f}s)")
                 _league_elapsed = (time.time() - _start_time) / 60
                 _league_times[league] = _league_elapsed

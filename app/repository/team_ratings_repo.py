@@ -5,7 +5,7 @@ from app.repository.db_utils import execute_chunked, resolve_team_id
 logger = logging.getLogger("team_ratings_repo")
 
 
-async def insert_team_ratings_async(ratings_df, league_name, competition_id, teams):
+async def insert_team_ratings_async(ratings_df, league_name, competition_id, teams, comp_teams=None):
     """
     Insert/upsert team ratings for one league into the team_ratings DB table.
 
@@ -46,7 +46,7 @@ async def insert_team_ratings_async(ratings_df, league_name, competition_id, tea
         if team_name is None or (isinstance(team_name, float) and pd.isna(team_name)):
             unresolved += 1
             continue
-        team_id = resolve_team_id(team_name, teams) if teams is not None else None
+        team_id = resolve_team_id(team_name, teams, competition_id, comp_teams) if teams is not None else None
         if team_id is None:
             unresolved += 1
             continue

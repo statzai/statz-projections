@@ -704,7 +704,8 @@ class ProjectionService:
         ratings['League'] = league
         from app.repository.team_ratings_repo import insert_team_ratings_async
         await insert_team_ratings_async(
-            ratings, league, league_id, ProjectionService._cache.teams
+            ratings, league, league_id, ProjectionService._cache.teams,
+            comp_teams=comp_teams,
         )
 
         logger.info(f"[{league}] Step: team ratings calculated + saved to DB")
@@ -907,7 +908,7 @@ class ProjectionService:
 
         logger.info(f"[{league}] Inserting fixtures into DB...")
         _t = time.time()
-        await insert_fixtures_async(score_preds, teams=teams)
+        await insert_fixtures_async(score_preds, teams=teams, competition_id=league_id, comp_teams=comp_teams)
         logger.info(f"[{league}] Fixtures inserted ({time.time()-_t:.1f}s)")
 
         # In[ ]:
@@ -1255,7 +1256,7 @@ class ProjectionService:
 
         # team_projections_save.to_csv(rf"{save_file_path}\{league} Team.csv", index=False)
         team_projections_save.to_csv(f"{save_file_path}/{league} Team.csv", index=False)
-        await insert_teams_async(team_projections_save, teams=teams)
+        await insert_teams_async(team_projections_save, teams=teams, competition_id=league_id, comp_teams=comp_teams)
 
         team_projections_save.rename(columns={'Accurate Passes': 'Successful Passes'},
                                      inplace=True)  # NEW - Rename back for consistency with other datasets
@@ -1379,7 +1380,7 @@ class ProjectionService:
         pl_projections.to_csv(f"{save_file_path}/{league} Player.csv", index=False)
         logger.info(f"[{league}] Inserting player projections into DB ({len(pl_projections)} rows)...")
         _t = time.time()
-        await insert_player_async(pl_projections, teams=teams)
+        await insert_player_async(pl_projections, teams=teams, competition_id=league_id, comp_teams=comp_teams)
         logger.info(f"[{league}] Player projections inserted ({time.time()-_t:.1f}s)")
         # ## **Player Stat Probabilities**
         #
@@ -1406,7 +1407,7 @@ class ProjectionService:
         # await insert_players_stats_async(pl_projections)
         logger.info(f"[{league}] Inserting player stat probabilities into DB...")
         _t = time.time()
-        await insert_players_stats_async(player_stat_probs, teams=teams)
+        await insert_players_stats_async(player_stat_probs, teams=teams, competition_id=league_id, comp_teams=comp_teams)
         logger.info(f"[{league}] Player stat probs inserted ({time.time()-_t:.1f}s)")
         logger.info(f"[{league}] COMPLETE - total time: {(time.time()-_start_time)/60:.1f} min")
 
@@ -1599,7 +1600,7 @@ class ProjectionService:
         # debug print removed
         # debug print removed
         score_preds.to_csv(f"{save_file_path}/{league} Fixtures.csv", index=False)
-        await insert_fixtures_async(score_preds, teams=teams)
+        await insert_fixtures_async(score_preds, teams=teams, competition_id=league_id, comp_teams=comp_teams)
 
     async def predicted_table(self, league_request):
         league = league_request.league or 'Championship'
@@ -2386,7 +2387,7 @@ class ProjectionService:
         team_projections_save = team_projections_save.round(2)
 
         team_projections_save.to_csv(f"{ProjectionService.SAVE_FILE_PATH}/{league} Team.csv", index=False)
-        await insert_teams_async(team_projections_save, teams=teams)
+        await insert_teams_async(team_projections_save, teams=teams, competition_id=league_id, comp_teams=comp_teams)
 
 
     async def players(self, league_request):
@@ -3015,7 +3016,7 @@ class ProjectionService:
         pl_projections = pl_projections.round(2)
         # pl_projections.to_csv(rf"{save_file_path}\{league} Player.csv", index=False)
         pl_projections.to_csv(f"{ProjectionService.SAVE_FILE_PATH}/{league} Player.csv", index=False)
-        await insert_player_async(pl_projections, teams=teams)
+        await insert_player_async(pl_projections, teams=teams, competition_id=league_id, comp_teams=comp_teams)
 
     async def player_props(self, league_request):
         league = league_request or 'Championship'
@@ -3644,4 +3645,4 @@ class ProjectionService:
         player_stat_probs = get_poisson_probs(pl_projections, perc_stats, lines)
         player_stat_probs = player_stat_probs.round(2)
         player_stat_probs.to_csv(f"{ProjectionService.SAVE_FILE_PATH}/{league} Player Stat Probabilities.csv", index=False)
-        await insert_players_stats_async(player_stat_probs, teams=teams)
+        await insert_players_stats_async(player_stat_probs, teams=teams, competition_id=league_id, comp_teams=comp_teams)

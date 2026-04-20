@@ -10,7 +10,7 @@ def clean_percentage(value):
     return float(value) if value is not None else None
 
 
-async def insert_fixtures_async(data_list, teams=None):
+async def insert_fixtures_async(data_list, teams=None, competition_id=None, comp_teams=None):
     if len(data_list) == 0:
         return
 
@@ -44,8 +44,8 @@ async def insert_fixtures_async(data_list, teams=None):
     values = [
         (
             row['fixture_id'],
-            resolve_team_id(row['home_team_name'], teams) if teams is not None else None,
-            resolve_team_id(row['away_team_name'], teams) if teams is not None else None,
+            resolve_team_id(row['home_team_name'], teams, competition_id, comp_teams) if teams is not None else None,
+            resolve_team_id(row['away_team_name'], teams, competition_id, comp_teams) if teams is not None else None,
             row['home_goals'],
             row['away_goals'],
             row['home_win_percent'],

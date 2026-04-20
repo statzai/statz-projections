@@ -268,7 +268,8 @@ class EuroCompProjectionService:
         from app.repository.team_ratings_repo import insert_team_ratings_async
         await insert_team_ratings_async(
             ratings[['Team', 'Attack', 'Defense', 'Overall', 'Attack_xG', 'Defense_xG', 'Overall_xG']].copy(),
-            league, comp_id, EuroCompProjectionService._cache.teams
+            league, comp_id, EuroCompProjectionService._cache.teams,
+            comp_teams=comp_teams,
         )
 
         # ── Fixture projections ──
@@ -384,7 +385,7 @@ class EuroCompProjectionService:
 
         # Save fixture projections
         score_preds.to_csv(os.path.join(save_file_path, f"{league} Fixtures.csv"), index=False)
-        await insert_fixtures_async(score_preds, teams=teams)
+        await insert_fixtures_async(score_preds, teams=teams, competition_id=comp_id, comp_teams=comp_teams)
 
         # ── Team projections ──
 
@@ -497,7 +498,7 @@ class EuroCompProjectionService:
         team_projections_save.drop(['Assists', 'Fouls Drawn', 'Saves', 'Key Passes'], axis=1, inplace=True)
         team_projections_save = team_projections_save.round(2)
         team_projections_save.to_csv(os.path.join(save_file_path, f"{league} Team.csv"), index=False)
-        await insert_teams_async(team_projections_save, teams=teams)
+        await insert_teams_async(team_projections_save, teams=teams, competition_id=comp_id, comp_teams=comp_teams)
 
         logger.info(f'[{league}] Team projections complete')
 
@@ -560,7 +561,7 @@ class EuroCompProjectionService:
 
         # Save player projections
         pl_projections.to_csv(os.path.join(save_file_path, f"{league} Player.csv"), index=False)
-        await insert_player_async(pl_projections, teams=teams)
+        await insert_player_async(pl_projections, teams=teams, competition_id=comp_id, comp_teams=comp_teams)
 
         logger.info(f'[{league}] Player projections complete')
 
@@ -578,7 +579,7 @@ class EuroCompProjectionService:
 
         # Save player stat props
         player_stat_probs.to_csv(os.path.join(save_file_path, f"{league} Player Stat Props.csv"), index=False)
-        await insert_players_stats_async(player_stat_probs, teams=teams)
+        await insert_players_stats_async(player_stat_probs, teams=teams, competition_id=comp_id, comp_teams=comp_teams)
 
         _elapsed = round(time.time() - _start_time, 1)
         logger.info(f'[{league}] DONE euro comp projections in {_elapsed}s')

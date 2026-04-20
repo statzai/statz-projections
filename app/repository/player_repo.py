@@ -35,7 +35,7 @@ STATUS_TYPES = {
 }
 
 
-async def insert_player_async(data_list, teams=None):
+async def insert_player_async(data_list, teams=None, competition_id=None, comp_teams=None):
     if len(data_list) == 0:
         return
 
@@ -61,8 +61,8 @@ async def insert_player_async(data_list, teams=None):
     records = []
     for _, row in api_pl_projections.iterrows():
         # Resolve team IDs once per row (each row spawns ~15 stat records)
-        row_team_id = resolve_team_id(row.get("team"), teams) if teams is not None else None
-        row_opponent_id = resolve_team_id(row.get("opponent"), teams) if teams is not None else None
+        row_team_id = resolve_team_id(row.get("team"), teams, competition_id, comp_teams) if teams is not None else None
+        row_opponent_id = resolve_team_id(row.get("opponent"), teams, competition_id, comp_teams) if teams is not None else None
         for stat_name, stat_id in STATUS_TYPES.items():
             if stat_name in row:
                 value = row[stat_name]

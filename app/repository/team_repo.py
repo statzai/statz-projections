@@ -5,7 +5,7 @@ from app.repository.db_utils import execute_chunked, resolve_team_id
 logger = logging.getLogger("team_repo")
 
 
-async def insert_teams_async(data_list, teams=None):
+async def insert_teams_async(data_list, teams=None, competition_id=None, comp_teams=None):
     api_team_projections_save = data_list.copy()
     api_team_projections_save = api_team_projections_save.rename(columns={
         "Team": "team",
@@ -31,8 +31,8 @@ async def insert_teams_async(data_list, teams=None):
     values = [
         (
             row['fixture_id'],
-            resolve_team_id(row['team'], teams) if teams is not None else None,
-            resolve_team_id(row['opponent'], teams) if teams is not None else None,
+            resolve_team_id(row['team'], teams, competition_id, comp_teams) if teams is not None else None,
+            resolve_team_id(row['opponent'], teams, competition_id, comp_teams) if teams is not None else None,
             row['venue'],
             row['goals'],
             row['shots_total'],

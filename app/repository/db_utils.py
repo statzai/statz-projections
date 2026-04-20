@@ -13,13 +13,28 @@ MAX_RETRIES = 3
 QUERY_TIMEOUT = 120  # seconds per chunk before giving up and retrying
 
 
-def resolve_team_id(team_name, teams):
+def resolve_team_id(team_name, teams, competition_id=None, comp_teams=None):
     """
     Resolve a team name to its id via the `teams` dataframe, returning None
     if the name can't be mapped. Applies TEAM_NAME_FIXES so historical names
     like "Milan" map to their current counterparts ("AC Milan"). Used by the
     projection repos to populate `team_id` columns on insert, replacing the
     previous pattern of writing the name string directly.
+
+    When `competition_id` and `comp_teams` are provided, the lookup is first
+    restricted to teams registered in that competition (via the
+    competition_season_teams mapping). This is the duplicate-name bug fix:
+    without scoping, a flat name match could resolve "Liverpool" to FC
+    Montevideo Uruguay (id=976) instead of Liverpool FC England (id=8).
+    Same for "Everton" (FC England id=13 vs Viña del Mar Chile id=15064)
+    and "Nacional" (CD Nacional Portugal vs Club Nacional Uruguay).
+
+    If the scoped lookup misses (e.g. team not yet registered for this
+    comp's current season), we fall through to the global lookup with a
+    WARNING — so the insert still lands but the scope-pool gap is visible.
+
+    If the GLOBAL lookup finds multiple matches, we log a WARNING and pick
+    the first — same degraded behaviour as before the fix, but now visible.
 
     Returning None rather than raising lets insert rows with unresolvable
     names still land (with team_id NULL) instead of breaking the whole batch.
@@ -29,9 +44,29 @@ def resolve_team_id(team_name, teams):
     try:
         from app.services.statz_functions import TEAM_NAME_FIXES
         name = TEAM_NAME_FIXES.get(team_name, team_name)
+
+        # Scoped lookup first — restrict to teams registered in this competition.
+        if competition_id is not None and comp_teams is not None and not comp_teams.empty:
+            scoped_ids = comp_teams.loc[
+                comp_teams['competition_id'] == competition_id, 'team_id'
+            ].unique()
+            if len(scoped_ids) > 0:
+                scoped = teams.loc[
+                    (teams['id'].isin(scoped_ids)) & (teams['name'] == name), 'id'
+                ]
+                if not scoped.empty:
+                    return int(scoped.iloc[0])
+            logger.warning(
+                f"resolve_team_id({team_name!r}): no match within competition {competition_id} scope — falling back to global lookup"
+            )
+
         match = teams.loc[teams['name'] == name, 'id']
         if match.empty:
             return None
+        if len(match) > 1:
+            logger.warning(
+                f"resolve_team_id({team_name!r}): ambiguous — {len(match)} global matches ({list(match)}), picking first (comp_id={competition_id})"
+            )
         return int(match.iloc[0])
     except Exception as e:
         logger.warning(f"resolve_team_id({team_name!r}) failed: {type(e).__name__}: {e}")

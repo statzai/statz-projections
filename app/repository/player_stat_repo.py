@@ -24,7 +24,7 @@ STATUS_TYPES = {
 }
 
 
-async def insert_players_stats_async(data_list, teams=None):
+async def insert_players_stats_async(data_list, teams=None, competition_id=None, comp_teams=None):
     if len(data_list) == 0:
         return
 
@@ -57,8 +57,8 @@ async def insert_players_stats_async(data_list, teams=None):
             row.get("fixture_id"),
             row.get("player_id"),
             row.get("position"),
-            resolve_team_id(row.get("team"), teams) if teams is not None else None,
-            resolve_team_id(row.get("opponent"), teams) if teams is not None else None,
+            resolve_team_id(row.get("team"), teams, competition_id, comp_teams) if teams is not None else None,
+            resolve_team_id(row.get("opponent"), teams, competition_id, comp_teams) if teams is not None else None,
             row.get("venue"),
             market_name,
             stats_type_id,
