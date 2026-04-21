@@ -1127,6 +1127,20 @@ class ProjectionService:
         ProjectionService._write_df(model_dataset_league, f"{data_folder_path}/{league}_model_dataset_with_history")
         ProjectionService._write_df(model_dataset_all, f"{data_folder_path}/all_leagues_model_dataset_with_history")
 
+        # Dual-write to DB (Phase 2 of the data-files-to-DB migration). Only
+        # the per-league df — the all_leagues table is implicit in the DB
+        # ("SELECT WHERE competition_id = X" or no filter = all pool). Wrapped
+        # in try/except so a DB failure doesn't break the parquet-based flow
+        # during the dual-write validation window.
+        try:
+            from app.repository.projection_dataset_repo import insert_model_dataset_async
+            await insert_model_dataset_async(
+                model_dataset_league, league_id, league,
+                teams, fixtures_df, comp_teams,
+            )
+        except Exception as _db_err:
+            logger.warning(f"[{league}] model_dataset DB dual-write failed: {_db_err}")
+
         # model_dataset_league.to_excel(rf"{data_folder_path}\{league}_model_dataset_with_history.xlsx", index=False)
         # model_dataset_all.to_excel(rf"{data_folder_path}\all_leagues_model_dataset_with_history.xlsx", index=False)
 
@@ -1283,6 +1297,16 @@ class ProjectionService:
         projection_accuracy_dataset_league.reset_index(drop=True, inplace=True)
         # projection_accuracy_dataset_league.to_excel(rf"{data_folder_path}\{league}_accuracy_dataset.xlsx", index=False)
         ProjectionService._write_df(projection_accuracy_dataset_league, f"{data_folder_path}/{league}_accuracy_dataset")
+
+        # Dual-write to DB (Phase 2 of data-files-to-DB migration).
+        try:
+            from app.repository.projection_dataset_repo import insert_accuracy_dataset_async
+            await insert_accuracy_dataset_async(
+                projection_accuracy_dataset_league, league_id, league,
+                teams, fixtures_df, comp_teams,
+            )
+        except Exception as _db_err:
+            logger.warning(f"[{league}] accuracy_dataset DB dual-write failed: {_db_err}")
 
         projection_accuracy_dataset_all = pd.concat(
             [projection_accuracy_dataset_all, projection_accuracy_dataset_league], ignore_index=True)

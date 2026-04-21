@@ -1,0 +1,369 @@
+"""
+Repo for the two dataset tables that back the retraining pipeline:
+
+  - projection_model_dataset: per-(fixture, team) training rows with
+    actuals + history features. Written on every projection run via
+    the dual-write wrapper below.
+  - projection_accuracy_dataset: per-fixture projections vs actuals
+    used to evaluate model accuracy over time.
+
+Both tables have contamination risk: the existing parquet files that
+feed these DataFrames have historical rows pooled in from other leagues
+(comp_id labelled incorrectly). The transforms below filter by the
+authoritative fixture.competition_id to keep only true-owned rows.
+
+Invoked from projection_service / projection_all_teams_service etc.
+alongside the existing `_write_df` parquet writes (dual-write phase
+of the data-files-to-DB migration).
+"""
+import logging
+import math
+
+import pandas as pd
+
+from app.repository.db_utils import execute_chunked
+
+logger = logging.getLogger("projection_dataset_repo")
+
+
+MODEL_DATASET_STATS = [
+    "shots_total", "shots_on_target", "corners", "fouls", "yellowcards",
+    "tackles", "passes", "successful_passes", "interceptions",
+    "total_crosses", "offsides",
+]
+
+ACCURACY_DATASET_STATS = [
+    "goals", "shots_total", "shots_on_target", "corners", "fouls",
+    "yellowcards", "tackles", "passes", "successful_passes",
+    "total_crosses", "interceptions", "offsides",
+]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Utilities
+# ──────────────────────────────────────────────────────────────────────────
+
+def _val(v):
+    if v is None:
+        return None
+    if isinstance(v, float) and math.isnan(v):
+        return None
+    if isinstance(v, pd.Timestamp):
+        return v.to_pydatetime()
+    return v
+
+
+def _parse_percent(v):
+    """'35.62%' → 35.62. NaN/None → None."""
+    if v is None:
+        return None
+    if isinstance(v, float) and math.isnan(v):
+        return None
+    if isinstance(v, str):
+        s = v.replace("%", "").strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return float(v)
+
+
+def _parse_bool(v):
+    if v is None:
+        return None
+    if isinstance(v, float) and math.isnan(v):
+        return None
+    if isinstance(v, bool):
+        return 1 if v else 0
+    if isinstance(v, (int, float)):
+        return 1 if v else 0
+    return None
+
+
+def _resolve_scoped(name, teams, scoped_team_ids):
+    """Prefer a team_id within the comp's registered pool; fall back to
+    first global match. None if no match at all."""
+    if name is None or (isinstance(name, float) and math.isnan(name)):
+        return None
+    if len(scoped_team_ids) > 0:
+        scoped = teams.loc[
+            (teams["id"].isin(scoped_team_ids)) & (teams["name"] == name), "id"
+        ]
+        if not scoped.empty:
+            return int(scoped.iloc[0])
+    m = teams.loc[teams["name"] == name, "id"]
+    if m.empty:
+        return None
+    return int(m.iloc[0])
+
+
+def _title(stat_snake):
+    return " ".join(w.capitalize() for w in stat_snake.split("_"))
+
+
+def _title_parquet_col(stat_snake, history=False, opponent=False):
+    t = _title(stat_snake)
+    if history:
+        return f"Opponent {t} History Against" if opponent else f"Team {t} History"
+    return f"Team {t}"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  projection_model_dataset
+# ──────────────────────────────────────────────────────────────────────────
+
+MODEL_DATASET_SQL = """
+INSERT INTO projection_model_dataset (
+    fixture_id, competition_id, season_id, team_id, opponent_id,
+    team_name, opponent_name, venue, kickoff_datetime,
+    team_shots_total, team_shots_on_target, team_corners, team_fouls,
+    team_yellowcards, team_tackles, team_passes, team_successful_passes,
+    team_interceptions, team_total_crosses, team_offsides,
+    team_shots_total_history, opponent_shots_total_history_against,
+    team_shots_on_target_history, opponent_shots_on_target_history_against,
+    team_corners_history, opponent_corners_history_against,
+    team_fouls_history, opponent_fouls_history_against,
+    team_yellowcards_history, opponent_yellowcards_history_against,
+    team_tackles_history, opponent_tackles_history_against,
+    team_passes_history, opponent_passes_history_against,
+    team_successful_passes_history, opponent_successful_passes_history_against,
+    team_interceptions_history, opponent_interceptions_history_against,
+    team_total_crosses_history, opponent_total_crosses_history_against,
+    team_offsides_history, opponent_offsides_history_against,
+    created_at, updated_at
+) VALUES (
+    %s, %s, %s, %s, %s,
+    %s, %s, %s, %s,
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+    NOW(), NOW()
+) ON DUPLICATE KEY UPDATE
+    competition_id = VALUES(competition_id),
+    season_id = VALUES(season_id),
+    opponent_id = VALUES(opponent_id),
+    team_name = VALUES(team_name),
+    opponent_name = VALUES(opponent_name),
+    venue = VALUES(venue),
+    kickoff_datetime = VALUES(kickoff_datetime),
+    team_shots_total = VALUES(team_shots_total),
+    team_shots_on_target = VALUES(team_shots_on_target),
+    team_corners = VALUES(team_corners),
+    team_fouls = VALUES(team_fouls),
+    team_yellowcards = VALUES(team_yellowcards),
+    team_tackles = VALUES(team_tackles),
+    team_passes = VALUES(team_passes),
+    team_successful_passes = VALUES(team_successful_passes),
+    team_interceptions = VALUES(team_interceptions),
+    team_total_crosses = VALUES(team_total_crosses),
+    team_offsides = VALUES(team_offsides),
+    team_shots_total_history = VALUES(team_shots_total_history),
+    opponent_shots_total_history_against = VALUES(opponent_shots_total_history_against),
+    team_shots_on_target_history = VALUES(team_shots_on_target_history),
+    opponent_shots_on_target_history_against = VALUES(opponent_shots_on_target_history_against),
+    team_corners_history = VALUES(team_corners_history),
+    opponent_corners_history_against = VALUES(opponent_corners_history_against),
+    team_fouls_history = VALUES(team_fouls_history),
+    opponent_fouls_history_against = VALUES(opponent_fouls_history_against),
+    team_yellowcards_history = VALUES(team_yellowcards_history),
+    opponent_yellowcards_history_against = VALUES(opponent_yellowcards_history_against),
+    team_tackles_history = VALUES(team_tackles_history),
+    opponent_tackles_history_against = VALUES(opponent_tackles_history_against),
+    team_passes_history = VALUES(team_passes_history),
+    opponent_passes_history_against = VALUES(opponent_passes_history_against),
+    team_successful_passes_history = VALUES(team_successful_passes_history),
+    opponent_successful_passes_history_against = VALUES(opponent_successful_passes_history_against),
+    team_interceptions_history = VALUES(team_interceptions_history),
+    opponent_interceptions_history_against = VALUES(opponent_interceptions_history_against),
+    team_total_crosses_history = VALUES(team_total_crosses_history),
+    opponent_total_crosses_history_against = VALUES(opponent_total_crosses_history_against),
+    team_offsides_history = VALUES(team_offsides_history),
+    opponent_offsides_history_against = VALUES(opponent_offsides_history_against),
+    updated_at = NOW()
+"""
+
+
+def _build_model_rows(df, league_id, teams, fixtures, comp_teams):
+    """Transform in-memory model_dataset DataFrame → list of INSERT tuples.
+
+    Contamination filter: skip rows where parquet's claimed comp_id doesn't
+    match the fixture's actual competition_id (fixtures DB is source of
+    truth). Historical pooled-in rows get dropped here.
+    """
+    fix_by_id = {
+        int(r["id"]): (int(r["season_id"]), int(r["competition_id"]))
+        for _, r in fixtures.iterrows()
+    } if fixtures is not None else {}
+
+    scoped_ids = comp_teams.loc[
+        comp_teams["competition_id"] == int(league_id), "team_id"
+    ].unique() if (comp_teams is not None and not comp_teams.empty) else []
+
+    rows = []
+    dropped = {"contamination": 0, "missing_fixture": 0, "unresolved": 0}
+
+    for _, row in df.iterrows():
+        fid = int(row["id"])
+        fix_info = fix_by_id.get(fid)
+        if fix_info is None:
+            dropped["missing_fixture"] += 1
+            continue
+        actual_season_id, actual_comp_id = fix_info
+        claimed = int(row["comp_id"]) if pd.notna(row.get("comp_id")) else None
+        if claimed is not None and claimed != actual_comp_id:
+            dropped["contamination"] += 1
+            continue
+
+        team_id = _resolve_scoped(row.get("Team"), teams, scoped_ids)
+        opp_id = _resolve_scoped(row.get("Opponent"), teams, scoped_ids)
+        if team_id is None or opp_id is None:
+            dropped["unresolved"] += 1
+            continue
+
+        tup = [
+            fid, actual_comp_id, actual_season_id, team_id, opp_id,
+            _val(row.get("Team")), _val(row.get("Opponent")),
+            _val(row.get("Venue")), _val(row.get("kickoff_datetime")),
+        ]
+        for stat in MODEL_DATASET_STATS:
+            tup.append(_val(row.get(_title_parquet_col(stat, history=False))))
+        for stat in MODEL_DATASET_STATS:
+            tup.append(_val(row.get(_title_parquet_col(stat, history=True, opponent=False))))
+            tup.append(_val(row.get(_title_parquet_col(stat, history=True, opponent=True))))
+        rows.append(tuple(tup))
+
+    return rows, dropped
+
+
+async def insert_model_dataset_async(df, league_id, league_name, teams, fixtures, comp_teams):
+    """Write one league's model_dataset DataFrame to DB. Safe to call
+    alongside the existing parquet _write_df (dual-write)."""
+    if df is None or len(df) == 0:
+        return
+    rows, dropped = _build_model_rows(df, league_id, teams, fixtures, comp_teams)
+    logger.info(
+        f"[model_dataset {league_name}] df_rows={len(df)} inserting={len(rows)} "
+        f"dropped={dropped}"
+    )
+    if rows:
+        await execute_chunked(MODEL_DATASET_SQL, rows, label=f"[model_dataset {league_name}]")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  projection_accuracy_dataset
+# ──────────────────────────────────────────────────────────────────────────
+
+def _build_accuracy_insert_sql():
+    cols = [
+        "fixture_id", "competition_id", "home_team_id", "away_team_id",
+        "home_team_name", "away_team_name", "kickoff_datetime",
+    ]
+    for stat in ACCURACY_DATASET_STATS:
+        for venue in ["total", "home", "away"]:
+            cols.append(f"{venue}_{stat}")
+            cols.append(f"{venue}_projected_{stat}")
+    cols.extend([
+        "home_odds_percent", "draw_odds_percent", "away_odds_percent",
+        "home_win_percent", "draw_percent", "away_win_percent",
+        "home_clean_sheet_percent", "away_clean_sheet_percent",
+        "over_15_goals_percent", "over_25_goals_percent", "both_teams_score_percent",
+        "home_win", "draw", "away_win",
+        "home_clean_sheet", "away_clean_sheet",
+        "over_15", "over_25", "btts",
+    ])
+    placeholders = ", ".join(["%s"] * len(cols))
+    col_list = ", ".join(cols)
+    update_list = ",\n    ".join(f"{c} = VALUES({c})" for c in cols if c != "fixture_id")
+    return f"""
+INSERT INTO projection_accuracy_dataset (
+    {col_list},
+    created_at, updated_at
+) VALUES ({placeholders}, NOW(), NOW())
+ON DUPLICATE KEY UPDATE
+    {update_list},
+    updated_at = NOW()
+"""
+
+
+ACCURACY_DATASET_SQL = _build_accuracy_insert_sql()
+
+
+def _build_accuracy_rows(df, league_id, teams, fixtures, comp_teams):
+    fix_by_id = {
+        int(r["id"]): int(r["competition_id"])
+        for _, r in fixtures.iterrows()
+    } if fixtures is not None else {}
+
+    scoped_ids = comp_teams.loc[
+        comp_teams["competition_id"] == int(league_id), "team_id"
+    ].unique() if (comp_teams is not None and not comp_teams.empty) else []
+
+    rows = []
+    dropped = {"contamination": 0, "missing_fixture": 0, "unresolved": 0}
+
+    for _, row in df.iterrows():
+        fid = int(row["fixture_id"])
+        actual_comp_id = fix_by_id.get(fid)
+        if actual_comp_id is None:
+            dropped["missing_fixture"] += 1
+            continue
+        claimed = int(row["comp_id"]) if pd.notna(row.get("comp_id")) else None
+        if claimed is not None and claimed != actual_comp_id:
+            dropped["contamination"] += 1
+            continue
+
+        home_id = _resolve_scoped(row.get("Home Team"), teams, scoped_ids)
+        away_id = _resolve_scoped(row.get("Away Team"), teams, scoped_ids)
+        if home_id is None or away_id is None:
+            dropped["unresolved"] += 1
+            continue
+
+        tup = [
+            fid, actual_comp_id, home_id, away_id,
+            _val(row.get("Home Team")), _val(row.get("Away Team")),
+            _val(row.get("kickoff_datetime")),
+        ]
+        for stat in ACCURACY_DATASET_STATS:
+            t = _title(stat)
+            for venue in ["Total", "Home", "Away"]:
+                tup.append(_val(row.get(f"{venue} {t}")))
+                tup.append(_val(row.get(f"{venue} Projected {t}")))
+        # Odds
+        tup.append(_val(row.get("Home Odds %")))
+        tup.append(_val(row.get("Draw Odds %")))
+        tup.append(_val(row.get("Away Odds %")))
+        # Projection %s (parquet stores as '35.62%' strings)
+        tup.append(_parse_percent(row.get("Home Win %")))
+        tup.append(_parse_percent(row.get("Draw %")))
+        tup.append(_parse_percent(row.get("Away Win %")))
+        tup.append(_parse_percent(row.get("Home Clean Sheet %")))
+        tup.append(_parse_percent(row.get("Away Clean Sheet %")))
+        tup.append(_parse_percent(row.get("Over 1.5 Goals %")))
+        tup.append(_parse_percent(row.get("Over 2.5 Goals %")))
+        tup.append(_parse_percent(row.get("Both Teams Score %")))
+        # Outcome flags
+        tup.append(_parse_bool(row.get("Home Win")))
+        tup.append(_parse_bool(row.get("Draw")))
+        tup.append(_parse_bool(row.get("Away Win")))
+        tup.append(_parse_bool(row.get("Home Clean Sheet")))
+        tup.append(_parse_bool(row.get("Away Clean Sheet")))
+        tup.append(_parse_bool(row.get("Over 1.5")))
+        tup.append(_parse_bool(row.get("Over 2.5")))
+        tup.append(_parse_bool(row.get("BTTS")))
+        rows.append(tuple(tup))
+
+    return rows, dropped
+
+
+async def insert_accuracy_dataset_async(df, league_id, league_name, teams, fixtures, comp_teams):
+    if df is None or len(df) == 0:
+        return
+    rows, dropped = _build_accuracy_rows(df, league_id, teams, fixtures, comp_teams)
+    logger.info(
+        f"[accuracy_dataset {league_name}] df_rows={len(df)} inserting={len(rows)} "
+        f"dropped={dropped}"
+    )
+    if rows:
+        await execute_chunked(ACCURACY_DATASET_SQL, rows, label=f"[accuracy_dataset {league_name}]")
