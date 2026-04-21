@@ -292,8 +292,12 @@ class ProjectionService:
                 previous_accuracy_fixtures['kickoff_datetime'] < pd.to_datetime('today')]
         for i in range(len(previous_accuracy_fixtures)):
             fixture_id = previous_accuracy_fixtures.iloc[i]['fixture_id']
-            home_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Home Team'], teams, league_id, comp_teams)
-            away_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Away Team'], teams, league_id, comp_teams)
+            try:
+                home_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Home Team'], teams, league_id, comp_teams)
+                away_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Away Team'], teams, league_id, comp_teams)
+            except IndexError as e:
+                logger.warning(f"Team not found in teams table — skipping fixture {fixture_id}: {e}")
+                continue
             fixture_stats = team_stats[team_stats['fixture_id'] == fixture_id]
             for stat in stat_list:
                 fixture_stat_df = fixture_stats[fixture_stats['stats_type_id'] == get_stat_id(stat, stats_types)]

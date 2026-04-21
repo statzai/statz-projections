@@ -19,6 +19,8 @@ from app.repository.player_stat_repo import insert_players_stats_async
 from scipy.stats import poisson
 import warnings
 import os
+import logging
+logger = logging.getLogger("projection")
 warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
 import numpy as np
@@ -270,7 +272,11 @@ class PremierLeagueProjectionsService:
         for i in range(len(previous_fixtures)):
             fixture_id = previous_fixtures.iloc[i]['id']
             team = previous_fixtures.iloc[i]['Team']
-            team_id = get_team_id(previous_fixtures.iloc[i]['Team'], teams, league_id, comp_teams)
+            try:
+                team_id = get_team_id(team, teams, league_id, comp_teams)
+            except IndexError:
+                logger.warning(f"Team not found in teams table: {team} — skipping fixture {fixture_id}")
+                continue
             fixture_stats = team_stats[team_stats['fixture_id'] == fixture_id]
             for stat in stat_list:
                 if stat == 'Goals':
@@ -291,8 +297,12 @@ class PremierLeagueProjectionsService:
         previous_accuracy_fixtures = projection_accuracy_dataset_league[projection_accuracy_dataset_league.isnull().any(axis=1)]
         for i in range(len(previous_accuracy_fixtures)):
             fixture_id = previous_accuracy_fixtures.iloc[i]['fixture_id']
-            home_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Home Team'], teams, league_id, comp_teams)
-            away_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Away Team'], teams, league_id, comp_teams)
+            try:
+                home_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Home Team'], teams, league_id, comp_teams)
+                away_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Away Team'], teams, league_id, comp_teams)
+            except IndexError as e:
+                logger.warning(f"Team not found in teams table — skipping fixture {fixture_id}: {e}")
+                continue
             fixture_stats = team_stats[team_stats['fixture_id'] == fixture_id]
             for stat in stat_list:
                 fixture_stat_df = fixture_stats[fixture_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
