@@ -1,11 +1,10 @@
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
-import requests as http_requests
+from app.repository.projection_run_repo import upsert_run_complete
 
 class AllLeaguesRequest(BaseModel):
     leagues: Optional[List[str]] = None
@@ -29,34 +28,26 @@ fetch_all_data_service = FetchAllDataService()
 
 _projection_running = False
 
-CALLBACK_URL = os.getenv("STATZ_CALLBACK_URL", "")
-CALLBACK_SECRET = os.getenv("STATZ_CALLBACK_SECRET", "")
 
+async def _report_status(competition_id: str, status: str, started_at: str, finished_at: str = None, exit_code: int = None, stdout: str = None, stderr: str = None):
+    """
+    Report projection run status back to the Statz admin dashboard.
 
-def _report_status(competition_id: str, status: str, started_at: str, finished_at: str = None, exit_code: int = None, stdout: str = None, stderr: str = None):
-    """Report projection run status back to the Statz admin dashboard."""
-    if not CALLBACK_URL or not CALLBACK_SECRET:
-        logger.warning("Status callback not configured (STATZ_CALLBACK_URL / STATZ_CALLBACK_SECRET missing)")
-        return
-
-    try:
-        resp = http_requests.post(
-            CALLBACK_URL,
-            json={
-                "competition_id": competition_id,
-                "status": status,
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "exit_code": exit_code,
-                "stdout": stdout,
-                "stderr": stderr,
-            },
-            headers={"X-Projections-Secret": CALLBACK_SECRET},
-            timeout=10,
-        )
-        logger.info(f"Status callback for {competition_id}: {status} -> HTTP {resp.status_code}")
-    except Exception as e:
-        logger.error(f"Status callback failed for {competition_id}: {e}")
+    Writes directly to the projections_runs table via the DB pool instead
+    of POSTing over HTTP. Fixes the deploy-window callback-loss issue
+    where Laravel restarts during a deploy would drop incoming HTTP
+    requests and leave runs marked 'running' until mark-stuck timed them
+    out 30 min later.
+    """
+    await upsert_run_complete(
+        competition_id=competition_id,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+    )
 
 
 def _league_to_competition_id(league: str) -> str:
@@ -102,11 +93,11 @@ async def _run_single_league(request):
         else:
             await projection_service.projections(request)
         finished_at = datetime.now(timezone.utc).isoformat()
-        _report_status(competition_id, "success", started_at, finished_at, exit_code=0)
+        await _report_status(competition_id, "success", started_at, finished_at, exit_code=0)
     except Exception as e:
         finished_at = datetime.now(timezone.utc).isoformat()
         logger.error(f"[{request.league}] projection FAILED: {e}", exc_info=True)
-        _report_status(competition_id, "failed", started_at, finished_at, exit_code=1, stderr=str(e)[:500])
+        await _report_status(competition_id, "failed", started_at, finished_at, exit_code=1, stderr=str(e)[:500])
     finally:
         _projection_running = False
         logger.info("Projection lock released.")
