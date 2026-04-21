@@ -100,35 +100,63 @@ class ProjectionAllTeams:
                 # In[5]:
 
                 league_dashed = league.replace(' ', '-').replace('.', '').lower()
-                league_weightings_df = ProjectionService._cache.league_weightings
 
-                league_row = league_weightings_df[league_weightings_df['League'] == league]
-                if len(league_row) > 0:
-                    league_below = league_row['League Below'].values[0]
-                    league_above = league_row['League Above'].values[0]
-                    league_below_attack_weight = league_row['League Below Attack Weight'].values[0]
-                    league_below_defense_weight = league_row['League Below Defense Weight'].values[0]
-                    league_above_attack_weight = league_row['League Above Attack Weight'].values[0]
-                    league_above_defense_weight = league_row['League Above Defense Weight'].values[0]
-                    country_code = league_row['code'].values[0]
-                    div = league_row['div'].values[0]
-                    weightings = [league_above_attack_weight, league_above_defense_weight, league_below_attack_weight,
-                                  league_below_defense_weight]
-                    mv_beta = league_row['mv_beta'].values[0]
-                    odds_beta = league_row['odds_beta'].values[0]
+                # League config — try DB config first (projection_config.csv from
+                # the fetch pipeline, driven by the admin panel), fall back to
+                # League Weightings.xlsx for leagues not yet in the DB.
+                # Mirrors the block in projection_service.py so both paths use
+                # the same source-of-truth. Without this, comps added via
+                # "+ Add Competition" in the admin panel project with neutral
+                # weights in Run All Leagues but with the correct DB config in
+                # scheduled / Run Now flows.
+                db_config = ProjectionService._cache.projection_config
+                db_row = db_config[db_config['league_name'] == league] if not db_config.empty else pd.DataFrame()
+
+                if len(db_row) > 0:
+                    r = db_row.iloc[0]
+                    league_above = r.get('league_above_name') if pd.notna(r.get('league_above_name')) else None
+                    league_below = r.get('league_below_name') if pd.notna(r.get('league_below_name')) else None
+                    league_above_attack_weight = float(r.get('above_attack_weight', 1.0))
+                    league_above_defense_weight = float(r.get('above_defense_weight', 1.0))
+                    league_below_attack_weight = float(r.get('below_attack_weight', 1.0))
+                    league_below_defense_weight = float(r.get('below_defense_weight', 1.0))
+                    country_code = r.get('transfermarkt_code') if pd.notna(r.get('transfermarkt_code')) else None
+                    div = r.get('transfermarkt_div') if pd.notna(r.get('transfermarkt_div')) else None
+                    mv_beta = float(r.get('mv_beta', 0.15))
+                    odds_beta = float(r.get('odds_beta', 0.3))
+                    weightings = [league_above_attack_weight, league_above_defense_weight,
+                                  league_below_attack_weight, league_below_defense_weight]
+                    logger.info(f"[{league}] Config loaded from DB (projection_config.csv)")
                 else:
-                    # League not in League Weightings (e.g. Champions League, Europa League)
-                    league_below = None
-                    league_above = None
-                    league_below_attack_weight = 1.0
-                    league_below_defense_weight = 1.0
-                    league_above_attack_weight = 1.0
-                    league_above_defense_weight = 1.0
-                    country_code = None
-                    div = None
-                    weightings = [1.0, 1.0, 1.0, 1.0]
-                    mv_beta = 0.0
-                    odds_beta = 1.0
+                    league_weightings_df = ProjectionService._cache.league_weightings
+                    league_row = league_weightings_df[league_weightings_df['League'] == league]
+                    if len(league_row) > 0:
+                        league_below = league_row['League Below'].values[0]
+                        league_above = league_row['League Above'].values[0]
+                        league_below_attack_weight = league_row['League Below Attack Weight'].values[0]
+                        league_below_defense_weight = league_row['League Below Defense Weight'].values[0]
+                        league_above_attack_weight = league_row['League Above Attack Weight'].values[0]
+                        league_above_defense_weight = league_row['League Above Defense Weight'].values[0]
+                        country_code = league_row['code'].values[0]
+                        div = league_row['div'].values[0]
+                        mv_beta = league_row['mv_beta'].values[0]
+                        odds_beta = league_row['odds_beta'].values[0]
+                        weightings = [league_above_attack_weight, league_above_defense_weight,
+                                      league_below_attack_weight, league_below_defense_weight]
+                        logger.info(f"[{league}] Config loaded from League Weightings.xlsx (fallback)")
+                    else:
+                        league_below = None
+                        league_above = None
+                        league_below_attack_weight = 1.0
+                        league_below_defense_weight = 1.0
+                        league_above_attack_weight = 1.0
+                        league_above_defense_weight = 1.0
+                        country_code = None
+                        div = None
+                        mv_beta = 0.0
+                        odds_beta = 1.0
+                        weightings = [1.0, 1.0, 1.0, 1.0]
+                        logger.warning(f"[{league}] No config found in DB or xlsx — using defaults")
 
                 # In[6]:
 
@@ -579,9 +607,21 @@ class ProjectionAllTeams:
                 # In[13]:
 
                 try:
-                    # second_ratings = pd.read_excel(rf"{data_folder_path}\{league} Promoted Team Ratings.xlsx")
-                    second_ratings = pd.read_excel(f"{data_folder_path}/{league} Promoted Team Ratings.xlsx")
-                    second_ratings = second_ratings[['Team', 'Attack', 'Defense']]
+                    # Try DB-driven promoted ratings first (from admin panel),
+                    # fall back to the per-league xlsx file. Mirrors the block
+                    # in projection_service.py so both paths use the same
+                    # source-of-truth.
+                    db_promoted = ProjectionService._cache.promoted_team_ratings
+                    db_promoted_rows = db_promoted[db_promoted['league_name'] == league] if not db_promoted.empty else pd.DataFrame()
+
+                    if len(db_promoted_rows) > 0:
+                        second_ratings = db_promoted_rows[['team_name', 'attack', 'defense']].copy()
+                        second_ratings.columns = ['Team', 'Attack', 'Defense']
+                        logger.info(f"[{league}] Promoted team ratings loaded from DB ({len(second_ratings)} teams)")
+                    else:
+                        second_ratings = pd.read_excel(f"{data_folder_path}/{league} Promoted Team Ratings.xlsx")
+                        second_ratings = second_ratings[['Team', 'Attack', 'Defense']]
+                        logger.info(f"[{league}] Promoted team ratings loaded from xlsx")
                     second_ratings['Attack'] = (second_ratings['Attack']) * league_below_attack_weight
                     second_ratings['Defense'] = (second_ratings[
                         'Defense']) / league_below_defense_weight  # UPDATED - divide instead of multiply
