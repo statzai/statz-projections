@@ -1,5 +1,7 @@
 import logging
 import time
+from datetime import datetime, timezone
+from app.repository.projection_run_repo import upsert_run_complete
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
 from app.models.requests.league_request import LeagueRequest
@@ -56,6 +58,12 @@ class ProjectionAllTeams:
         _euro_comp_service = EuroCompProjectionService()
 
         for league in leagues:
+            # Slug and start-time for projections_runs status write.
+            # Matches routes._league_to_competition_id() so the completion
+            # row lines up with any pre-created 'running' row (inserted by
+            # Laravel's triggerRunAll) keyed on the same slug.
+            _league_slug = league.lower().replace(' ', '-').replace('.', '')
+            _league_started_iso = datetime.now(timezone.utc).isoformat()
             try:
                 # Delegate euro comps to dedicated service
                 if EuroCompProjectionService.is_euro_comp(league):
@@ -65,6 +73,13 @@ class ProjectionAllTeams:
                     await _euro_comp_service.projections(request)
                     _league_times[league] = round(time.time() - _start_time, 1)
                     logger.info(f"[{league}] DONE in {_league_times[league]}s")
+                    await upsert_run_complete(
+                        competition_id=_league_slug,
+                        status='success',
+                        started_at=_league_started_iso,
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        exit_code=0,
+                    )
                     continue
 
                 logger.info(f"[{league}] START projections"); _start_time = time.time()
@@ -1531,9 +1546,27 @@ class ProjectionAllTeams:
                 _league_elapsed = (time.time() - _start_time) / 60
                 _league_times[league] = _league_elapsed
                 logger.info(f"[{league}] COMPLETE - {_league_elapsed:.1f} min")
+                await upsert_run_complete(
+                    competition_id=_league_slug,
+                    status='success',
+                    started_at=_league_started_iso,
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    exit_code=0,
+                )
             except Exception as e:
                 logger.error(f"[{league}] FAILED - skipping: {e}", exc_info=True)
                 _league_times[league] = "FAILED"
+                try:
+                    await upsert_run_complete(
+                        competition_id=_league_slug,
+                        status='failed',
+                        started_at=_league_started_iso,
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        exit_code=1,
+                        stderr=str(e)[:500],
+                    )
+                except Exception as _status_err:
+                    logger.error(f"[{league}] failed to write status row: {_status_err}")
 
         _total_elapsed = (time.time() - _total_start) / 60
         logger.info("=" * 60)
