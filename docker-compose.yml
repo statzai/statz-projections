@@ -8,6 +8,13 @@ services:
     volumes:
       - ./app/projection-outputs:/app/app/projection-outputs
       - ./app/data:/app/app/data
+      # model-builds mount added 2026-04-22 so .sav files survive rebuilds.
+      # Phase 4 retraining will write new versioned .sav files here weekly;
+      # without the mount, every container rebuild wipes them and the next
+      # projection burns ~50 min retraining from scratch. Host dir was
+      # seeded from the container image via `docker cp` before this mount
+      # was added (132 files), so no baked-in models were lost.
+      - ./app/model-builds:/app/app/model-builds
     env_file:
       - .env
     restart: unless-stopped
