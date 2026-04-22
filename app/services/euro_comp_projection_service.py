@@ -123,19 +123,44 @@ class EuroCompProjectionService:
             league_id = get_league_id(league_name, comps)
             league_dashed = league_name.replace(' ', '-').replace('.', '').lower()
 
-            league_row = league_weightings_df[league_weightings_df['League'] == league_name]
-            league_below = league_row['League Below'].values[0]
-            league_above = league_row['League Above'].values[0]
-            league_below_attack_weight = league_row['League Below Attack Weight'].values[0]
-            league_below_defense_weight = league_row['League Below Defense Weight'].values[0]
-            league_above_attack_weight = league_row['League Above Attack Weight'].values[0]
-            league_above_defense_weight = league_row['League Above Defense Weight'].values[0]
-            country_code = league_row['code'].values[0]
-            div = league_row['div'].values[0]
+            # League config — try DB first, xlsx fallback (mirrors the
+            # pattern in projection_service.py and projection_all_teams_service.py).
+            # Required because dict keys now match competitions.name (e.g.
+            # 'Scottish Premiership'), but League Weightings.xlsx hasn't
+            # been re-labelled — bare xlsx lookup returned empty and .values[0]
+            # crashed the whole euro comp run.
+            db_config = EuroCompProjectionService._cache.projection_config
+            db_row = db_config[db_config['league_name'] == league_name] if not db_config.empty else pd.DataFrame()
+
+            if len(db_row) > 0:
+                r = db_row.iloc[0]
+                league_above = r.get('league_above_name') if pd.notna(r.get('league_above_name')) else None
+                league_below = r.get('league_below_name') if pd.notna(r.get('league_below_name')) else None
+                league_above_attack_weight = float(r.get('above_attack_weight', 1.0))
+                league_above_defense_weight = float(r.get('above_defense_weight', 1.0))
+                league_below_attack_weight = float(r.get('below_attack_weight', 1.0))
+                league_below_defense_weight = float(r.get('below_defense_weight', 1.0))
+                country_code = r.get('transfermarkt_code') if pd.notna(r.get('transfermarkt_code')) else None
+                div = r.get('transfermarkt_div') if pd.notna(r.get('transfermarkt_div')) else None
+                mv_beta = float(r.get('mv_beta', 0.15))
+                odds_beta_val = float(r.get('odds_beta', 0.3))
+            else:
+                league_row = league_weightings_df[league_weightings_df['League'] == league_name]
+                if len(league_row) == 0:
+                    logger.warning(f"[{league}] No config for {league_name} in DB or xlsx — skipping this domestic league in cross-league ratings")
+                    continue
+                league_below = league_row['League Below'].values[0]
+                league_above = league_row['League Above'].values[0]
+                league_below_attack_weight = league_row['League Below Attack Weight'].values[0]
+                league_below_defense_weight = league_row['League Below Defense Weight'].values[0]
+                league_above_attack_weight = league_row['League Above Attack Weight'].values[0]
+                league_above_defense_weight = league_row['League Above Defense Weight'].values[0]
+                country_code = league_row['code'].values[0]
+                div = league_row['div'].values[0]
+                mv_beta = league_row['mv_beta'].values[0]
+                odds_beta_val = league_row['odds_beta'].values[0]
             weightings = [league_above_attack_weight, league_above_defense_weight, league_below_attack_weight,
                           league_below_defense_weight]
-            mv_beta = league_row['mv_beta'].values[0]
-            odds_beta_val = league_row['odds_beta'].values[0]
 
             if pd.notna(league_above):
                 league_above_id = get_league_id(league_above, comps)

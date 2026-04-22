@@ -25,6 +25,45 @@ def _to_mysql_datetime(value):
     return dt
 
 
+async def touch_run_start(competition_id: str):
+    """Update the latest 'running' row's started_at to NOW.
+
+    The Laravel-side pre-create in triggerRunAll stamps all 24 running
+    rows with the click-time. Sequential per-league processing in
+    projection_all_teams_service then takes ~5 min × N leagues, so rows
+    for leagues later in the queue cross the mark-stuck 30-min
+    threshold while still legitimately queued — causing false
+    "stuck" flips. Calling this at the top of each league's iteration
+    resets its row's started_at to the actual processing-start time,
+    so mark-stuck only catches genuinely-wedged runs.
+
+    Silent on miss (no running row found) — scheduled / Run Now flows
+    use the single-league path where the row IS pre-created, but
+    direct curl to /all-leagues may skip pre-create entirely.
+    """
+    conn = None
+    try:
+        conn = await asyncio.wait_for(get_connection(), timeout=30)
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                "UPDATE projections_runs SET started_at = NOW() "
+                "WHERE id = ("
+                "  SELECT id FROM ("
+                "    SELECT id FROM projections_runs "
+                "    WHERE competition_id = %s AND status = 'running' "
+                "    ORDER BY started_at DESC LIMIT 1"
+                "  ) AS sub"
+                ")",
+                (competition_id,),
+            )
+            await conn.commit()
+    except Exception as e:
+        logger.error(f"[projections_runs] {competition_id}: touch_run_start failed: {e}")
+    finally:
+        if conn and _db.pool:
+            _db.pool.release(conn)
+
+
 async def upsert_run_complete(
     competition_id: str,
     status: str,
