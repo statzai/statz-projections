@@ -39,7 +39,7 @@ class EuroCompProjectionService:
         'Ligue 1': 'France',
         'Eredivisie': 'Netherlands',
         'Liga Portugal': 'Portugal',
-        'Premiership': 'Scotland',
+        'Scottish Premiership': 'Scotland',
     }
 
     # Shared data cache - same instance as ProjectionService
