@@ -420,19 +420,23 @@ def _build_accuracy_dataset_select() -> str:
         for venue_db, venue_parq in [("total", "Total"), ("home", "Home"), ("away", "Away")]:
             cols.append(f"{venue_db}_{stat} AS `{venue_parq} {t}`")
             cols.append(f"{venue_db}_projected_{stat} AS `{venue_parq} Projected {t}`")
-    # Odds % + outcome % columns
+    # Odds % + outcome % columns. `%%` is the escaped form for aiomysql,
+    # which runs SQL through Python %-format before sending; a literal `%`
+    # in the column alias would otherwise be parsed as a format specifier
+    # and crash with ValueError on the character after it. The DataFrame
+    # column name still ends up as e.g. "Home Odds %" at runtime.
     cols.extend([
-        "home_odds_percent AS `Home Odds %`",
-        "draw_odds_percent AS `Draw Odds %`",
-        "away_odds_percent AS `Away Odds %`",
-        "home_win_percent AS `Home Win %`",
-        "draw_percent AS `Draw %`",
-        "away_win_percent AS `Away Win %`",
-        "home_clean_sheet_percent AS `Home Clean Sheet %`",
-        "away_clean_sheet_percent AS `Away Clean Sheet %`",
-        "over_15_goals_percent AS `Over 1.5 Goals %`",
-        "over_25_goals_percent AS `Over 2.5 Goals %`",
-        "both_teams_score_percent AS `Both Teams Score %`",
+        "home_odds_percent AS `Home Odds %%`",
+        "draw_odds_percent AS `Draw Odds %%`",
+        "away_odds_percent AS `Away Odds %%`",
+        "home_win_percent AS `Home Win %%`",
+        "draw_percent AS `Draw %%`",
+        "away_win_percent AS `Away Win %%`",
+        "home_clean_sheet_percent AS `Home Clean Sheet %%`",
+        "away_clean_sheet_percent AS `Away Clean Sheet %%`",
+        "over_15_goals_percent AS `Over 1.5 Goals %%`",
+        "over_25_goals_percent AS `Over 2.5 Goals %%`",
+        "both_teams_score_percent AS `Both Teams Score %%`",
         # Outcome flags
         "home_win AS `Home Win`",
         "draw AS `Draw`",
@@ -447,7 +451,11 @@ def _build_accuracy_dataset_select() -> str:
 
 
 async def _fetch_df(sql: str, params: tuple = ()) -> pd.DataFrame:
-    """Execute SELECT and return results as a DataFrame."""
+    """Execute SELECT and return results as a DataFrame. SQL with `%`
+    characters in column aliases must escape them as `%%` because
+    aiomysql always runs the query through Python's %-format step
+    (regardless of whether params are present), and `%%` correctly
+    becomes `%` in the final query either way."""
     conn = None
     try:
         conn = await asyncio.wait_for(get_connection(), timeout=30)
