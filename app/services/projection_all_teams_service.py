@@ -1,7 +1,7 @@
 import logging
 import time
 from datetime import datetime, timezone
-from app.repository.projection_run_repo import touch_run_start, upsert_run_complete
+from app.repository.projection_run_repo import touch_all_running, upsert_run_complete
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
 from app.models.requests.league_request import LeagueRequest
@@ -64,12 +64,15 @@ class ProjectionAllTeams:
             # Laravel's triggerRunAll) keyed on the same slug.
             _league_slug = league.lower().replace(' ', '-').replace('.', '')
             _league_started_iso = datetime.now(timezone.utc).isoformat()
-            # Reset started_at on the pre-created running row to NOW so
-            # mark-stuck's 30-min threshold doesn't false-positive on
-            # leagues later in the queue. The Laravel pre-create stamps
-            # all 24 with the click-time; without this, anything that
-            # takes >30 min of total queue-wait gets flipped to failed.
-            await touch_run_start(_league_slug)
+            # Bump started_at to NOW on every 'running' row in projections_runs
+            # to keep the whole queue fresh against mark-stuck's 30-min threshold.
+            # Laravel's pre-create stamps all 24 rows with the click-time, so
+            # without this, leagues still queued past minute ~30 would false-stick.
+            # Touching ALL running rows (not just this league's) protects every
+            # row that's still waiting its turn — the loop processes at ~5 min
+            # per league, so every remaining row gets its started_at refreshed
+            # every iteration.
+            await touch_all_running()
             try:
                 # Delegate euro comps to dedicated service
                 if EuroCompProjectionService.is_euro_comp(league):
