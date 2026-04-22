@@ -500,8 +500,14 @@ async def load_model_dataset_async(competition_id: int = None) -> pd.DataFrame:
     return df
 
 
+# Only the 8 outcome / projection % columns were stored as 'XX.XX%'
+# strings in the legacy parquet format. The 3 odds columns (Home Odds %,
+# Draw Odds %, Away Odds %) are numeric — score_preds writes them as
+# floats at projection time (= 100 / bet365_decimal_odds), and
+# downstream arithmetic (pd.isna check + odds_beta blending) assumes
+# float. Leaving them as float on DB load keeps them compatible with
+# both the concat of new projections and the parquet write.
 _ACCURACY_PERCENT_COLUMNS = (
-    "Home Odds %", "Draw Odds %", "Away Odds %",
     "Home Win %", "Draw %", "Away Win %",
     "Home Clean Sheet %", "Away Clean Sheet %",
     "Over 1.5 Goals %", "Over 2.5 Goals %", "Both Teams Score %",
