@@ -513,13 +513,18 @@ def _format_percent_columns(df: pd.DataFrame) -> pd.DataFrame:
     legacy parquet shape. Downstream projection code writes NEW % values
     as formatted strings (e.g. score_preds['Home Win %'] = f'{pct:.2f}%'),
     so keeping loaded values as floats would produce a mixed-type column
-    that breaks the belt-and-braces parquet writer with ArrowTypeError."""
+    that breaks the belt-and-braces parquet writer with ArrowTypeError.
+
+    Uses pandas nullable StringDtype so NULLs remain `pd.NA` rather than
+    NaN (which is a float and re-introduces the mixed-type problem).
+    """
     for col in _ACCURACY_PERCENT_COLUMNS:
         if col not in df.columns:
             continue
-        df[col] = df[col].apply(
-            lambda v: f"{float(v):.2f}%" if v is not None and not (isinstance(v, float) and pd.isna(v)) else None
+        formatted = df[col].apply(
+            lambda v: f"{float(v):.2f}%" if v is not None and not (isinstance(v, float) and pd.isna(v)) else pd.NA
         )
+        df[col] = formatted.astype("string")
     return df
 
 
