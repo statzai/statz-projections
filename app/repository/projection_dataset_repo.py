@@ -455,7 +455,16 @@ async def _fetch_df(sql: str, params: tuple = ()) -> pd.DataFrame:
     characters in column aliases must escape them as `%%` because
     aiomysql always runs the query through Python's %-format step
     (regardless of whether params are present), and `%%` correctly
-    becomes `%` in the final query either way."""
+    becomes `%` in the final query either way.
+
+    Casts any Decimal-typed columns to float64. aiomysql returns DECIMAL
+    values as Python `Decimal` objects, which land in a pandas `object`
+    column; downstream writers (pyarrow parquet in particular) can't
+    handle a Decimal+None mix and raise ArrowTypeError. Float cast makes
+    the DataFrame shape-compatible with the legacy parquet-read path.
+    """
+    from decimal import Decimal as _Decimal
+
     conn = None
     try:
         conn = await asyncio.wait_for(get_connection(), timeout=30)
@@ -463,7 +472,16 @@ async def _fetch_df(sql: str, params: tuple = ()) -> pd.DataFrame:
             await cursor.execute(sql, params)
             rows = await cursor.fetchall()
             cols = [d[0] for d in cursor.description]
-        return pd.DataFrame(rows, columns=cols)
+        df = pd.DataFrame(rows, columns=cols)
+
+        for col in df.columns:
+            if df[col].dtype != object:
+                continue
+            non_null = df[col].dropna()
+            if len(non_null) > 0 and isinstance(non_null.iloc[0], _Decimal):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        return df
     finally:
         if conn and _db.pool:
             _db.pool.release(conn)
