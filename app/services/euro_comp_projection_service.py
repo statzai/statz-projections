@@ -190,10 +190,21 @@ class EuroCompProjectionService:
                 stats_types=stats_types, weight=0.95, games=30, weightings=weightings
             )
 
-            # Promoted team ratings adjustment
+            # Promoted team ratings adjustment — try DB first (admin panel),
+            # fall back to per-league xlsx if the league doesn't have DB rows
+            # yet. Mirrors the pattern in projection_service.py.
             try:
-                second_ratings = pd.read_excel(os.path.join(data_folder_path, f"{league_name} Promoted Team Ratings.xlsx"))
-                second_ratings = second_ratings[['Team', 'Attack', 'Defense']]
+                db_promoted = EuroCompProjectionService._cache.promoted_team_ratings
+                db_promoted_rows = db_promoted[db_promoted['league_name'] == league_name] if not db_promoted.empty else pd.DataFrame()
+
+                if len(db_promoted_rows) > 0:
+                    second_ratings = db_promoted_rows[['team_name', 'attack', 'defense']].copy()
+                    second_ratings.columns = ['Team', 'Attack', 'Defense']
+                    logger.info(f"[{league}] {league_name}: promoted team ratings loaded from DB ({len(second_ratings)} teams)")
+                else:
+                    second_ratings = pd.read_excel(os.path.join(data_folder_path, f"{league_name} Promoted Team Ratings.xlsx"))
+                    second_ratings = second_ratings[['Team', 'Attack', 'Defense']]
+                    logger.info(f"[{league}] {league_name}: promoted team ratings loaded from xlsx")
                 second_ratings['Attack'] = (second_ratings['Attack']) * league_below_attack_weight
                 second_ratings['Defense'] = (second_ratings['Defense']) / league_below_defense_weight
                 promoted_teams = second_ratings['Team'].unique()
@@ -270,7 +281,23 @@ class EuroCompProjectionService:
             # Apply UEFA coefficient — same scaling applies to both the
             # indexed and the xG/game columns so euro-comp rankings stay
             # cross-league comparable.
-            coef = uefa_coef[uefa_coef['League'] == league_name]['Coefficient Index'].values[0]
+            # Try DB first (competitions.uefa_coefficient_index, added
+            # 2026-04-22 migration), fall back to League Coefficients.xlsx
+            # for any league not yet backfilled in DB.
+            comp_row = comps[comps['id'] == league_id]
+            db_coef = comp_row['uefa_coefficient_index'].iloc[0] if (
+                not comp_row.empty and 'uefa_coefficient_index' in comps.columns
+                and pd.notna(comp_row['uefa_coefficient_index'].iloc[0])
+            ) else None
+            if db_coef is not None:
+                coef = float(db_coef)
+            else:
+                xlsx_match = uefa_coef[uefa_coef['League'] == league_name]['Coefficient Index']
+                if xlsx_match.empty:
+                    logger.warning(f"[{league}] No UEFA coefficient for {league_name} in DB or xlsx — defaulting to 1.0")
+                    coef = 1.0
+                else:
+                    coef = xlsx_match.values[0]
             ratings['League'] = league_name
             ratings['coef'] = coef
             ratings['Attack'] *= coef
