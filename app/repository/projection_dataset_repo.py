@@ -500,6 +500,29 @@ async def load_model_dataset_async(competition_id: int = None) -> pd.DataFrame:
     return df
 
 
+_ACCURACY_PERCENT_COLUMNS = (
+    "Home Odds %", "Draw Odds %", "Away Odds %",
+    "Home Win %", "Draw %", "Away Win %",
+    "Home Clean Sheet %", "Away Clean Sheet %",
+    "Over 1.5 Goals %", "Over 2.5 Goals %", "Both Teams Score %",
+)
+
+
+def _format_percent_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Format numeric `%` columns back to 'XX.XX%' string form matching the
+    legacy parquet shape. Downstream projection code writes NEW % values
+    as formatted strings (e.g. score_preds['Home Win %'] = f'{pct:.2f}%'),
+    so keeping loaded values as floats would produce a mixed-type column
+    that breaks the belt-and-braces parquet writer with ArrowTypeError."""
+    for col in _ACCURACY_PERCENT_COLUMNS:
+        if col not in df.columns:
+            continue
+        df[col] = df[col].apply(
+            lambda v: f"{float(v):.2f}%" if v is not None and not (isinstance(v, float) and pd.isna(v)) else None
+        )
+    return df
+
+
 async def load_accuracy_dataset_async(competition_id: int = None) -> pd.DataFrame:
     """Load projection_accuracy_dataset as DataFrame with parquet-compatible
     column names. Pass competition_id to filter to one league; None loads
@@ -509,5 +532,6 @@ async def load_accuracy_dataset_async(competition_id: int = None) -> pd.DataFram
         df = await _fetch_df(sql + " WHERE competition_id = %s", (int(competition_id),))
     else:
         df = await _fetch_df(sql)
+    df = _format_percent_columns(df)
     logger.info(f"[accuracy_dataset] loaded {len(df)} rows from DB (comp_id={competition_id})")
     return df
