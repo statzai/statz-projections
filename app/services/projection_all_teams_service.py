@@ -191,15 +191,27 @@ class ProjectionAllTeams:
 
                 # In[10]:
 
-                ## THIS IS ALL NEW - LOAD IN MODEL, ACCURACY AND RATINGS DATASETS
+                ## Phase 3: read model + accuracy datasets from DB instead
+                ## of parquet. The old all_leagues_*.parquet fallback pooled
+                ## fixtures from every league — downstream gap-fill then spent
+                ## cycles resolving cross-league teams and produced 45k+
+                ## fallback-lookup warnings per night. DB is clean (Phase 1
+                ## seed + Phase 2 dual-write filter contamination by
+                ## fixture.competition_id).
 
-                # Model Dataset
-                model_dataset_all = ProjectionService._read_df(os.path.join(data_folder_path, "all_leagues_model_dataset_with_history"))
-                model_dataset_league = ProjectionService._read_df_with_fallback(os.path.join(data_folder_path, f"{league}_model_dataset_with_history"), os.path.join(data_folder_path, "all_leagues_model_dataset_with_history"))
+                # Resolve league_id up-front so we can filter the DB reads.
+                if league == 'Campeonato Brasileiro':
+                    _league_id_for_load = 648
+                else:
+                    _league_id_for_load = get_league_id(league, ProjectionService._cache.comps)
 
-                # Accuracy Dataset
-                projection_accuracy_dataset_league = ProjectionService._read_df_with_fallback(os.path.join(data_folder_path, f"{league}_accuracy_dataset"), os.path.join(data_folder_path, "all_leagues_accuracy_dataset"))
-                projection_accuracy_dataset_all = ProjectionService._read_df(os.path.join(data_folder_path, "all_leagues_accuracy_dataset"))
+                from app.repository.projection_dataset_repo import (
+                    load_model_dataset_async, load_accuracy_dataset_async,
+                )
+                model_dataset_all = await load_model_dataset_async()
+                model_dataset_league = await load_model_dataset_async(competition_id=_league_id_for_load)
+                projection_accuracy_dataset_league = await load_accuracy_dataset_async(competition_id=_league_id_for_load)
+                projection_accuracy_dataset_all = await load_accuracy_dataset_async()
 
                 # Ratings Dataset — DB-sourced via DataCache (was parquet).
                 all_team_ratings = ProjectionService._cache.team_ratings.copy()

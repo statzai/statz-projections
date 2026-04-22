@@ -16,11 +16,14 @@ Invoked from projection_service / projection_all_teams_service etc.
 alongside the existing `_write_df` parquet writes (dual-write phase
 of the data-files-to-DB migration).
 """
+import asyncio
 import logging
 import math
 
 import pandas as pd
 
+import app.database as _db
+from app.database import get_connection
 from app.repository.db_utils import execute_chunked
 
 logger = logging.getLogger("projection_dataset_repo")
@@ -367,3 +370,118 @@ async def insert_accuracy_dataset_async(df, league_id, league_name, teams, fixtu
     )
     if rows:
         await execute_chunked(ACCURACY_DATASET_SQL, rows, label=f"[accuracy_dataset {league_name}]")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Phase 3: readers — DB → DataFrame (replaces parquet reads in services)
+# ──────────────────────────────────────────────────────────────────────────
+#
+# Column aliasing: the DataFrame shape consumed by projection_service +
+# projection_all_teams_service is derived from the legacy parquet format
+# ("Team", "Team Shots Total", "Team Shots Total History", etc.). We alias
+# the snake_case DB columns back to that format in-SQL, so downstream code
+# keeps working unchanged.
+#
+# Why SELECT aliasing rather than a post-fetch pandas rename: fewer moving
+# parts, faster (one iteration), and the SQL doubles as an explicit
+# contract for which columns the DataFrame will have.
+
+
+def _build_model_dataset_select() -> str:
+    cols = [
+        "fixture_id AS id",
+        "competition_id AS comp_id",
+        "season_id",
+        "team_name AS `Team`",
+        "opponent_name AS `Opponent`",
+        "venue AS `Venue`",
+        "kickoff_datetime",
+    ]
+    for stat in MODEL_DATASET_STATS:
+        t = _title(stat)
+        cols.append(f"team_{stat} AS `Team {t}`")
+    for stat in MODEL_DATASET_STATS:
+        t = _title(stat)
+        cols.append(f"team_{stat}_history AS `Team {t} History`")
+        cols.append(f"opponent_{stat}_history_against AS `Opponent {t} History Against`")
+    return "SELECT " + ", ".join(cols) + " FROM projection_model_dataset"
+
+
+def _build_accuracy_dataset_select() -> str:
+    cols = [
+        "fixture_id",
+        "competition_id AS comp_id",
+        "home_team_name AS `Home Team`",
+        "away_team_name AS `Away Team`",
+        "kickoff_datetime",
+    ]
+    for stat in ACCURACY_DATASET_STATS:
+        t = _title(stat)
+        for venue_db, venue_parq in [("total", "Total"), ("home", "Home"), ("away", "Away")]:
+            cols.append(f"{venue_db}_{stat} AS `{venue_parq} {t}`")
+            cols.append(f"{venue_db}_projected_{stat} AS `{venue_parq} Projected {t}`")
+    # Odds % + outcome % columns
+    cols.extend([
+        "home_odds_percent AS `Home Odds %`",
+        "draw_odds_percent AS `Draw Odds %`",
+        "away_odds_percent AS `Away Odds %`",
+        "home_win_percent AS `Home Win %`",
+        "draw_percent AS `Draw %`",
+        "away_win_percent AS `Away Win %`",
+        "home_clean_sheet_percent AS `Home Clean Sheet %`",
+        "away_clean_sheet_percent AS `Away Clean Sheet %`",
+        "over_15_goals_percent AS `Over 1.5 Goals %`",
+        "over_25_goals_percent AS `Over 2.5 Goals %`",
+        "both_teams_score_percent AS `Both Teams Score %`",
+        # Outcome flags
+        "home_win AS `Home Win`",
+        "draw AS `Draw`",
+        "away_win AS `Away Win`",
+        "home_clean_sheet AS `Home Clean Sheet`",
+        "away_clean_sheet AS `Away Clean Sheet`",
+        "over_15 AS `Over 1.5`",
+        "over_25 AS `Over 2.5`",
+        "btts AS `BTTS`",
+    ])
+    return "SELECT " + ", ".join(cols) + " FROM projection_accuracy_dataset"
+
+
+async def _fetch_df(sql: str, params: tuple = ()) -> pd.DataFrame:
+    """Execute SELECT and return results as a DataFrame."""
+    conn = None
+    try:
+        conn = await asyncio.wait_for(get_connection(), timeout=30)
+        async with conn.cursor() as cursor:
+            await cursor.execute(sql, params)
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+        return pd.DataFrame(rows, columns=cols)
+    finally:
+        if conn and _db.pool:
+            _db.pool.release(conn)
+
+
+async def load_model_dataset_async(competition_id: int = None) -> pd.DataFrame:
+    """Load projection_model_dataset as DataFrame with parquet-compatible
+    column names. Pass competition_id to filter to one league; None loads
+    all leagues (used for the model_dataset_all pool)."""
+    sql = _build_model_dataset_select()
+    if competition_id is not None:
+        df = await _fetch_df(sql + " WHERE competition_id = %s", (int(competition_id),))
+    else:
+        df = await _fetch_df(sql)
+    logger.info(f"[model_dataset] loaded {len(df)} rows from DB (comp_id={competition_id})")
+    return df
+
+
+async def load_accuracy_dataset_async(competition_id: int = None) -> pd.DataFrame:
+    """Load projection_accuracy_dataset as DataFrame with parquet-compatible
+    column names. Pass competition_id to filter to one league; None loads
+    all leagues."""
+    sql = _build_accuracy_dataset_select()
+    if competition_id is not None:
+        df = await _fetch_df(sql + " WHERE competition_id = %s", (int(competition_id),))
+    else:
+        df = await _fetch_df(sql)
+    logger.info(f"[accuracy_dataset] loaded {len(df)} rows from DB (comp_id={competition_id})")
+    return df

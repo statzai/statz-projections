@@ -72,7 +72,7 @@ class ProjectionService:
             return ProjectionService._read_df(fallback_path_no_ext)
 
 
-    def _setup_league(self, league: str):
+    async def _setup_league(self, league: str):
         """
         Shared setup for all projection methods. Returns a SimpleNamespace with all the
         league config, data, ratings, season IDs etc. that every method needs.
@@ -165,26 +165,27 @@ class ProjectionService:
         ctx.b365_odds = ProjectionService._cache.b365_odds.copy()
         ctx.stats_types = ProjectionService._cache.stats_types.copy()
 
-        # Model and accuracy datasets
-        ctx.model_dataset_all = ProjectionService._read_df(
-            os.path.join(ctx.data_folder_path, "all_leagues_model_dataset_with_history"))
-        ctx.model_dataset_league = ProjectionService._read_df_with_fallback(
-            os.path.join(ctx.data_folder_path, f"{league}_model_dataset_with_history"),
-            os.path.join(ctx.data_folder_path, "all_leagues_model_dataset_with_history"))
-        ctx.projection_accuracy_dataset_league = ProjectionService._read_df_with_fallback(
-            os.path.join(ctx.data_folder_path, f"{league}_accuracy_dataset"),
-            os.path.join(ctx.data_folder_path, "all_leagues_accuracy_dataset"))
-        ctx.projection_accuracy_dataset_all = ProjectionService._read_df(
-            os.path.join(ctx.data_folder_path, "all_leagues_accuracy_dataset"))
-
-        # Team ratings — sourced from DB via DataCache (was parquet file).
-        ctx.all_team_ratings = ProjectionService._cache.team_ratings.copy()
-
-        # League / season IDs
+        # League / season IDs — needed before dataset loads so we can filter
+        # by competition_id in the DB read.
         if league == 'Brazil Serie A':
             ctx.league_id = 648
         else:
             ctx.league_id = get_league_id(league, ctx.comps)
+
+        # Model and accuracy datasets — Phase 3: read from DB (projection_model_dataset
+        # + projection_accuracy_dataset) instead of parquet files. Eliminates the
+        # pooled all_leagues parquet contamination (Scottish Prem's 15,440 cross-league
+        # rows) that Phase 1+2 seeded out. The DB is now the source of truth.
+        from app.repository.projection_dataset_repo import (
+            load_model_dataset_async, load_accuracy_dataset_async,
+        )
+        ctx.model_dataset_all = await load_model_dataset_async()
+        ctx.model_dataset_league = await load_model_dataset_async(competition_id=ctx.league_id)
+        ctx.projection_accuracy_dataset_league = await load_accuracy_dataset_async(competition_id=ctx.league_id)
+        ctx.projection_accuracy_dataset_all = await load_accuracy_dataset_async()
+
+        # Team ratings — sourced from DB via DataCache (was parquet file).
+        ctx.all_team_ratings = ProjectionService._cache.team_ratings.copy()
 
         ctx.fixtures = ctx.fixtures_df[ctx.fixtures_df['competition_id'] == ctx.league_id]
         ctx.league_standings = ctx.standings_all[ctx.standings_all['competition_id'] == ctx.league_id]
@@ -725,7 +726,7 @@ class ProjectionService:
         logger.info(f'[{league}] START projections')
 
 
-        ctx = self._setup_league(league)
+        ctx = await self._setup_league(league)
 
         # Unpack shared context into local variables so downstream code is unchanged
         data_folder_path = ctx.data_folder_path
@@ -1445,7 +1446,7 @@ class ProjectionService:
     async def fixtures(self, league_request):
         league = league_request.league or 'Championship'
 
-        ctx = self._setup_league(league)
+        ctx = await self._setup_league(league)
 
         # Unpack shared context into local variables so downstream code is unchanged
         data_folder_path = ctx.data_folder_path
@@ -1635,7 +1636,7 @@ class ProjectionService:
     async def predicted_table(self, league_request):
         league = league_request.league or 'Championship'
 
-        ctx = self._setup_league(league)
+        ctx = await self._setup_league(league)
 
         # Unpack shared context into local variables so downstream code is unchanged
         data_folder_path = ctx.data_folder_path
@@ -1969,7 +1970,7 @@ class ProjectionService:
     async def teams(self, league_request):
         league = league_request.league or 'Championship'
 
-        ctx = self._setup_league(league)
+        ctx = await self._setup_league(league)
 
         # Unpack shared context into local variables so downstream code is unchanged
         data_folder_path = ctx.data_folder_path
@@ -2430,7 +2431,7 @@ class ProjectionService:
     async def players(self, league_request):
         league = league_request.league or 'Championship'
 
-        ctx = self._setup_league(league)
+        ctx = await self._setup_league(league)
 
         # Unpack shared context into local variables so downstream code is unchanged
         data_folder_path = ctx.data_folder_path
@@ -3072,7 +3073,7 @@ class ProjectionService:
     async def player_props(self, league_request):
         league = league_request or 'Championship'
 
-        ctx = self._setup_league(league)
+        ctx = await self._setup_league(league)
 
         # Unpack shared context into local variables so downstream code is unchanged
         data_folder_path = ctx.data_folder_path
