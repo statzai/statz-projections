@@ -20,6 +20,7 @@ league.
 Called from /api/retrain endpoint (routes.py). Not yet scheduled — Phase
 5 adds the weekly cron on Laravel's Kernel.
 """
+import gc
 import logging
 import os
 import pickle
@@ -86,7 +87,14 @@ def _fit_model(X_train, y_train) -> tuple:
 
 
 def _grid_search(X_train, y_train) -> tuple:
-    """CV over alpha × max_iter × fit_intercept. Returns (model, algorithm_name, best_params)."""
+    """CV over alpha × max_iter × fit_intercept. Returns (model, algorithm_name, best_params).
+
+    Returns best_estimator_ only — NOT the GridSearchCV wrapper. cv_results_
+    holds every fold's fitted sub-model and is the primary driver of the
+    memory bloat we hit on 2026-04-22 (gunicorn OOM after ~12 grid searches).
+    best_estimator_ is a PoissonRegressor; same .predict() contract so
+    downstream pickle-load + .predict() at projection time is unchanged.
+    """
     param_grid = {
         "alpha": np.arange(0, 1, 0.1),
         "max_iter": [100, 200, 500],
@@ -94,8 +102,12 @@ def _grid_search(X_train, y_train) -> tuple:
     }
     pr = PoissonRegressor()
     gs = GridSearchCV(pr, param_grid, cv=5, scoring="neg_mean_squared_error")
-    fitted = gs.fit(X_train, y_train)
-    return fitted, "grid_search", dict(fitted.best_params_)
+    gs.fit(X_train, y_train)
+    best = gs.best_estimator_
+    best_params = dict(gs.best_params_)
+    # Drop the CV wrapper + its results so they can be GC'd before next iter
+    del gs
+    return best, "grid_search", best_params
 
 
 def _decide_promotion(incumbent: Optional[dict], new_mae: float) -> tuple:
@@ -154,6 +166,7 @@ async def _train_one(
     X = train_df[list(predictors)]
     y = train_df[target]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+    n_train_rows = len(X_train)
 
     if stat_name in _FIT_MODEL_STATS:
         model, algo, hyperparams = _fit_model(X_train, y_train)
@@ -175,7 +188,7 @@ async def _train_one(
         stat_name=stat_name,
         algorithm=algo,
         hyperparams=hyperparams,
-        trained_on_n_rows=len(X_train),
+        trained_on_n_rows=n_train_rows,
         holdout_mae=holdout_mae,
         holdout_r2=holdout_r2,
         file_path=file_path,
@@ -185,8 +198,17 @@ async def _train_one(
     would_promote, reason = _decide_promotion(incumbent, holdout_mae)
     incumbent_mae = incumbent.get("holdout_mae") if incumbent else None
 
+    # Free the bulky sklearn objects before the next iteration.
+    # Previous runs OOM'd around the 12th-13th grid_search because
+    # GridSearchCV retains every CV-trained sub-model in .cv_results_
+    # plus all the fold predictions. gunicorn's worker grew until
+    # kernel SIGKILL'd it mid-training. Explicit del + gc.collect()
+    # knocks the working set back down between iterations.
+    del model, X, y, X_train, X_test, y_train, y_test, y_pred, train_df
+    gc.collect()
+
     logger.info(
-        f"[retrain {label}] {stat_name}: algo={algo} rows={len(X_train)} "
+        f"[retrain {label}] {stat_name}: algo={algo} rows={n_train_rows} "
         f"holdout_mae={holdout_mae:.4f} r2={holdout_r2:.4f} "
         f"incumbent_mae={incumbent_mae} would_promote={would_promote} ({reason}) "
         f"new_id={new_id}"
@@ -195,7 +217,7 @@ async def _train_one(
     return {
         "stat": stat_name,
         "algorithm": algo,
-        "n_rows": len(X_train),
+        "n_rows": n_train_rows,
         "holdout_mae": holdout_mae,
         "holdout_r2": holdout_r2,
         "incumbent_mae": incumbent_mae,
