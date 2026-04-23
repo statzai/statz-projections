@@ -109,21 +109,31 @@ def _fit_model(X_train, y_train) -> tuple:
 
 
 def _grid_search(X_train, y_train) -> tuple:
-    """CV over alpha × max_iter × fit_intercept. Returns (model, algorithm_name, best_params).
+    """CV over alpha × fit_intercept. Returns (model, algorithm_name, best_params).
 
     Returns best_estimator_ only — NOT the GridSearchCV wrapper. cv_results_
     holds every fold's fitted sub-model and is the primary driver of the
     memory bloat we hit on 2026-04-22 (gunicorn OOM after ~12 grid searches).
     best_estimator_ is a PoissonRegressor; same .predict() contract so
     downstream pickle-load + .predict() at projection time is unchanged.
+
+    Trimmed grid (2026-04-23):
+      - alpha: 5 values (step 0.2) covers [0, 1.0]; 10-step was noise exploration
+      - max_iter fixed at 200 (Poisson on ~1k-2k rows converges well under that)
+      - fit_intercept: [True, False] retained
+      - cv folds: 5 → 3 (still ~400 rows/fold on smallest league)
+    Total fits per stat: 5 × 2 × 3 = 30 (was 5 × 3 × 2 × 5 = 300). ~10× faster.
+    Projected full retrain: ~30 min (was ~5h). Alpha is the hyperparam that
+    actually moves MAE for this model class; the cuts trim noise sweep not
+    signal.
     """
     param_grid = {
-        "alpha": np.arange(0, 1, 0.1),
-        "max_iter": [100, 200, 500],
+        "alpha": np.arange(0, 1.01, 0.2),
+        "max_iter": [200],
         "fit_intercept": [True, False],
     }
     pr = PoissonRegressor()
-    gs = GridSearchCV(pr, param_grid, cv=5, scoring="neg_mean_squared_error")
+    gs = GridSearchCV(pr, param_grid, cv=3, scoring="neg_mean_squared_error")
     gs.fit(X_train, y_train)
     best = gs.best_estimator_
     best_params = dict(gs.best_params_)
