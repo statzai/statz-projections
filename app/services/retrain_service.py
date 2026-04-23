@@ -61,6 +61,14 @@ MIN_TRAINING_ROWS = 100
 # with sparse data from newly-onboarded leagues.
 TOP_5_LEAGUE_NAMES = ("Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1")
 
+# When training the All Leagues fallback, cap per-league rows to the most
+# recent N fixtures. Recent data reflects current tactics / players /
+# refereeing trends — older fixtures drift from reality. 1000 rows per
+# league ≈ 1.3 seasons of recent data. 5 leagues × 1000 = 5,000 total —
+# comfortably within worker memory AND a reasonable CV fold size
+# (3-fold = ~1,666 rows per fold, healthy for Poisson regression).
+FALLBACK_RECENT_ROWS_PER_LEAGUE = 1000
+
 # Per-design: fit_model (direct PoissonRegressor newton-cholesky fit) for
 # the two Passes stats because grid_search was historically slow + offered
 # little improvement on the wider Passes distributions. grid_search for
@@ -294,10 +302,30 @@ async def retrain_all_models(dry_run: bool = True) -> dict:
     # (2026-04-23) and because top-5 data aligns with the euro-comp
     # teams this model actually serves.
     top5_ids = await _lookup_competition_ids(TOP_5_LEAGUE_NAMES)
-    fallback_df = all_df[all_df["comp_id"].isin(top5_ids)] if top5_ids else all_df
+    if top5_ids:
+        top5_df = all_df[all_df["comp_id"].isin(top5_ids)]
+        # Cap to the most recent N rows per league. Older fixtures drift
+        # from current football reality; and without this cap we'd be
+        # training on ~11k rows (OOM risk). sort_values kickoff_datetime
+        # DESC + groupby.head(N) keeps the N most recent per comp_id.
+        if "kickoff_datetime" in top5_df.columns:
+            fallback_df = (
+                top5_df.sort_values("kickoff_datetime", ascending=False)
+                .groupby("comp_id", sort=False)
+                .head(FALLBACK_RECENT_ROWS_PER_LEAGUE)
+            )
+        else:
+            logger.warning(
+                "[retrain All Leagues] kickoff_datetime column missing — "
+                "cannot apply recent-rows cap; using full top-5 union"
+            )
+            fallback_df = top5_df
+    else:
+        fallback_df = all_df
     logger.info(
         f"[retrain All Leagues] training on {len(fallback_df)} rows from "
-        f"{len(top5_ids)} top-5 leagues (was {len(all_df)} across all leagues)"
+        f"{len(top5_ids)} top-5 leagues "
+        f"(cap={FALLBACK_RECENT_ROWS_PER_LEAGUE}/league; was {len(all_df)} across all leagues)"
     )
     all_results = []
     for stat in stat_list:
