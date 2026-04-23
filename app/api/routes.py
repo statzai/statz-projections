@@ -10,6 +10,10 @@ class AllLeaguesRequest(BaseModel):
     leagues: Optional[List[str]] = None
     fetch_first: Optional[bool] = False
 
+
+class PromoteModelRequest(BaseModel):
+    reason: Optional[str] = "manual promotion via admin panel"
+
 from app.services.premier_league_projections_service import PremierLeagueProjectionsService
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
@@ -196,6 +200,31 @@ async def retrain(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(_run)
     return {"status": "started", "mode": "dry-run", "message": "Retraining started in background; check projection.log for per-(league,stat) output"}
+
+
+@router.post("/models/{model_id}/promote")
+async def promote_model_endpoint(model_id: int, request: PromoteModelRequest = None):
+    """Manually promote a specific projection_models row to is_active=1.
+    The per-(competition_id, stat_name) invariant is maintained atomically
+    by promote_model() — demotes the incumbent in the same transaction.
+
+    Phase 4 is dry-run (auto-retrain doesn't flip is_active). Manual
+    promotion via this endpoint is the Phase 6 admin override — user
+    explicitly chose to replace the incumbent, so no guardrail check.
+    Also covers rollback: promoting an older version restores it as
+    active, demoting the current one.
+    """
+    from app.repository.projection_model_repo import promote_model
+
+    reason = (request.reason if request else None) or "manual promotion via admin panel"
+    try:
+        await promote_model(model_id, reason)
+        return {"status": "ok", "model_id": model_id, "reason": reason}
+    except ValueError as e:
+        return {"status": "error", "message": str(e)}
+    except Exception as e:
+        logger.error(f"promote_model({model_id}) failed: {e}", exc_info=True)
+        return {"status": "error", "message": f"Internal error: {type(e).__name__}"}
 
 
 @router.post("/fetch-data")
