@@ -47,6 +47,20 @@ logger = logging.getLogger("retrain")
 # smaller comps fewer — 100 is a defensive floor, NOT a quality threshold.
 MIN_TRAINING_ROWS = 100
 
+# Leagues whose fixtures train the "All Leagues" fallback model pool.
+# This fallback is used at projection time for:
+#   - Euro comps (Champions / Europa / Conference) which draw teams from
+#     many domestic leagues and have no single-league training source
+#   - Newly-added comps with <MIN_TRAINING_ROWS data of their own
+#
+# Previously the fallback trained on the union of ALL leagues (~11,600
+# rows) which OOM'd the gunicorn worker on 2026-04-23 while grid-searching
+# Tackles. Top-5 union is ~6,000 rows — fits in memory, represents the
+# football styles of the teams the fallback actually serves (euro-comp
+# teams mostly come from top-5 leagues), and avoids polluting the model
+# with sparse data from newly-onboarded leagues.
+TOP_5_LEAGUE_NAMES = ("Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1")
+
 # Per-design: fit_model (direct PoissonRegressor newton-cholesky fit) for
 # the two Passes stats because grid_search was historically slow + offered
 # little improvement on the wider Passes distributions. grid_search for
@@ -273,11 +287,21 @@ async def retrain_all_models(dry_run: bool = True) -> dict:
                 league_results.append(r)
         results["per_league"][league_name] = league_results
 
-    # All Leagues fallback — train on the whole pool, competition_id=NULL
-    logger.info(f"[retrain All Leagues] training {len(all_df)} rows across all leagues")
+    # All Leagues fallback — train on top-5 European leagues only.
+    # Used at projection time as the fallback for euro comps + any
+    # league with <MIN_TRAINING_ROWS of its own data. Scoped narrower
+    # than a full union because the full union OOM'd the worker
+    # (2026-04-23) and because top-5 data aligns with the euro-comp
+    # teams this model actually serves.
+    top5_ids = await _lookup_competition_ids(TOP_5_LEAGUE_NAMES)
+    fallback_df = all_df[all_df["comp_id"].isin(top5_ids)] if top5_ids else all_df
+    logger.info(
+        f"[retrain All Leagues] training on {len(fallback_df)} rows from "
+        f"{len(top5_ids)} top-5 leagues (was {len(all_df)} across all leagues)"
+    )
     all_results = []
     for stat in stat_list:
-        r = await _train_one(all_df, stat, None, "All Leagues")
+        r = await _train_one(fallback_df, stat, None, "All Leagues")
         if r is not None:
             all_results.append(r)
     results["all_leagues"] = all_results
@@ -304,6 +328,34 @@ async def _lookup_league_name(competition_id: int) -> str:
             if not row:
                 raise ValueError(f"no competition with id={competition_id}")
             return row[0]
+    finally:
+        if conn and _db.pool:
+            _db.pool.release(conn)
+
+
+async def _lookup_competition_ids(names: tuple) -> list:
+    """Resolve a tuple of competition names → list of IDs via the competitions
+    table. Returns ids in the same order as names; names not matched are
+    skipped silently (a warning is logged)."""
+    import app.database as _db
+    from app.database import get_connection
+    if not names:
+        return []
+    conn = None
+    try:
+        conn = await get_connection()
+        async with conn.cursor() as cursor:
+            placeholders = ", ".join(["%s"] * len(names))
+            await cursor.execute(
+                f"SELECT id, name FROM competitions WHERE name IN ({placeholders})",
+                tuple(names),
+            )
+            rows = await cursor.fetchall()
+            found = {r[1]: int(r[0]) for r in rows}
+            missing = [n for n in names if n not in found]
+            if missing:
+                logger.warning(f"_lookup_competition_ids: no match for {missing}")
+            return [found[n] for n in names if n in found]
     finally:
         if conn and _db.pool:
             _db.pool.release(conn)
