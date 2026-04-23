@@ -82,6 +82,17 @@ def _parse_bool(v):
         return 1 if v else 0
     if isinstance(v, (int, float)):
         return 1 if v else 0
+    if isinstance(v, str):
+        # Outcome columns in the legacy parquet + in projection_service.py
+        # gap-fill (line 326+) are stored as 'Y'/'N' strings, not booleans.
+        # Prior version fell through to `return None` for all strings,
+        # leaving every outcome flag NULL in the DB. Admin panel Accuracy
+        # tab surfaced this 2026-04-23 (Real % + Brier all showing '—').
+        s = v.strip().upper()
+        if s in ('Y', 'YES', 'TRUE', '1'):
+            return 1
+        if s in ('N', 'NO', 'FALSE', '0'):
+            return 0
     return None
 
 
