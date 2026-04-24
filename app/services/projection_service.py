@@ -322,15 +322,23 @@ class ProjectionService:
                     away_cs = home_stat_value == 0
                     home_cs = away_stat_value == 0
 
+                    # Write outcome flags as integers (1/0), NOT 'Y'/'N'
+                    # strings. The columns are loaded from DB (TINYINT) as
+                    # numeric, so mixing strings here poisons the column
+                    # dtype to object — the parquet writer then chokes with
+                    # ArrowTypeError ("Could not convert 'N' to double") on
+                    # every projection after the 2026-04-24 accuracy-dataset
+                    # DB cutover. _parse_bool in the DB dual-write path
+                    # already accepts int OR 'Y'/'N', so no compat break.
                     for ds in [projection_accuracy_dataset_league, projection_accuracy_dataset_all]:
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Home Win'] = 'Y' if home_win else 'N'
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Draw'] = 'Y' if draw else 'N'
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Away Win'] = 'Y' if not home_win and not draw else 'N'
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Over 2.5'] = 'Y' if over_2_5 else 'N'
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Over 1.5'] = 'Y' if over_1_5 else 'N'
-                        ds.loc[ds['fixture_id'] == fixture_id, 'BTTS'] = 'Y' if btts else 'N'
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Away Clean Sheet'] = 'Y' if away_cs else 'N'
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Home Clean Sheet'] = 'Y' if home_cs else 'N'
+                        ds.loc[ds['fixture_id'] == fixture_id, 'Home Win'] = 1 if home_win else 0
+                        ds.loc[ds['fixture_id'] == fixture_id, 'Draw'] = 1 if draw else 0
+                        ds.loc[ds['fixture_id'] == fixture_id, 'Away Win'] = 1 if (not home_win and not draw) else 0
+                        ds.loc[ds['fixture_id'] == fixture_id, 'Over 2.5'] = 1 if over_2_5 else 0
+                        ds.loc[ds['fixture_id'] == fixture_id, 'Over 1.5'] = 1 if over_1_5 else 0
+                        ds.loc[ds['fixture_id'] == fixture_id, 'BTTS'] = 1 if btts else 0
+                        ds.loc[ds['fixture_id'] == fixture_id, 'Away Clean Sheet'] = 1 if away_cs else 0
+                        ds.loc[ds['fixture_id'] == fixture_id, 'Home Clean Sheet'] = 1 if home_cs else 0
 
         # ## **Re-Train Models**
 
