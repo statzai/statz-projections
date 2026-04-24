@@ -50,8 +50,14 @@ def resolve_team_id(team_name, teams, competition_id=None, comp_teams=None):
         # as already pre-filtered by the caller.
         if comp_teams is not None and not comp_teams.empty:
             if competition_id is not None:
+                # Euro comps pass a LIST of domestic league IDs; scalar `==`
+                # errored with "Lengths must match". .isin() handles both.
+                if isinstance(competition_id, (list, tuple)) or (hasattr(competition_id, '__iter__') and not isinstance(competition_id, (str, int, float))):
+                    comp_id_list = competition_id
+                else:
+                    comp_id_list = [competition_id]
                 scoped_ids = comp_teams.loc[
-                    comp_teams['competition_id'] == competition_id, 'team_id'
+                    comp_teams['competition_id'].isin(comp_id_list), 'team_id'
                 ].unique()
             else:
                 scoped_ids = comp_teams['team_id'].unique() if 'team_id' in comp_teams.columns else []

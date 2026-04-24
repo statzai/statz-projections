@@ -54,9 +54,22 @@ def get_team_id(team_name, teams, competition_id=None, comp_teams=None):
         # Otherwise, treat comp_teams as already pre-filtered by the caller
         # (e.g. get_ratings pre-filters so it can avoid triggering the
         # fixture-filter side-effect in get_team_fixtures).
+        #
+        # Euro comp projections pass a LIST of 8 domestic league IDs (PL,
+        # La Liga, etc.) for competition_id. Scalar `==` errored with
+        # "Lengths must match" because pandas tried element-wise compare
+        # between the left Series and right list. Normalising to a list +
+        # .isin() handles both shapes — scalar wraps in a 1-element list,
+        # list passes through.
         if competition_id is not None:
+            # hasattr check avoids needing pandas imported at module level;
+            # Series / ndarray / list / tuple all iterable-friendly for .isin()
+            if isinstance(competition_id, (list, tuple)) or hasattr(competition_id, '__iter__') and not isinstance(competition_id, (str, int, float)):
+                comp_id_list = competition_id
+            else:
+                comp_id_list = [competition_id]
             scoped_ids = comp_teams.loc[
-                comp_teams['competition_id'] == competition_id, 'team_id'
+                comp_teams['competition_id'].isin(comp_id_list), 'team_id'
             ].unique()
         else:
             scoped_ids = comp_teams['team_id'].unique() if 'team_id' in comp_teams.columns else []
