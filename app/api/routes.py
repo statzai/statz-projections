@@ -1,4 +1,6 @@
+import fcntl
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -35,7 +37,45 @@ euro_comp_service = EuroCompProjectionService()
 projection_all_teams_service = ProjectionAllTeams()
 fetch_all_data_service = FetchAllDataService()
 
-_projection_running = False
+# Cross-worker lock via an OS file-lock on /tmp. Previously used a
+# Python module global `_projection_running` — but globals under
+# gunicorn are per-worker — with 2 workers each held its own copy,
+# defeating the serialisation and letting two concurrent fetches
+# corrupt fixture_team_stats.csv on 2026-04-24.
+# flock is held by the kernel for the PID that owns the file handle,
+# so it's truly process-wide. Released automatically if the worker
+# crashes (kernel closes FD), so no zombie-lock risk.
+_LOCK_PATH = "/tmp/_statz_projection.lock"
+_lock_fh = None
+
+def _try_acquire_lock() -> bool:
+    """Non-blocking acquire. Returns True on success, False if another
+    worker/process already holds the lock."""
+    global _lock_fh
+    try:
+        _lock_fh = open(_LOCK_PATH, "w")
+        fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_fh.write(str(os.getpid()))
+        _lock_fh.flush()
+        return True
+    except (IOError, OSError):
+        if _lock_fh:
+            try:
+                _lock_fh.close()
+            except Exception:
+                pass
+            _lock_fh = None
+        return False
+
+def _release_lock() -> None:
+    global _lock_fh
+    if _lock_fh is not None:
+        try:
+            fcntl.flock(_lock_fh, fcntl.LOCK_UN)
+            _lock_fh.close()
+        except Exception:
+            pass
+        _lock_fh = None
 
 
 async def _report_status(competition_id: str, status: str, started_at: str, finished_at: str = None, exit_code: int = None, stdout: str = None, stderr: str = None):
@@ -80,19 +120,17 @@ async def _run_fetch_if_needed(fetch_first: bool):
 
 
 async def _run_all_leagues(leagues=None, fetch_first=False):
-    global _projection_running
     try:
         await _run_fetch_if_needed(fetch_first)
         await projection_all_teams_service.projectionAllTeams(leagues=leagues)
     except Exception as e:
         logger.error(f"All-leagues projection FAILED: {e}", exc_info=True)
     finally:
-        _projection_running = False
+        _release_lock()
         logger.info("Projection lock released.")
 
 
 async def _run_single_league(request):
-    global _projection_running
     competition_id = _league_to_competition_id(request.league)
     started_at = datetime.now(timezone.utc).isoformat()
     try:
@@ -108,7 +146,7 @@ async def _run_single_league(request):
         logger.error(f"[{request.league}] projection FAILED: {e}", exc_info=True)
         await _report_status(competition_id, "failed", started_at, finished_at, exit_code=1, stderr=str(e)[:500])
     finally:
-        _projection_running = False
+        _release_lock()
         logger.info("Projection lock released.")
 
 
@@ -122,10 +160,8 @@ async def _run_fetch_data():
 @router.post("")
 async def projections(request: LeagueRequest, background_tasks: BackgroundTasks):
     """Start league projection in background - returns immediately, no timeout."""
-    global _projection_running
-    if _projection_running:
+    if not _try_acquire_lock():
         return {"status": "busy", "message": "A projection is already running. Wait for it to finish."}
-    _projection_running = True
     background_tasks.add_task(_run_single_league, request)
     return {"status": "started", "league": request.league}
 
@@ -163,10 +199,8 @@ async def premier_projections():
 @router.post("/all-leagues")
 async def all_leagues(background_tasks: BackgroundTasks, request: AllLeaguesRequest = None):
     """Start all-leagues projection in background. Optionally pass 'leagues' list to run only specific leagues."""
-    global _projection_running
-    if _projection_running:
+    if not _try_acquire_lock():
         return {"status": "busy", "message": "A projection is already running. Wait for it to finish."}
-    _projection_running = True
     leagues = request.leagues if request else None
     fetch_first = request.fetch_first if request else False
     background_tasks.add_task(_run_all_leagues, leagues, fetch_first)
@@ -188,19 +222,16 @@ async def retrain(background_tasks: BackgroundTasks):
     """
     from app.services.retrain_service import retrain_all_models
 
-    global _projection_running
-    if _projection_running:
+    if not _try_acquire_lock():
         return {"status": "busy", "message": "A projection or retrain is already running. Wait for it to finish."}
-    _projection_running = True
 
     async def _run():
-        global _projection_running
         try:
             await retrain_all_models(dry_run=True)
         except Exception as e:
             logger.error(f"retrain FAILED: {e}", exc_info=True)
         finally:
-            _projection_running = False
+            _release_lock()
             logger.info("Retrain lock released.")
 
     background_tasks.add_task(_run)
@@ -219,19 +250,16 @@ async def retrain_partial_endpoint(request: PartialRetrainRequest, background_ta
     """
     from app.services.retrain_service import retrain_partial
 
-    global _projection_running
-    if _projection_running:
+    if not _try_acquire_lock():
         return {"status": "busy", "message": "A projection or retrain is already running. Wait for it to finish."}
-    _projection_running = True
 
     async def _run():
-        global _projection_running
         try:
             await retrain_partial(request.competition_id, request.stats, dry_run=True)
         except Exception as e:
             logger.error(f"retrain partial FAILED: {e}", exc_info=True)
         finally:
-            _projection_running = False
+            _release_lock()
             logger.info("Retrain (partial) lock released.")
 
     background_tasks.add_task(_run)
@@ -277,10 +305,8 @@ async def fetch_data():
     PL alone lost ~170k rows in one such race today, silently breaking
     every projection downstream. Lock prevents the race entirely.
     """
-    global _projection_running
-    if _projection_running:
+    if not _try_acquire_lock():
         return {"status": "busy", "message": "A projection, retrain or fetch is already running. Wait for it to finish."}
-    _projection_running = True
     try:
         ProjectionService._cache.invalidate()
         t0 = time.time()
@@ -290,5 +316,5 @@ async def fetch_data():
         logger.info(f"fetch-data: done in {elapsed}s")
         return {"status": "done", "message": f"Data fetch complete in {elapsed}s"}
     finally:
-        _projection_running = False
+        _release_lock()
         logger.info("Fetch-data lock released.")

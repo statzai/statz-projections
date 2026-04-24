@@ -11,11 +11,10 @@ RUN mkdir -p app/projection-outputs
 
 EXPOSE 8000
 
-# Single worker: the _projection_running lock in routes.py is a Python
-# module global and therefore PER-WORKER under gunicorn. With 2 workers
-# the lock was a false promise — 2026-04-24 saw two concurrent fetches
-# hit different workers, each held its own lock, both raced to write
-# fixture_team_stats.csv and corrupted ~1M rows. Switched to 1 worker
-# so the lock is genuinely process-wide. Read endpoints stay snappy
-# (they're sub-second); long writes were already serialised anyway.
-CMD ["gunicorn", "app.main:app", "--workers", "1", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "1800"]
+# Two workers. Tried single-worker on 2026-04-24 to make the in-memory
+# _projection_running lock truly process-wide, but the fetch-data OOM'd
+# under a single worker with only 4.7GB free host RAM (7.8M row
+# DataFrame needs 3-5GB). Cross-worker serialisation now handled by
+# the file-lock in routes.py (/tmp/_projection.lock) — survives worker
+# boundaries AND restarts without risking memory blowups.
+CMD ["gunicorn", "app.main:app", "--workers", "2", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "1800"]
