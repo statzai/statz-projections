@@ -266,11 +266,29 @@ async def promote_model_endpoint(model_id: int, request: PromoteModelRequest = N
 
 @router.post("/fetch-data")
 async def fetch_data():
-    """Fetch latest data from source DB and invalidate cache (synchronous)."""
-    ProjectionService._cache.invalidate()
-    t0 = time.time()
-    logger.info("fetch-data: starting import_all_tables...")
-    await fetch_all_data_service.import_all_tables()
-    elapsed = round(time.time() - t0, 1)
-    logger.info(f"fetch-data: done in {elapsed}s")
-    return {"status": "done", "message": f"Data fetch complete in {elapsed}s"}
+    """Fetch latest data from source DB and invalidate cache (synchronous).
+
+    Shares the _projection_running lock with projections and retrains. Prior
+    to 2026-04-24 this endpoint had no lock — concurrent calls (e.g. admin
+    panel button clicked twice, or fast successive SSH curls) would race
+    inside _merge_csv: worker B could read the CSV, worker A write, then
+    worker B overwrite with its stale merge result. Net effect was partial
+    truncation of big tables (fixture_player_stats, fixture_team_stats) —
+    PL alone lost ~170k rows in one such race today, silently breaking
+    every projection downstream. Lock prevents the race entirely.
+    """
+    global _projection_running
+    if _projection_running:
+        return {"status": "busy", "message": "A projection, retrain or fetch is already running. Wait for it to finish."}
+    _projection_running = True
+    try:
+        ProjectionService._cache.invalidate()
+        t0 = time.time()
+        logger.info("fetch-data: starting import_all_tables...")
+        await fetch_all_data_service.import_all_tables()
+        elapsed = round(time.time() - t0, 1)
+        logger.info(f"fetch-data: done in {elapsed}s")
+        return {"status": "done", "message": f"Data fetch complete in {elapsed}s"}
+    finally:
+        _projection_running = False
+        logger.info("Fetch-data lock released.")
