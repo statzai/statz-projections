@@ -1,4 +1,5 @@
 import logging
+import math
 from datetime import datetime
 from app.repository.db_utils import execute_chunked, resolve_team_id
 
@@ -42,9 +43,36 @@ async def insert_players_stats_async(data_list, teams=None, competition_id=None,
 
     api_pl_projections['kickoff_datetime'] = api_pl_projections['kickoff_datetime'].dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    api_pl_projections['projection_percent'] = api_pl_projections['projection_percent'].apply(
-        lambda x: float(str(x).replace('%', '').strip()) if x is not None and x != '' else None
-    )
+    def _parse_pct(x):
+        # Strings like "23.45%" → 23.45; NaN/None/empty → None; numeric pass-through.
+        # Previous version didn't reject NaN floats: str(nan) == 'nan',
+        # float('nan') is still NaN, and the DB column is NOT NULL → insert
+        # fail. Seen on players with no history whose projections became NaN
+        # after the 2026-04-24 CSV restore surfaced all the downstream code
+        # paths hidden behind earlier parquet crashes.
+        if x is None:
+            return None
+        if isinstance(x, float) and math.isnan(x):
+            return None
+        s = str(x).replace('%', '').strip()
+        if s == '' or s.lower() == 'nan':
+            return None
+        try:
+            v = float(s)
+        except ValueError:
+            return None
+        return None if math.isnan(v) else v
+
+    api_pl_projections['projection_percent'] = api_pl_projections['projection_percent'].apply(_parse_pct)
+
+    # Rows with NULL projection_percent can't land (DB NOT NULL) and aren't
+    # useful anyway — drop them with a count log so we can watch for upstream
+    # regressions that produce widespread NaNs.
+    _before = len(api_pl_projections)
+    api_pl_projections = api_pl_projections[api_pl_projections['projection_percent'].notna()]
+    _dropped = _before - len(api_pl_projections)
+    if _dropped > 0:
+        logger.warning(f"[player_prop_projections] dropped {_dropped}/{_before} rows with NULL projection_percent")
 
     # Note: player_name / team / opponent strings are no longer written to
     # the DB — team_id / opponent_id / player_id FKs replace them. See
