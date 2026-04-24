@@ -14,6 +14,11 @@ class AllLeaguesRequest(BaseModel):
 class PromoteModelRequest(BaseModel):
     reason: Optional[str] = "manual promotion via admin panel"
 
+
+class PartialRetrainRequest(BaseModel):
+    competition_id: Optional[int] = None  # None → All Leagues fallback scope
+    stats: List[str]  # e.g. ["Interceptions", "Offsides"]
+
 from app.services.premier_league_projections_service import PremierLeagueProjectionsService
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
@@ -200,6 +205,38 @@ async def retrain(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(_run)
     return {"status": "started", "mode": "dry-run", "message": "Retraining started in background; check projection.log for per-(league,stat) output"}
+
+
+@router.post("/retrain/partial")
+async def retrain_partial_endpoint(request: PartialRetrainRequest, background_tasks: BackgroundTasks):
+    """Retrain a subset of (competition, stat) pairs — fills gaps left by
+    a partial-success full retrain without re-doing the per-league work
+    that already completed.
+
+    Example: after a full retrain OOM'd during All Leagues Interceptions,
+    POST {"competition_id": null, "stats": ["Interceptions", "Offsides"]}
+    trains just those 2 stats against the top-5 fallback dataset.
+    """
+    from app.services.retrain_service import retrain_partial
+
+    global _projection_running
+    if _projection_running:
+        return {"status": "busy", "message": "A projection or retrain is already running. Wait for it to finish."}
+    _projection_running = True
+
+    async def _run():
+        global _projection_running
+        try:
+            await retrain_partial(request.competition_id, request.stats, dry_run=True)
+        except Exception as e:
+            logger.error(f"retrain partial FAILED: {e}", exc_info=True)
+        finally:
+            _projection_running = False
+            logger.info("Retrain (partial) lock released.")
+
+    background_tasks.add_task(_run)
+    scope = "All Leagues" if request.competition_id is None else f"competition_id={request.competition_id}"
+    return {"status": "started", "mode": "dry-run", "scope": scope, "stats": request.stats}
 
 
 @router.post("/models/{model_id}/promote")

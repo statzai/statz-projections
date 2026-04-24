@@ -295,38 +295,8 @@ async def retrain_all_models(dry_run: bool = True) -> dict:
                 league_results.append(r)
         results["per_league"][league_name] = league_results
 
-    # All Leagues fallback — train on top-5 European leagues only.
-    # Used at projection time as the fallback for euro comps + any
-    # league with <MIN_TRAINING_ROWS of its own data. Scoped narrower
-    # than a full union because the full union OOM'd the worker
-    # (2026-04-23) and because top-5 data aligns with the euro-comp
-    # teams this model actually serves.
-    top5_ids = await _lookup_competition_ids(TOP_5_LEAGUE_NAMES)
-    if top5_ids:
-        top5_df = all_df[all_df["comp_id"].isin(top5_ids)]
-        # Cap to the most recent N rows per league. Older fixtures drift
-        # from current football reality; and without this cap we'd be
-        # training on ~11k rows (OOM risk). sort_values kickoff_datetime
-        # DESC + groupby.head(N) keeps the N most recent per comp_id.
-        if "kickoff_datetime" in top5_df.columns:
-            fallback_df = (
-                top5_df.sort_values("kickoff_datetime", ascending=False)
-                .groupby("comp_id", sort=False)
-                .head(FALLBACK_RECENT_ROWS_PER_LEAGUE)
-            )
-        else:
-            logger.warning(
-                "[retrain All Leagues] kickoff_datetime column missing — "
-                "cannot apply recent-rows cap; using full top-5 union"
-            )
-            fallback_df = top5_df
-    else:
-        fallback_df = all_df
-    logger.info(
-        f"[retrain All Leagues] training on {len(fallback_df)} rows from "
-        f"{len(top5_ids)} top-5 leagues "
-        f"(cap={FALLBACK_RECENT_ROWS_PER_LEAGUE}/league; was {len(all_df)} across all leagues)"
-    )
+    # All Leagues fallback — scoped to top-5 + recent-rows cap via helper.
+    fallback_df = await _build_all_leagues_fallback_df(all_df)
     all_results = []
     for stat in stat_list:
         r = await _train_one(fallback_df, stat, None, "All Leagues")
@@ -341,6 +311,101 @@ async def retrain_all_models(dry_run: bool = True) -> dict:
         f"{len(all_results)} All Leagues models"
     )
     return results
+
+
+async def _build_all_leagues_fallback_df(all_df: pd.DataFrame) -> pd.DataFrame:
+    """Construct the training set used by the 'All Leagues' fallback models.
+
+    Scoped to the top-5 European leagues and capped to the most recent
+    N rows per league. Previously trained on the full union (~11.6k
+    rows) which OOM'd the gunicorn worker on 2026-04-23 around the 9th
+    grid-search. Top-5 + row cap = ~5k rows, comfortable headroom.
+
+    Kept separate from retrain_all_models so both the full weekly cycle
+    and retrain_partial() build the identical fallback set — preventing
+    drift between the two code paths.
+    """
+    top5_ids = await _lookup_competition_ids(TOP_5_LEAGUE_NAMES)
+    if not top5_ids:
+        logger.warning("[retrain All Leagues] no top-5 league IDs resolved — using full union")
+        fallback_df = all_df
+    else:
+        top5_df = all_df[all_df["comp_id"].isin(top5_ids)]
+        if "kickoff_datetime" in top5_df.columns:
+            fallback_df = (
+                top5_df.sort_values("kickoff_datetime", ascending=False)
+                .groupby("comp_id", sort=False)
+                .head(FALLBACK_RECENT_ROWS_PER_LEAGUE)
+            )
+        else:
+            logger.warning(
+                "[retrain All Leagues] kickoff_datetime column missing — "
+                "cannot apply recent-rows cap; using full top-5 union"
+            )
+            fallback_df = top5_df
+    logger.info(
+        f"[retrain All Leagues] training on {len(fallback_df)} rows from "
+        f"{len(top5_ids)} top-5 leagues "
+        f"(cap={FALLBACK_RECENT_ROWS_PER_LEAGUE}/league; was {len(all_df)} across all leagues)"
+    )
+    return fallback_df
+
+
+async def retrain_partial(competition_id: Optional[int], stats: list, dry_run: bool = True) -> dict:
+    """Train a subset of (competition, stat) pairs — used to fill gaps left
+    by a partial-success full retrain without re-doing the per-league work
+    that already completed.
+
+    competition_id=None runs the "All Leagues" fallback scope (top-5 + row
+    cap). An integer competition_id trains just that league's models on
+    its own data.
+
+    stats is a list of canonical stat names (e.g. ["Interceptions",
+    "Offsides"]) matching get_stat_list() output. Unknown stats are
+    skipped with a warning.
+
+    Returns: { "scope": str, "results": [...], "skipped": [...] }
+    """
+    if not dry_run:
+        raise NotImplementedError("Non-dry-run retraining lands in Phase 5")
+    if not stats:
+        return {"scope": "n/a", "results": [], "skipped": [], "message": "no stats specified"}
+
+    t_start = time.time()
+    scope = "All Leagues" if competition_id is None else f"competition_id={competition_id}"
+    logger.info(f"[retrain partial] START scope={scope} stats={stats}")
+
+    valid_stats = [s for s in get_stat_list() if s != "Goals"]
+    unknown = [s for s in stats if s not in valid_stats]
+    if unknown:
+        logger.warning(f"[retrain partial] unknown stats (skipped): {unknown}")
+    target_stats = [s for s in stats if s in valid_stats]
+    if not target_stats:
+        return {"scope": scope, "results": [], "skipped": unknown, "message": "no valid stats after filtering"}
+
+    all_df = await load_model_dataset_async()
+    logger.info(f"[retrain partial] loaded {len(all_df)} total rows from projection_model_dataset")
+
+    if competition_id is None:
+        df = await _build_all_leagues_fallback_df(all_df)
+        label = "All Leagues"
+    else:
+        df = all_df[all_df["comp_id"] == competition_id]
+        try:
+            label = await _lookup_league_name(int(competition_id))
+        except Exception as e:
+            logger.warning(f"[retrain partial] couldn't resolve name for comp_id={competition_id}: {e}")
+            label = str(competition_id)
+
+    results = []
+    for stat in target_stats:
+        r = await _train_one(df, stat, competition_id, label)
+        if r is not None:
+            results.append(r)
+
+    elapsed = (time.time() - t_start) / 60
+    logger.info(f"[retrain partial] COMPLETE scope={scope} — {elapsed:.1f} min, {len(results)} models trained")
+    return {"scope": scope, "results": results, "skipped": unknown}
 
 
 async def _lookup_league_name(competition_id: int) -> str:
