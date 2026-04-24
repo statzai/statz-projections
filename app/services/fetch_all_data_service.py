@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import aiomysql
 import app.source_database as _src_db
 from app.source_database import get_source_connection, check_source_connection, source_init_db_pool, release_source_connection
 
@@ -120,7 +121,12 @@ class FetchAllDataService:
                 conn = await get_source_connection()
                 total_rows = 0
                 first_chunk = True
-                async with conn.cursor() as cur:
+                # SSCursor = server-side cursor. Default aiomysql cursor
+                # buffers the ENTIRE result set in memory on execute(); only
+                # fetchmany paginates through the buffer — so OOM fires
+                # regardless of chunk_size. SSCursor streams rows from the
+                # server on demand. Essential for the 7.8M-row fps fetch.
+                async with conn.cursor(aiomysql.SSCursor) as cur:
                     await cur.execute(sql, params)
                     cols = [d[0] for d in cur.description]
                     while True:
@@ -136,6 +142,8 @@ class FetchAllDataService:
                         )
                         total_rows += len(batch)
                         first_chunk = False
+                        # Free the chunk before reading the next one
+                        del chunk_df
 
                 elapsed = time.monotonic() - t_start
                 logger.info(f"[{table_name}] OK — {total_rows} rows (streamed, {elapsed:.1f}s)")
