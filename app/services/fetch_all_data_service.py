@@ -93,6 +93,89 @@ class FetchAllDataService:
                 return new_df
         return new_df
 
+    async def _fetch_table_streaming(
+        self,
+        table_name: str,
+        sql: str,
+        params: tuple,
+        filepath: Path,
+        chunk_size: int = 200_000,
+        results: dict = None,
+    ):
+        """Stream a full-table fetch to CSV without ever holding the full
+        result set in memory. Use for large tables (fixture_player_stats
+        ~7.8M rows, fixture_team_stats ~2.4M rows) where the standard
+        fetch-all-then-DataFrame pattern in _fetch_table OOMs the worker.
+
+        Writes the first chunk with header, subsequent chunks appended.
+        Does not support incremental merge (deltas are small enough that
+        _fetch_table's in-memory path handles them fine).
+        """
+        t_start = time.monotonic()
+        last_error = None
+
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            conn = None
+            try:
+                conn = await get_source_connection()
+                total_rows = 0
+                first_chunk = True
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, params)
+                    cols = [d[0] for d in cur.description]
+                    while True:
+                        batch = await cur.fetchmany(chunk_size)
+                        if not batch:
+                            break
+                        chunk_df = pd.DataFrame(batch, columns=cols)
+                        chunk_df.to_csv(
+                            filepath,
+                            mode='w' if first_chunk else 'a',
+                            header=first_chunk,
+                            index=False,
+                        )
+                        total_rows += len(batch)
+                        first_chunk = False
+
+                elapsed = time.monotonic() - t_start
+                logger.info(f"[{table_name}] OK — {total_rows} rows (streamed, {elapsed:.1f}s)")
+                if results is not None:
+                    results[table_name] = 'ok'
+                return total_rows
+
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[{table_name}] streaming FAILED — {e} (retry {attempt}/{self.MAX_RETRIES})")
+                if attempt < self.MAX_RETRIES:
+                    try:
+                        if _src_db.source_pool:
+                            _src_db.source_pool.close()
+                            try:
+                                await asyncio.wait_for(_src_db.source_pool.wait_closed(), timeout=5)
+                            except asyncio.TimeoutError:
+                                pass
+                            _src_db.source_pool = None
+                        await source_init_db_pool()
+                    except Exception as pool_err:
+                        logger.warning(f"[{table_name}] Pool reinit failed: {pool_err}")
+            finally:
+                if conn is not None and _src_db.source_pool:
+                    try:
+                        release_source_connection(conn)
+                    except Exception:
+                        pass
+
+        csv_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
+        if csv_exists:
+            logger.warning(f"[{table_name}] SKIPPED — using existing CSV (all streaming retries failed: {last_error})")
+            if results is not None:
+                results[table_name] = 'fallback'
+            return None
+        logger.error(f"[{table_name}] ABORTED — streaming failed + no fallback: {last_error}")
+        if results is not None:
+            results[table_name] = 'failed'
+        raise RuntimeError(f"[{table_name}] Streaming fetch failed, no fallback: {last_error}")
+
     async def _fetch_table(
         self,
         table_name: str,
@@ -283,19 +366,23 @@ class FetchAllDataService:
         return pd.DataFrame(rows, columns=cols)
 
     @staticmethod
+    def _fps_sql_and_params(last_fetch):
+        """Build SQL + params tuple for fixture_player_stats fetch. Used by
+        BOTH the incremental path (via _make_fps_query) AND the streaming
+        full-fetch path."""
+        if last_fetch:
+            where = f"WHERE ({SEASON_FILTER_FPS}) AND fps.updated_at > %s"
+            params = (last_fetch,)
+        else:
+            where = f"WHERE {SEASON_FILTER_FPS}"
+            params = ()
+        sql = f"SELECT fps.* FROM fixture_player_stats fps {where}"
+        return sql, params
+
+    @staticmethod
     def _make_fps_query(last_fetch):
+        sql, params = FetchAllDataService._fps_sql_and_params(last_fetch)
         async def _query(conn):
-            if last_fetch:
-                where = f"WHERE ({SEASON_FILTER_FPS}) AND fps.updated_at > %s"
-                params = (last_fetch,)
-            else:
-                where = f"WHERE {SEASON_FILTER_FPS}"
-                params = ()
-            sql = f"""
-                SELECT fps.*
-                FROM fixture_player_stats fps
-                {where}
-            """
             async with conn.cursor() as cur:
                 await cur.execute(sql, params)
                 rows = await cur.fetchall()
@@ -304,19 +391,20 @@ class FetchAllDataService:
         return _query
 
     @staticmethod
+    def _fts_sql_and_params(last_fetch):
+        if last_fetch:
+            where = f"WHERE ({SEASON_FILTER_FTS}) AND fts.updated_at > %s"
+            params = (last_fetch,)
+        else:
+            where = f"WHERE {SEASON_FILTER_FTS}"
+            params = ()
+        sql = f"SELECT fts.* FROM fixture_team_stats fts {where}"
+        return sql, params
+
+    @staticmethod
     def _make_fts_query(last_fetch):
+        sql, params = FetchAllDataService._fts_sql_and_params(last_fetch)
         async def _query(conn):
-            if last_fetch:
-                where = f"WHERE ({SEASON_FILTER_FTS}) AND fts.updated_at > %s"
-                params = (last_fetch,)
-            else:
-                where = f"WHERE {SEASON_FILTER_FTS}"
-                params = ()
-            sql = f"""
-                SELECT fts.*
-                FROM fixture_team_stats fts
-                {where}
-            """
             async with conn.cursor() as cur:
                 await cur.execute(sql, params)
                 rows = await cur.fetchall()
@@ -584,25 +672,47 @@ class FetchAllDataService:
         )
 
         # --- Large incremental tables ---
+        # For the two big tables, full-mode fetches stream to CSV in chunks
+        # (holds <250k rows in memory at a time, not 7.8M). Incremental
+        # fetches are small enough that the in-memory DataFrame + merge
+        # path in _fetch_table is fine.
         logger.info("[fixture_player_stats] START")
-        await self._fetch_table(
-            "fixture_player_stats",
-            self._make_fps_query(last_fetch),
-            f / "fixture_player_stats.csv",
-            id_column='id',
-            incremental=bool(last_fetch),
-            results=results,
-        )
+        if last_fetch:
+            await self._fetch_table(
+                "fixture_player_stats",
+                self._make_fps_query(last_fetch),
+                f / "fixture_player_stats.csv",
+                id_column='id',
+                incremental=True,
+                results=results,
+            )
+        else:
+            fps_sql, fps_params = self._fps_sql_and_params(None)
+            await self._fetch_table_streaming(
+                "fixture_player_stats",
+                fps_sql, fps_params,
+                f / "fixture_player_stats.csv",
+                results=results,
+            )
 
         logger.info("[fixture_team_stats] START")
-        await self._fetch_table(
-            "fixture_team_stats",
-            self._make_fts_query(last_fetch),
-            f / "fixture_team_stats.csv",
-            id_column='id',
-            incremental=bool(last_fetch),
-            results=results,
-        )
+        if last_fetch:
+            await self._fetch_table(
+                "fixture_team_stats",
+                self._make_fts_query(last_fetch),
+                f / "fixture_team_stats.csv",
+                id_column='id',
+                incremental=True,
+                results=results,
+            )
+        else:
+            fts_sql, fts_params = self._fts_sql_and_params(None)
+            await self._fetch_table_streaming(
+                "fixture_team_stats",
+                fts_sql, fts_params,
+                f / "fixture_team_stats.csv",
+                results=results,
+            )
 
         logger.info("[fixtures] START")
         await self._fetch_table(
