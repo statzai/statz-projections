@@ -12,6 +12,14 @@ from app.source_database import get_source_connection, check_source_connection, 
 logger = logging.getLogger("fetch_data")
 
 
+# Current + previous season per competition. The inner SELECT DISTINCT is
+# essential: competition_season_teams has one row per (team, comp, season),
+# ~20 rows per season. Without DISTINCT, ROW_NUMBER() would rank each team-
+# row separately — for a 20-team competition, ranks 1–20 all share the same
+# (newest) season_id, so `rn <= 2` would pick only that one season twice.
+# Previous season's fixtures would silently fall out of scope. Bug shipped
+# for ~2026-04-03 → 2026-04-24; fixed after noticing projections were using
+# only current-season history. See commit 8b10226 area for the original.
 SEASON_FILTER_FPS = """
         fps.fixture_id IN (
             SELECT f.id FROM fixtures f
@@ -19,7 +27,7 @@ SEASON_FILTER_FPS = """
                 SELECT season_id FROM (
                     SELECT competition_id, season_id,
                            ROW_NUMBER() OVER (PARTITION BY competition_id ORDER BY season_id DESC) AS rn
-                    FROM competition_season_teams
+                    FROM (SELECT DISTINCT competition_id, season_id FROM competition_season_teams) cs
                 ) ranked
                 WHERE rn <= 2
             )
@@ -33,7 +41,7 @@ SEASON_FILTER_FTS = """
                 SELECT season_id FROM (
                     SELECT competition_id, season_id,
                            ROW_NUMBER() OVER (PARTITION BY competition_id ORDER BY season_id DESC) AS rn
-                    FROM competition_season_teams
+                    FROM (SELECT DISTINCT competition_id, season_id FROM competition_season_teams) cs
                 ) ranked
                 WHERE rn <= 2
             )
