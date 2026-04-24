@@ -1236,15 +1236,32 @@ def get_weighted_player_stats(df, team_df, player_id, team_id, stat, stats_types
 # UPDATED - New Parameters: team_id and comps
 def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_types, fixtures, comps, weight, mins=50,
                                 games=None):
+    import logging as _logging
+    _logger = _logging.getLogger("projection")
     # UDATED - pass team_id and comps to get_weighted_player_stats function
     player_stats = get_weighted_player_stats(df, team_df, player_id, team_id, stat, stats_types, fixtures, comps,
                                              weight, mins, games)
-    # if stat == 'Goals' or stat == 'Assists':
-    weighted_sum = player_stats[f'Weighted Player {stat}'].sum()  # UPDATED - No indent
-    if weighted_sum == 0:  # UPDATED - No indent
-        return 0  # UPDATED - No indent
-    weighted_average = player_stats[f'Weighted Player {stat}'].sum() / player_stats[
-        f'Weighted Team {stat}'].sum()  # UPDATED - No indent
+    weighted_sum = player_stats[f'Weighted Player {stat}'].sum()
+    if weighted_sum == 0:
+        return 0
+    team_weighted_sum = player_stats[f'Weighted Team {stat}'].sum()
+    # Denominator guard — without this, 0/0 produces NaN which cascades
+    # through poisson.pmf into the DB as NULL projection_percent and
+    # breaks the insert. Separately: log diagnostics so we can audit
+    # WHICH (player, team, stat) triggers this — in theory a player
+    # can't have stat > 0 while their team's aggregate is 0, so any
+    # hit here points at a data/schema mismatch worth chasing.
+    if team_weighted_sum == 0:
+        raw_team_total = player_stats[f'Team {stat}'].sum()
+        n_player_rows = int((player_stats[f'Player {stat}'] > 0).sum())
+        _logger.warning(
+            f"[NaN-guard] player_id={player_id} team_id={team_id} stat={stat!r} "
+            f"has weighted_player_sum={weighted_sum:.3f} but team_weighted_sum=0 "
+            f"(raw team total={raw_team_total}, player-recorded fixtures={n_player_rows}, "
+            f"total rows={len(player_stats)}). Returning 0."
+        )
+        return 0
+    weighted_average = weighted_sum / team_weighted_sum
     # else:
     #    weighted_sum = player_stats[f'Weighted {stat} Proportion'].sum()
     #    if weighted_sum == 0:
