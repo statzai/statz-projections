@@ -354,6 +354,32 @@ class FetchAllDataService:
         return _query
 
     @staticmethod
+    def _make_bet365_fixture_odds_query(last_fetch):
+        # Bet365 odds were split out of the `fixtures` table into their own
+        # `bet365_fixture_odds` table in the 2026-04-23 unification (Laravel
+        # migration restructure_bet365_odds_table). The projection code keeps
+        # reading bet365 values from the fixtures DataFrame via the legacy
+        # column names (bet365_home_odds_decimal, etc.); data_cache.py LEFT
+        # JOINs this table onto fixtures_df after load so 96+ references
+        # across projection_service/all_teams/euro_comp keep working.
+        #
+        # Table is small (~7k rows, one per fixture with bet365 coverage),
+        # so non-incremental full fetches are fine — still takes <1s.
+        async def _query(conn):
+            if last_fetch:
+                sql = "SELECT * FROM bet365_fixture_odds WHERE updated_at > %s"
+                params = (last_fetch,)
+            else:
+                sql = "SELECT * FROM bet365_fixture_odds"
+                params = ()
+            async with conn.cursor() as cur:
+                await cur.execute(sql, params)
+                rows = await cur.fetchall()
+                cols = [d[0] for d in cur.description]
+            return pd.DataFrame(rows, columns=cols)
+        return _query
+
+    @staticmethod
     def _make_standings_query(last_fetch):
         async def _query(conn):
             if last_fetch:
@@ -600,6 +626,16 @@ class FetchAllDataService:
             "standings",
             self._make_standings_query(last_fetch),
             f / "standings.csv",
+            id_column='id',
+            incremental=bool(last_fetch),
+            results=results,
+        )
+
+        logger.info("[bet365_fixture_odds] START")
+        await self._fetch_table(
+            "bet365_fixture_odds",
+            self._make_bet365_fixture_odds_query(last_fetch),
+            f / "bet365_fixture_odds.csv",
             id_column='id',
             incremental=bool(last_fetch),
             results=results,

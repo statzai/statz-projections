@@ -173,13 +173,24 @@ class PremierLeagueProjectionsService:
         fixtures_df.drop_duplicates(
             subset=['season_id', 'home_team_id', 'away_team_id', 'home_team_goals', 'away_team_goals', 'kickoff_datetime'],
             inplace=True)
-        file_path = os.path.join(data_folder_path, "bet365_odds.csv")
-        b365_odds = pd.read_csv(file_path)
-        b365_odds = b365_odds.drop_duplicates(subset=['fixture_id', 'name'], keep='last')
-        fixtures_df['over_1_5_odds_decimal'] = fixtures_df['id'].map(
-            b365_odds[b365_odds['name'] == 'OVER_1_5'].set_index('fixture_id')['odd_decimal'])
-        fixtures_df['over_2_5_odds_decimal'] = fixtures_df['id'].map(
-            b365_odds[b365_odds['name'] == 'OVER_2_5'].set_index('fixture_id')['odd_decimal'])
+        # Bet365 odds source changed 2026-04-23 from long-format bet365_odds
+        # (one row per (fixture, market name)) to wide bet365_fixture_odds
+        # (one row per fixture with decimal cols for every market). See
+        # data_cache.py for the canonical merge used by the non-legacy path.
+        b365_path = os.path.join(data_folder_path, "bet365_fixture_odds.csv")
+        b365 = pd.read_csv(b365_path, usecols=["fixture_id", "home_win_odd", "draw_odd", "away_win_odd", "btts_yes_odd", "over_1_5_odd", "over_2_5_odd"])
+        b365 = b365.drop_duplicates(subset=["fixture_id"], keep="last").rename(columns={
+            "home_win_odd": "bet365_home_odds_decimal",
+            "draw_odd": "bet365_draw_odds_decimal",
+            "away_win_odd": "bet365_away_odds_decimal",
+            "btts_yes_odd": "bet365_btts_yes_odds_decimal",
+            "over_1_5_odd": "over_1_5_odds_decimal",
+            "over_2_5_odd": "over_2_5_odds_decimal",
+        })
+        stale = [c for c in b365.columns if c != "fixture_id" and c in fixtures_df.columns]
+        if stale:
+            fixtures_df = fixtures_df.drop(columns=stale)
+        fixtures_df = fixtures_df.merge(b365, left_on="id", right_on="fixture_id", how="left").drop(columns=["fixture_id"])
         file_path = os.path.join(data_folder_path, "stats_types.csv")
         stats_types = pd.read_csv(file_path)
         league_id = get_league_id(league, comps)

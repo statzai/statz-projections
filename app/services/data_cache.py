@@ -57,20 +57,63 @@ class DataCache:
             inplace=True,
         )
 
-        self.b365_odds = pd.read_csv(os.path.join(path, "bet365_odds.csv"))
-        self.b365_odds = self.b365_odds.drop_duplicates(
-            subset=["fixture_id", "name"], keep="last"
-        )
-
-        # Map odds to fixtures once (shared across all leagues)
-        self.fixtures_df["over_1_5_odds_decimal"] = self.fixtures_df["id"].map(
-            self.b365_odds[self.b365_odds["name"] == "OVER_1_5"]
-            .set_index("fixture_id")["odd_decimal"]
-        )
-        self.fixtures_df["over_2_5_odds_decimal"] = self.fixtures_df["id"].map(
-            self.b365_odds[self.b365_odds["name"] == "OVER_2_5"]
-            .set_index("fixture_id")["odd_decimal"]
-        )
+        # Bet365 odds moved out of the `fixtures` table into their own
+        # `bet365_fixture_odds` table in the 2026-04-23 unification. The
+        # 96+ references in projection_service / all_teams / euro_comp
+        # read legacy names like `bet365_home_odds_decimal`, so we LEFT
+        # JOIN by fixture_id and rename back to those names. Downstream
+        # code needs no changes.
+        #
+        # Columns that exist on bet365_fixture_odds but aren't consumed
+        # (fractionals, odds_ids, market_fids, btts_no_odd) are dropped
+        # to keep the fixtures DataFrame lean — only the decimal cols
+        # used by probability math survive.
+        b365_cols_needed = [
+            "fixture_id",
+            "home_win_odd", "draw_odd", "away_win_odd",
+            "btts_yes_odd",
+            "over_1_5_odd", "over_2_5_odd",
+        ]
+        b365_renames = {
+            "home_win_odd": "bet365_home_odds_decimal",
+            "draw_odd": "bet365_draw_odds_decimal",
+            "away_win_odd": "bet365_away_odds_decimal",
+            "btts_yes_odd": "bet365_btts_yes_odds_decimal",
+            "over_1_5_odd": "over_1_5_odds_decimal",
+            "over_2_5_odd": "over_2_5_odds_decimal",
+        }
+        b365_path = os.path.join(path, "bet365_fixture_odds.csv")
+        if os.path.exists(b365_path):
+            b365 = pd.read_csv(b365_path, usecols=b365_cols_needed)
+            b365 = b365.drop_duplicates(subset=["fixture_id"], keep="last")
+            b365 = b365.rename(columns=b365_renames)
+            # Drop any stale renamed columns already on fixtures_df (from
+            # the pre-migration schema) so the merge populates them fresh.
+            stale = [c for c in b365_renames.values() if c in self.fixtures_df.columns]
+            if stale:
+                self.fixtures_df = self.fixtures_df.drop(columns=stale)
+            self.fixtures_df = self.fixtures_df.merge(
+                b365, left_on="id", right_on="fixture_id", how="left"
+            ).drop(columns=["fixture_id"])
+            logger.info(
+                f"DataCache: loaded bet365_fixture_odds.csv ({len(b365)} rows) "
+                "and merged onto fixtures_df"
+            )
+        else:
+            # First run after this change — fetch hasn't exported the CSV
+            # yet. Populate the expected columns as NaN so downstream
+            # probability calcs (1/odd) yield NaN cleanly rather than
+            # KeyError-ing.
+            for col in b365_renames.values():
+                self.fixtures_df[col] = pd.NA
+            logger.warning(
+                "DataCache: bet365_fixture_odds.csv not found — "
+                "bet365 decimal columns will be NaN until next fetch"
+            )
+        # Retain raw long-format reference used by nothing critical but
+        # referenced by old code paths; harmless empty DataFrame if the
+        # legacy CSV is no longer fetched.
+        self.b365_odds = pd.DataFrame()
 
         self.stats_types = pd.read_csv(os.path.join(path, "stats_types.csv"))
 
