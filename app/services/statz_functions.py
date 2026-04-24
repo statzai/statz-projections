@@ -1254,11 +1254,24 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
     if team_weighted_sum == 0:
         raw_team_total = player_stats[f'Team {stat}'].sum()
         n_player_rows = int((player_stats[f'Player {stat}'] > 0).sum())
+        # Extra diagnostic: show what team_ids are in the merged rows + which
+        # fixture IDs + their raw Team {stat} values. Reveals whether the
+        # merge is failing (team_id dtype mismatch, fixture_id dtype
+        # mismatch, stats_type_id filter dropping real rows, etc.).
+        try:
+            sample = player_stats[['fixture_id', 'team_id', f'Player {stat}', f'Team {stat}']].head(5).to_dict('records')
+            team_id_dtype = str(player_stats['team_id'].dtype)
+            fixture_id_dtype = str(player_stats['fixture_id'].dtype)
+        except Exception:
+            sample = 'n/a'
+            team_id_dtype = fixture_id_dtype = '?'
         _logger.warning(
             f"[NaN-guard] player_id={player_id} team_id={team_id} stat={stat!r} "
             f"has weighted_player_sum={weighted_sum:.3f} but team_weighted_sum=0 "
             f"(raw team total={raw_team_total}, player-recorded fixtures={n_player_rows}, "
-            f"total rows={len(player_stats)}). Returning 0."
+            f"total rows={len(player_stats)}). "
+            f"dtypes: team_id={team_id_dtype}, fixture_id={fixture_id_dtype}. "
+            f"sample: {sample}. Returning 0."
         )
         return 0
     weighted_average = weighted_sum / team_weighted_sum
