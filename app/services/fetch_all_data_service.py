@@ -354,7 +354,7 @@ class FetchAllDataService:
         return _query
 
     @staticmethod
-    def _make_bet365_fixture_odds_query(last_fetch):
+    async def _query_bet365_fixture_odds(conn):
         # Bet365 odds were split out of the `fixtures` table into their own
         # `bet365_fixture_odds` table in the 2026-04-23 unification (Laravel
         # migration restructure_bet365_odds_table). The projection code keeps
@@ -363,21 +363,16 @@ class FetchAllDataService:
         # JOINs this table onto fixtures_df after load so 96+ references
         # across projection_service/all_teams/euro_comp keep working.
         #
-        # Table is small (~7k rows, one per fixture with bet365 coverage),
-        # so non-incremental full fetches are fine — still takes <1s.
-        async def _query(conn):
-            if last_fetch:
-                sql = "SELECT * FROM bet365_fixture_odds WHERE updated_at > %s"
-                params = (last_fetch,)
-            else:
-                sql = "SELECT * FROM bet365_fixture_odds"
-                params = ()
-            async with conn.cursor() as cur:
-                await cur.execute(sql, params)
-                rows = await cur.fetchall()
-                cols = [d[0] for d in cur.description]
-            return pd.DataFrame(rows, columns=cols)
-        return _query
+        # Always a full fetch — table is small (~7k rows, one per fixture
+        # with bet365 coverage) and a full pull takes well under a second.
+        # Incremental mode would make a cold-start after a code deploy
+        # leave the CSV with only the last-hour delta (bug we actually hit
+        # on 2026-04-24 before switching this to full-fetch).
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT * FROM bet365_fixture_odds")
+            rows = await cur.fetchall()
+            cols = [d[0] for d in cur.description]
+        return pd.DataFrame(rows, columns=cols)
 
     @staticmethod
     def _make_standings_query(last_fetch):
@@ -634,10 +629,9 @@ class FetchAllDataService:
         logger.info("[bet365_fixture_odds] START")
         await self._fetch_table(
             "bet365_fixture_odds",
-            self._make_bet365_fixture_odds_query(last_fetch),
+            self._query_bet365_fixture_odds,
             f / "bet365_fixture_odds.csv",
-            id_column='id',
-            incremental=bool(last_fetch),
+            incremental=False,
             results=results,
         )
 
