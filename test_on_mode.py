@@ -19,14 +19,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 logger = logging.getLogger("test_on_mode")
 
 
-async def main(league: str) -> int:
+async def main(league: str, mode: str = "on") -> int:
     from app.config import Config
     from app.source_database import source_init_db_pool, close_source_db_pool
     from app.database import init_db_pool, close_db_pool
     from app.services.projection_service import ProjectionService
 
-    Config.USE_DB_LOADER = "on"
-    logger.info(f"Forcing USE_DB_LOADER=on for this test run")
+    Config.USE_DB_LOADER = mode
+    logger.info(f"Forcing USE_DB_LOADER={mode} for this test run")
 
     await source_init_db_pool()
     await init_db_pool()
@@ -51,4 +51,5 @@ async def main(league: str) -> int:
 
 if __name__ == "__main__":
     league = sys.argv[1] if len(sys.argv) > 1 else "La Liga"
-    sys.exit(asyncio.run(main(league)))
+    mode = sys.argv[2] if len(sys.argv) > 2 else "on"
+    sys.exit(asyncio.run(main(league, mode)))
