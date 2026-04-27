@@ -347,6 +347,11 @@ class LeagueDataLoader:
                 subset=["fixture_id", "team_id", "stats_type_id"],
                 inplace=True,
             )
+            # `value` is stored as VARCHAR in source DB; CSV mode inferred
+            # it as float via pandas. Coerce here so downstream arithmetic
+            # (home + away, > 2.5, etc.) doesn't string-concatenate.
+            if "value" in df.columns:
+                df["value"] = pd.to_numeric(df["value"], errors="coerce")
         self.team_stats = df
 
     async def _load_player_stats(self, conn) -> None:
@@ -376,6 +381,10 @@ class LeagueDataLoader:
                 subset=["fixture_id", "player_id", "stats_type_id"],
                 inplace=True,
             )
+            # Same VARCHAR→numeric coercion as team_stats. CSV mode got
+            # float for free via pandas type inference.
+            if "value" in df.columns:
+                df["value"] = pd.to_numeric(df["value"], errors="coerce")
         self.player_stats = df
 
     # ── Reference tables (small; bulk-loaded each run for now) ────────────
