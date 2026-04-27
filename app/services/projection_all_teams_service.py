@@ -5,7 +5,7 @@ from app.repository.projection_run_repo import touch_all_running, upsert_run_com
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
 from app.config import Config
-from app.data_loader import LeagueDataLoader
+from app.data_loader import LeagueDataLoader, capture_shadow_snapshot
 from app.models.requests.league_request import LeagueRequest
 from scipy.stats import poisson
 import warnings
@@ -251,6 +251,19 @@ class ProjectionAllTeams:
                         _league_id_for_load = 648
                     else:
                         _league_id_for_load = get_league_id(league, source.comps)
+
+                # Shadow capture for parity verification — runs alongside
+                # the CSV path, dumps loader DataFrames to /tmp/loader_shadow.
+                # Skipped in on-mode (loader IS the source). Failures non-fatal.
+                if Config.USE_DB_LOADER == "shadow":
+                    league_weightings_path = os.path.join(
+                        ProjectionService.DATA_FOLDER_PATH, "League Weightings.xlsx"
+                    )
+                    await capture_shadow_snapshot(
+                        league_name=league,
+                        league_id=_league_id_for_load,
+                        league_weightings_xlsx_path=league_weightings_path,
+                    )
 
                 from app.repository.projection_dataset_repo import (
                     load_model_dataset_async, load_accuracy_dataset_async,

@@ -10,7 +10,7 @@ from app.repository.player_stat_repo import insert_players_stats_async
 from app.repository.player_repo import insert_player_async, get_players_from_league
 from app.services.data_cache import DataCache
 from app.config import Config
-from app.data_loader import LeagueDataLoader
+from app.data_loader import LeagueDataLoader, capture_shadow_snapshot
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
@@ -132,6 +132,18 @@ class EuroCompProjectionService:
 
         comp_id = get_league_id(league, comps)
         league_ids = [get_league_id(l, comps) for l in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.keys()]
+
+        # Shadow capture for parity verification — fires alongside CSV path.
+        # Skipped in on-mode (loader IS the source). Failures non-fatal.
+        if Config.USE_DB_LOADER == "shadow":
+            league_weightings_path = os.path.join(data_folder_path, "League Weightings.xlsx")
+            await capture_shadow_snapshot(
+                league_name=league,
+                league_id=comp_id,
+                extra_league_ids=league_ids,
+                league_weightings_xlsx_path=league_weightings_path,
+            )
+
         fixtures = fixtures_df[fixtures_df['competition_id'] == comp_id]
         current_season_id = get_season_id(comp_id, seasons, False)
         stat_list = get_stat_list()
