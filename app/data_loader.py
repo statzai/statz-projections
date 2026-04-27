@@ -68,6 +68,12 @@ _BET365_RENAMES = {
 # teams keep their lower-league history naturally.
 _FIXTURE_LOOKBACK_YEARS = 2
 
+# Chunk size for player_stats batched query. Picked so each query's
+# player_id IN list × fixture_id IN list product stays within MySQL's
+# default 8MB range_optimizer budget. Empirically: 500 players × 21k
+# fixtures completes in ~1-2s; 10k players × 21k fixtures hangs.
+_PLAYER_CHUNK_SIZE = 500
+
 
 class LeagueDataLoader:
     """Loads scoped data for projecting ONE competition.
@@ -376,31 +382,47 @@ class LeagueDataLoader:
         """Player stats across UNION fixture set so cross-club + international
         history is captured. player_id filter ensures we only load rows for
         currently-in-scope players, not e.g. Real Madrid players from a
-        Barcelona-vs-Real fixture pulled in via Bernal's history."""
+        Barcelona-vs-Real fixture pulled in via Bernal's history.
+
+        Batched by player_id chunks to keep the query planner sane. Euro
+        comp scope can have 10k+ player_ids × 20k+ fixture_ids — the dual
+        IN clause blows past MySQL's range_optimizer_max_mem_size and
+        falls back to full table scan on fixture_player_stats (15M rows).
+        Splitting into player-id chunks of `_PLAYER_CHUNK_SIZE` keeps each
+        query small enough for the optimizer to use indexes.
+        """
         if not self.player_ids or not self.fixture_ids:
             self.player_stats = pd.DataFrame()
             return
 
-        player_ph = ",".join(["%s"] * len(self.player_ids))
+        chunks = []
+        cols = None
         fix_ph = ",".join(["%s"] * len(self.fixture_ids))
-        sql = f"""
-            SELECT * FROM fixture_player_stats
-            WHERE player_id IN ({player_ph})
-              AND fixture_id IN ({fix_ph})
-        """
-        params = tuple(self.player_ids) + tuple(self.fixture_ids)
-        async with conn.cursor() as cur:
-            await cur.execute(sql, params)
-            rows = await cur.fetchall()
-            cols = [d[0] for d in cur.description]
-        df = pd.DataFrame(rows, columns=cols)
+        fix_params = tuple(self.fixture_ids)
+
+        for i in range(0, len(self.player_ids), _PLAYER_CHUNK_SIZE):
+            batch = self.player_ids[i : i + _PLAYER_CHUNK_SIZE]
+            player_ph = ",".join(["%s"] * len(batch))
+            sql = f"""
+                SELECT * FROM fixture_player_stats
+                WHERE player_id IN ({player_ph})
+                  AND fixture_id IN ({fix_ph})
+            """
+            params = tuple(batch) + fix_params
+            async with conn.cursor() as cur:
+                await cur.execute(sql, params)
+                rows = await cur.fetchall()
+                if cols is None:
+                    cols = [d[0] for d in cur.description]
+            if rows:
+                chunks.append(pd.DataFrame(rows, columns=cols))
+
+        df = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame(columns=cols or [])
         if not df.empty:
             df.drop_duplicates(
                 subset=["fixture_id", "player_id", "stats_type_id"],
                 inplace=True,
             )
-            # Same VARCHAR→numeric coercion as team_stats. CSV mode got
-            # float for free via pandas type inference.
             if "value" in df.columns:
                 df["value"] = pd.to_numeric(df["value"], errors="coerce")
         self.player_stats = df
