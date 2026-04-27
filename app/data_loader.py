@@ -454,6 +454,14 @@ class LeagueDataLoader:
         )
         if not self.team_ratings.empty:
             self.team_ratings["Date"] = pd.to_datetime(self.team_ratings["Date"]).dt.date
+            # MySQL DECIMAL → Python decimal.Decimal via aiomysql; CSV mode
+            # gets float for free. Coerce so arithmetic in get_ratings
+            # (Attack/Defense weighting, Movement subtraction) works.
+            for col in ("Attack", "Defense", "Overall", "Movement"):
+                if col in self.team_ratings.columns:
+                    self.team_ratings[col] = pd.to_numeric(
+                        self.team_ratings[col], errors="coerce"
+                    )
 
         # b365_odds — DataCache keeps it as an empty frame; nothing critical
         # reads it directly. Same here for parity.
