@@ -787,7 +787,14 @@ class ProjectionAllTeams:
                             ratings['MV Index'] = ratings['MV Index'].fillna(1.0)
 
                         total_match_perc = 38 / total_matches
-                        mv_beta = league_weightings_df[league_weightings_df['League'] == league]['mv_beta'].values[0]
+                        # mv_beta is already set above from DB config or
+                        # xlsx fallback — re-looking it up via
+                        # league_weightings_df (only assigned in the xlsx
+                        # branch) raised NameError for any league using DB
+                        # config, which the try/except below silently
+                        # swallowed → skipped MV adjustment for every run.
+                        # Same fix as projection_service.py (see comment
+                        # at the equivalent block there).
                         mv_beta = (mv_beta * (0.95 ** (matches_played * total_match_perc)))
 
                         ratings['MV Attack Underperformance'] = (ratings['MV Index'] - ratings['Attack'] / ratings[
