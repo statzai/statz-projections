@@ -9,6 +9,8 @@ from app.repository.team_repo import insert_teams_async
 from app.repository.player_stat_repo import insert_players_stats_async
 from app.repository.player_repo import insert_player_async, get_players_from_league
 from app.services.data_cache import DataCache
+from app.config import Config
+from app.data_loader import LeagueDataLoader
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
@@ -73,19 +75,45 @@ class EuroCompProjectionService:
         date_to = date_from + pd.DateOffset(days=EuroCompProjectionService.DAYS)
         odds_weight = 0.5
 
-        # ── Load shared source data ──
-        if not EuroCompProjectionService._cache.is_loaded():
-            EuroCompProjectionService._cache.load(str(data_folder_path))
+        # ── Pick data source ──
+        # Euro comp scope spans the comp itself + 8 domestic top-tiers
+        # (LEAGUE_COUNTRY_DICT). In on-mode we resolve those IDs up-front
+        # via direct DB queries, then pass them to LeagueDataLoader so the
+        # team scope covers all relevant clubs.
+        from app.services.projection_service import ProjectionService
+        if Config.USE_DB_LOADER == "on":
+            comp_id_for_load = await ProjectionService._resolve_league_id_db(league)
+            domestic_ids = []
+            for dom_league in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.keys():
+                domestic_ids.append(await ProjectionService._resolve_league_id_db(dom_league))
+            league_weightings_path = os.path.join(data_folder_path, "League Weightings.xlsx")
+            _loader = LeagueDataLoader(
+                comp_id_for_load,
+                extra_league_ids=domestic_ids,
+                league_weightings_xlsx_path=league_weightings_path,
+            )
+            await _loader.load()
+            source = _loader
+            needs_copy = False
+            logger.info(f"[{league}] Data source: LeagueDataLoader (db_loader=on, +8 domestic comps)")
+        else:
+            if not EuroCompProjectionService._cache.is_loaded():
+                EuroCompProjectionService._cache.load(str(data_folder_path))
+            source = EuroCompProjectionService._cache
+            needs_copy = True
+        ProjectionService._current_source = source
+        def _maybe_copy(df):
+            return df.copy() if needs_copy and df is not None else df
 
-        player_stats = EuroCompProjectionService._cache.player_stats.copy()
-        team_stats = EuroCompProjectionService._cache.team_stats.copy()
-        standings = EuroCompProjectionService._cache.standings.copy()
-        seasons = EuroCompProjectionService._cache.seasons
-        comps = EuroCompProjectionService._cache.comps
-        comp_teams = EuroCompProjectionService._cache.comp_teams
-        teams = EuroCompProjectionService._cache.teams
-        fixtures_df = EuroCompProjectionService._cache.fixtures_df.copy()
-        stats_types = EuroCompProjectionService._cache.stats_types
+        player_stats = _maybe_copy(source.player_stats)
+        team_stats = _maybe_copy(source.team_stats)
+        standings = _maybe_copy(source.standings)
+        seasons = source.seasons
+        comps = source.comps
+        comp_teams = source.comp_teams
+        teams = source.teams
+        fixtures_df = _maybe_copy(source.fixtures_df)
+        stats_types = source.stats_types
 
         # Load players from CSV (was previously 8 separate DB queries which kept hanging)
         logger.info(f"[{league}] Loading players from CSV...")
@@ -93,11 +121,11 @@ class EuroCompProjectionService:
         players['display_name'] = players['display_name'].str.strip()
         logger.info(f"[{league}] Loaded {len(players)} players")
 
-        # Ratings Dataset — DB-sourced via DataCache (was parquet).
-        all_team_ratings = EuroCompProjectionService._cache.team_ratings.copy()
+        # Ratings Dataset — DB-sourced (cache or per-league loader).
+        all_team_ratings = _maybe_copy(source.team_ratings)
 
-        # League Weightings (for domestic rating calculations)
-        league_weightings_df = EuroCompProjectionService._cache.league_weightings if EuroCompProjectionService._cache.is_loaded() else pd.read_excel(os.path.join(data_folder_path, "League Weightings.xlsx"))
+        # League Weightings (for domestic rating calculations) — loader populates this from the xlsx already.
+        league_weightings_df = source.league_weightings if (source.league_weightings is not None and not source.league_weightings.empty) else pd.read_excel(os.path.join(data_folder_path, "League Weightings.xlsx"))
 
         # UEFA Coefficients
         uefa_coef = pd.read_excel(os.path.join(data_folder_path, "League Coefficients.xlsx"))
@@ -129,7 +157,7 @@ class EuroCompProjectionService:
             # 'Scottish Premiership'), but League Weightings.xlsx hasn't
             # been re-labelled — bare xlsx lookup returned empty and .values[0]
             # crashed the whole euro comp run.
-            db_config = EuroCompProjectionService._cache.projection_config
+            db_config = source.projection_config
             db_row = db_config[db_config['league_name'] == league_name] if not db_config.empty else pd.DataFrame()
 
             if len(db_row) > 0:
@@ -194,7 +222,7 @@ class EuroCompProjectionService:
             # fall back to per-league xlsx if the league doesn't have DB rows
             # yet. Mirrors the pattern in projection_service.py.
             try:
-                db_promoted = EuroCompProjectionService._cache.promoted_team_ratings
+                db_promoted = source.promoted_team_ratings
                 db_promoted_rows = db_promoted[db_promoted['league_name'] == league_name] if not db_promoted.empty else pd.DataFrame()
 
                 if len(db_promoted_rows) > 0:
@@ -224,7 +252,7 @@ class EuroCompProjectionService:
                 pass
 
             # Market value adjustment — mappings come from the DB cache (shared with domestic projections)
-            db_mappings = EuroCompProjectionService._cache.transfermarkt_team_mappings
+            db_mappings = source.transfermarkt_team_mappings
             if not db_mappings.empty:
                 team_mapping = dict(zip(db_mappings['from_name'], db_mappings['to_name']))
             else:
@@ -320,7 +348,7 @@ class EuroCompProjectionService:
         from app.repository.team_ratings_repo import insert_team_ratings_async
         await insert_team_ratings_async(
             ratings[['Team', 'Attack', 'Defense', 'Overall', 'Attack_xG', 'Defense_xG', 'Overall_xG']].copy(),
-            league, comp_id, EuroCompProjectionService._cache.teams,
+            league, comp_id, teams,
             comp_teams=comp_teams,
         )
 

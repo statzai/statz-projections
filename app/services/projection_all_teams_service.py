@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from app.repository.projection_run_repo import touch_all_running, upsert_run_complete
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
+from app.config import Config
+from app.data_loader import LeagueDataLoader
 from app.models.requests.league_request import LeagueRequest
 from scipy.stats import poisson
 import warnings
@@ -49,11 +51,16 @@ class ProjectionAllTeams:
         _total_start = time.time()
         _league_times = {}
 
-        # Load all shared source data ONCE before the loop (eliminates 11x redundant file reads)
+        # Load all shared source data ONCE before the loop (eliminates 11x
+        # redundant file reads). Skipped in db-loader mode — there each
+        # league instantiates its own LeagueDataLoader scoped to its teams.
         data_folder_path = ProjectionService.DATA_FOLDER_PATH
-        if not ProjectionService._cache.is_loaded():
-            ProjectionService._cache.load(str(data_folder_path))
-        logger.info("All-leagues: shared source data loaded into cache")
+        if Config.USE_DB_LOADER != "on":
+            if not ProjectionService._cache.is_loaded():
+                ProjectionService._cache.load(str(data_folder_path))
+            logger.info("All-leagues: shared source data loaded into cache")
+        else:
+            logger.info("All-leagues: db_loader=on — per-league loaders, no shared cache")
 
         _euro_comp_service = EuroCompProjectionService()
 
@@ -92,6 +99,34 @@ class ProjectionAllTeams:
                     continue
 
                 logger.info(f"[{league}] START projections"); _start_time = time.time()
+
+                # Per-league data source selection. In on-mode each league
+                # gets its own LeagueDataLoader scoped to its team set; in
+                # off/shadow mode all leagues share the singleton DataCache
+                # (loaded once before the loop). The downstream code reads
+                # source.X for the same attribute names regardless.
+                if Config.USE_DB_LOADER == "on":
+                    if league == 'Campeonato Brasileiro':
+                        _league_id_for_load = 648
+                    else:
+                        _league_id_for_load = await ProjectionService._resolve_league_id_db(league)
+                    league_weightings_path = os.path.join(
+                        ProjectionService.DATA_FOLDER_PATH, "League Weightings.xlsx"
+                    )
+                    _loader = LeagueDataLoader(
+                        _league_id_for_load,
+                        league_weightings_xlsx_path=league_weightings_path,
+                    )
+                    await _loader.load()
+                    source = _loader
+                    logger.info(f"[{league}] Data source: LeagueDataLoader (db_loader=on)")
+                    needs_copy = False
+                else:
+                    source = ProjectionService._cache
+                    needs_copy = True
+                ProjectionService._current_source = source
+                def _maybe_copy(df):
+                    return df.copy() if needs_copy and df is not None else df
             # - Fixture Player Stats
             # - Fixture Team Stats
             # - Standings
@@ -133,7 +168,7 @@ class ProjectionAllTeams:
                 # "+ Add Competition" in the admin panel project with neutral
                 # weights in Run All Leagues but with the correct DB config in
                 # scheduled / Run Now flows.
-                db_config = ProjectionService._cache.projection_config
+                db_config = source.projection_config
                 db_row = db_config[db_config['league_name'] == league] if not db_config.empty else pd.DataFrame()
 
                 if len(db_row) > 0:
@@ -152,7 +187,7 @@ class ProjectionAllTeams:
                                   league_below_attack_weight, league_below_defense_weight]
                     logger.info(f"[{league}] Config loaded from DB (projection_config.csv)")
                 else:
-                    league_weightings_df = ProjectionService._cache.league_weightings
+                    league_weightings_df = source.league_weightings
                     league_row = league_weightings_df[league_weightings_df['League'] == league]
                     if len(league_row) > 0:
                         league_below = league_row['League Below'].values[0]
@@ -209,10 +244,13 @@ class ProjectionAllTeams:
                 ## fixture.competition_id).
 
                 # Resolve league_id up-front so we can filter the DB reads.
-                if league == 'Campeonato Brasileiro':
-                    _league_id_for_load = 648
-                else:
-                    _league_id_for_load = get_league_id(league, ProjectionService._cache.comps)
+                # In on-mode this was already resolved before the loader
+                # ran (see source-picking block above).
+                if Config.USE_DB_LOADER != "on":
+                    if league == 'Campeonato Brasileiro':
+                        _league_id_for_load = 648
+                    else:
+                        _league_id_for_load = get_league_id(league, source.comps)
 
                 from app.repository.projection_dataset_repo import (
                     load_model_dataset_async, load_accuracy_dataset_async,
@@ -222,22 +260,22 @@ class ProjectionAllTeams:
                 projection_accuracy_dataset_league = await load_accuracy_dataset_async(competition_id=_league_id_for_load)
                 projection_accuracy_dataset_all = await load_accuracy_dataset_async()
 
-                # Ratings Dataset — DB-sourced via DataCache (was parquet).
-                all_team_ratings = ProjectionService._cache.team_ratings.copy()
+                # Ratings Dataset — DB-sourced (cache or per-league loader).
+                all_team_ratings = _maybe_copy(source.team_ratings)
 
-                # In[9]: Use shared cache (loaded once before loop)
-                player_stats = ProjectionService._cache.player_stats.copy()
-                team_stats = ProjectionService._cache.team_stats.copy()
-                standings = ProjectionService._cache.standings.copy()
-                seasons = ProjectionService._cache.seasons
-                comps = ProjectionService._cache.comps
-                comp_teams = ProjectionService._cache.comp_teams
-                teams = ProjectionService._cache.teams
+                # Per-league data assignments (source = cache or loader).
+                player_stats = _maybe_copy(source.player_stats)
+                team_stats = _maybe_copy(source.team_stats)
+                standings = _maybe_copy(source.standings)
+                seasons = source.seasons
+                comps = source.comps
+                comp_teams = source.comp_teams
+                teams = source.teams
                 players = pd.read_csv(os.path.join(data_folder_path, "players.csv"))
                 players['display_name'] = players['display_name'].str.strip()
-                fixtures_df = ProjectionService._cache.fixtures_df.copy()
-                b365_odds = ProjectionService._cache.b365_odds
-                stats_types = ProjectionService._cache.stats_types
+                fixtures_df = _maybe_copy(source.fixtures_df)
+                b365_odds = source.b365_odds
+                stats_types = source.stats_types
 
 
 
@@ -652,7 +690,7 @@ class ProjectionAllTeams:
                     # fall back to the per-league xlsx file. Mirrors the block
                     # in projection_service.py so both paths use the same
                     # source-of-truth.
-                    db_promoted = ProjectionService._cache.promoted_team_ratings
+                    db_promoted = source.promoted_team_ratings
                     db_promoted_rows = db_promoted[db_promoted['league_name'] == league] if not db_promoted.empty else pd.DataFrame()
 
                     if len(db_promoted_rows) > 0:
@@ -803,7 +841,7 @@ class ProjectionAllTeams:
                 ratings['League'] = league
                 from app.repository.team_ratings_repo import insert_team_ratings_async
                 await insert_team_ratings_async(
-                    ratings, league, league_id, ProjectionService._cache.teams,
+                    ratings, league, league_id, teams,
                     comp_teams=comp_teams,
                 )
 
