@@ -122,20 +122,24 @@ async def resolve_league_id(league_name: str) -> int:
 
 
 async def get_upcoming_fixture_ids(league_id: int, days: int = 5) -> list:
-    """Same fixture window as projection_service.projections() — next N days."""
+    """Same fixture window as projection_service.projections() — TODAY 00:00
+    through TODAY+N days. Critical that this matches the projection's window
+    exactly so snapshot includes every fixture the run wrote (incl. ones
+    that have since kicked off and are no longer 'upcoming-from-now')."""
     from app.source_database import get_source_connection, release_source_connection
     conn = await get_source_connection()
-    cutoff = datetime.utcnow() + timedelta(days=days)
+    today_midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = today_midnight + timedelta(days=days)
     try:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
                 SELECT id FROM fixtures
                 WHERE competition_id = %s
-                  AND kickoff_datetime >= NOW()
+                  AND kickoff_datetime >= %s
                   AND kickoff_datetime <= %s
                 """,
-                (league_id, cutoff),
+                (league_id, today_midnight, cutoff),
             )
             return [int(r[0]) for r in await cur.fetchall()]
     finally:
