@@ -319,6 +319,13 @@ class LeagueDataLoader:
                 subset=["season_id", "home_team_id", "away_team_id", "kickoff_datetime"],
                 inplace=True,
             )
+            # Coerce DECIMAL columns (bet365 odds) — MySQL DECIMAL → Python
+            # decimal.Decimal via aiomysql, but downstream code expects floats
+            # (e.g. `1/odd`, `.round()`, `*` with floats). CSV mode dodges
+            # this via pandas type inference.
+            for col in _BET365_RENAMES.values():
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
         self.fixtures_df = df
 
     async def _load_team_stats(self, conn) -> None:
