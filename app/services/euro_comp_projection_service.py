@@ -133,16 +133,13 @@ class EuroCompProjectionService:
         comp_id = get_league_id(league, comps)
         league_ids = [get_league_id(l, comps) for l in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.keys()]
 
-        # Shadow capture for parity verification — fires alongside CSV path.
-        # Skipped in on-mode (loader IS the source). Failures non-fatal.
-        if Config.USE_DB_LOADER == "shadow":
-            league_weightings_path = os.path.join(data_folder_path, "League Weightings.xlsx")
-            await capture_shadow_snapshot(
-                league_name=league,
-                league_id=comp_id,
-                extra_league_ids=league_ids,
-                league_weightings_xlsx_path=league_weightings_path,
-            )
+        # Shadow capture deliberately SKIPPED for euro comps. Scope spans
+        # the comp + 8 domestic top tiers → 10k+ players, 8M+ player_stat
+        # rows in the loader DataFrame. Stacked on top of the already-loaded
+        # 4GB DataCache it OOM-kills the gunicorn worker mid-run. Domestic
+        # leagues still capture (smaller scope, no OOM risk). Euro-comp
+        # parity is covered by the standalone test_on_mode.py CL smoke
+        # test from Phase 5d.
 
         fixtures = fixtures_df[fixtures_df['competition_id'] == comp_id]
         current_season_id = get_season_id(comp_id, seasons, False)
