@@ -28,3 +28,10 @@ class Config:
 
     MIN_POOL_SIZE = int(os.getenv("MIN_POOL_SIZE", 1))
     MAX_POOL_SIZE = int(os.getenv("MAX_POOL_SIZE", 10))
+
+    # Direct DB Query Migration feature flag.
+    #   off    → CSV+DataCache only (current behavior, default)
+    #   shadow → DataCache primary + LeagueDataLoader runs alongside, dumps
+    #            DataFrames to disk for diff vs CSV-mode baseline (Phase 4)
+    #   on     → LeagueDataLoader is the source of truth (Phase 6 cutover)
+    USE_DB_LOADER = os.getenv("USE_DB_LOADER", "off").lower()

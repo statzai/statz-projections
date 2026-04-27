@@ -9,6 +9,8 @@ from app.repository.predicted_table_repo import insert_predicted_table_async
 from app.repository.player_stat_repo import insert_players_stats_async
 from app.repository.player_repo import insert_player_async, get_players_from_league
 from app.services.data_cache import DataCache
+from app.config import Config
+from app.data_loader import capture_shadow_snapshot
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
@@ -171,6 +173,20 @@ class ProjectionService:
             ctx.league_id = 648
         else:
             ctx.league_id = get_league_id(league, ctx.comps)
+
+        # Direct DB Query Migration shadow capture (Phase 3). When the
+        # feature flag is set to "shadow", run the new LeagueDataLoader
+        # alongside DataCache and dump its DataFrames to /tmp/loader_shadow
+        # for offline diff vs CSV-mode equivalents (Phase 4 tooling).
+        # Failures inside capture_shadow_snapshot are swallowed — never
+        # interferes with the live projection.
+        if Config.USE_DB_LOADER == "shadow":
+            league_weightings_path = os.path.join(ctx.data_folder_path, "League Weightings.xlsx")
+            await capture_shadow_snapshot(
+                league_name=league,
+                league_id=ctx.league_id,
+                league_weightings_xlsx_path=league_weightings_path,
+            )
 
         # Model and accuracy datasets — Phase 3: read from DB (projection_model_dataset
         # + projection_accuracy_dataset) instead of parquet files. Eliminates the
