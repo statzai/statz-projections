@@ -121,29 +121,35 @@ async def resolve_league_id(league_name: str) -> int:
         release_source_connection(conn)
 
 
-async def get_upcoming_fixture_ids(league_id: int, days: int = 5) -> list:
-    """Same fixture window as projection_service.projections() — TODAY 00:00
-    through TODAY+N days. Critical that this matches the projection's window
-    exactly so snapshot includes every fixture the run wrote (incl. ones
-    that have since kicked off and are no longer 'upcoming-from-now')."""
-    from app.source_database import get_source_connection, release_source_connection
-    conn = await get_source_connection()
-    today_midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    cutoff = today_midnight + timedelta(days=days)
+async def get_fixture_ids_written_today(league_id: int) -> list:
+    """Resolve fixture IDs by 'rows the projection wrote today for this
+    league' — joins fixture_projections to fixtures, filters by
+    competition_id, takes any fixture whose projection row was updated today.
+
+    Date-window scoping was unreliable: projection_service uses
+    PROJECTION_DAYS but actual write set sometimes extends beyond
+    (e.g. La Liga 10 fixtures spanning 6.5 days). The 'updated today'
+    proxy reliably matches whatever the run wrote.
+    """
+    from app import database as _db
+    from app.database import get_connection
+    conn = await get_connection()
     try:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT id FROM fixtures
-                WHERE competition_id = %s
-                  AND kickoff_datetime >= %s
-                  AND kickoff_datetime <= %s
+                SELECT DISTINCT fp.fixture_id
+                FROM fixture_projections fp
+                JOIN fixtures f ON f.id = fp.fixture_id
+                WHERE f.competition_id = %s
+                  AND DATE(fp.updated_at) = CURDATE()
                 """,
-                (league_id, today_midnight, cutoff),
+                (league_id,),
             )
             return [int(r[0]) for r in await cur.fetchall()]
     finally:
-        release_source_connection(conn)
+        if _db.pool is not None:
+            _db.pool.release(conn)
 
 
 async def fetch_table(table_cfg: dict, league_id: int, fixture_ids: list, today: str) -> pd.DataFrame:
@@ -191,7 +197,7 @@ async def cmd_snapshot(league: str, label: str):
     await init_db_pool()
     try:
         league_id = await resolve_league_id(league)
-        fixture_ids = await get_upcoming_fixture_ids(league_id)
+        fixture_ids = await get_fixture_ids_written_today(league_id)
         today = datetime.utcnow().strftime("%Y-%m-%d")
         out_dir = CAPTURE_ROOT / label
         out_dir.mkdir(parents=True, exist_ok=True)
