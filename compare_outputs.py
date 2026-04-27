@@ -149,7 +149,7 @@ async def fetch_table(table_cfg: dict, league_id: int, fixture_ids: list, today:
     schema), accessed via `database.py` (the local pool), not the
     `source_database.py` read-only pool.
     """
-    from app.database import get_db_connection, release_db_connection
+    from app.database import get_connection, pool as db_pool
     table = table_cfg["name"]
     scope = table_cfg["scope"]
     if scope == "fixture_ids":
@@ -167,7 +167,8 @@ async def fetch_table(table_cfg: dict, league_id: int, fixture_ids: list, today:
     else:
         raise ValueError(f"Unknown scope: {scope}")
 
-    conn = await get_db_connection()
+    from app import database as _db
+    conn = await get_connection()
     try:
         async with conn.cursor() as cur:
             await cur.execute(sql, params)
@@ -175,7 +176,8 @@ async def fetch_table(table_cfg: dict, league_id: int, fixture_ids: list, today:
             cols = [d[0] for d in cur.description]
         return pd.DataFrame(rows, columns=cols)
     finally:
-        release_db_connection(conn)
+        if _db.pool is not None:
+            _db.pool.release(conn)
 
 
 async def cmd_snapshot(league: str, label: str):
