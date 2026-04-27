@@ -10,7 +10,8 @@ from app.repository.player_stat_repo import insert_players_stats_async
 from app.repository.player_repo import insert_player_async, get_players_from_league
 from app.services.data_cache import DataCache
 from app.config import Config
-from app.data_loader import capture_shadow_snapshot
+from app.data_loader import capture_shadow_snapshot, LeagueDataLoader
+from app.source_database import get_source_connection, release_source_connection
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
@@ -34,6 +35,35 @@ class ProjectionService:
 
     # Shared data cache - loaded once, reused across all league projections
     _cache = DataCache()
+
+    # Per-league data source for the current run. Set in _setup_league.
+    # Either the singleton DataCache (CSV mode) or a fresh LeagueDataLoader
+    # (DB-direct mode). Read by _prepare_league for auxiliary tables that
+    # don't already flow through ctx. Safe because projections are serialised
+    # by the cross-worker file lock — only one runs at a time.
+    _current_source = None
+
+    @staticmethod
+    async def _resolve_league_id_db(league_name: str) -> int:
+        """Direct DB lookup of competition_id by name.
+
+        Used in DB-loader mode where we need league_id BEFORE the loader
+        runs (loader scope is built around it). The hardcoded
+        Brazil Serie A=648 mapping mirrors get_league_id's special case."""
+        if league_name == "Brazil Serie A":
+            return 648
+        conn = await get_source_connection()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id FROM competitions WHERE name = %s", (league_name,)
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    raise ValueError(f"League '{league_name}' not found in competitions table")
+                return int(row[0])
+        finally:
+            release_source_connection(conn)
 
     @staticmethod
     def _read_df(path_no_ext: str) -> pd.DataFrame:
@@ -90,12 +120,37 @@ class ProjectionService:
         ctx.date_from = pd.to_datetime('today')
         ctx.date_to = ctx.date_from + pd.DateOffset(days=ProjectionService.DAYS)
 
-        # League config — try DB config first (projection_config.csv from the fetch
-        # pipeline), fall back to League Weightings.xlsx for leagues not yet in the DB.
-        if not ProjectionService._cache.is_loaded():
-            ProjectionService._cache.load(str(ctx.data_folder_path))
+        # Pick data source based on USE_DB_LOADER flag.
+        #   off / shadow → CSV+DataCache (existing path; shadow runs the
+        #                  loader on the side for offline diffing)
+        #   on           → LeagueDataLoader is the source of truth
+        # The loader is per-league; the cache is a singleton. Either way, the
+        # downstream code reads the same attributes (player_stats, team_stats,
+        # fixtures_df, ...) so the rest of _setup_league is source-agnostic.
+        league_id_resolved_early = False
+        if Config.USE_DB_LOADER == "on":
+            ctx.league_id = await self._resolve_league_id_db(league)
+            league_id_resolved_early = True
+            league_weightings_path = os.path.join(ctx.data_folder_path, "League Weightings.xlsx")
+            loader = LeagueDataLoader(
+                ctx.league_id,
+                league_weightings_xlsx_path=league_weightings_path,
+            )
+            await loader.load()
+            source = loader
+            logger.info(f"[{league}] Data source: LeagueDataLoader (db_loader=on)")
+        else:
+            if not ProjectionService._cache.is_loaded():
+                ProjectionService._cache.load(str(ctx.data_folder_path))
+            source = ProjectionService._cache
+        ProjectionService._current_source = source
+        # In on-mode the loader is per-call so mutation safety isn't a concern —
+        # skip defensive .copy() to save ~250MB of allocations per league.
+        needs_copy = (Config.USE_DB_LOADER != "on")
+        def _maybe_copy(df):
+            return df.copy() if needs_copy and df is not None else df
 
-        db_config = ProjectionService._cache.projection_config
+        db_config = source.projection_config
         db_row = db_config[db_config['league_name'] == league] if not db_config.empty else pd.DataFrame()
 
         if len(db_row) > 0:
@@ -115,7 +170,7 @@ class ProjectionService:
             logger.info(f"[{league}] Config loaded from DB (projection_config.csv)")
         else:
             # Fallback to xlsx for leagues not yet in the DB config table
-            league_weightings_df = ProjectionService._cache.league_weightings
+            league_weightings_df = source.league_weightings
             league_row = league_weightings_df[league_weightings_df['League'] == league]
 
             if len(league_row) > 0:
@@ -154,32 +209,31 @@ class ProjectionService:
         # (player_stats, team_stats, standings, fixtures_df) were copied and
         # the others were passed by reference — which matched an observed
         # warm-cache vs fresh-cache drift of ~12 extra qualified players.
-        ctx.player_stats = ProjectionService._cache.player_stats.copy()
-        ctx.team_stats = ProjectionService._cache.team_stats.copy()
-        ctx.standings_all = ProjectionService._cache.standings.copy()
-        ctx.seasons = ProjectionService._cache.seasons.copy()
-        ctx.comps = ProjectionService._cache.comps.copy()
-        ctx.comp_teams = ProjectionService._cache.comp_teams.copy()
-        ctx.teams = ProjectionService._cache.teams.copy()
+        ctx.player_stats = _maybe_copy(source.player_stats)
+        ctx.team_stats = _maybe_copy(source.team_stats)
+        ctx.standings_all = _maybe_copy(source.standings)
+        ctx.seasons = _maybe_copy(source.seasons)
+        ctx.comps = _maybe_copy(source.comps)
+        ctx.comp_teams = _maybe_copy(source.comp_teams)
+        ctx.teams = _maybe_copy(source.teams)
         ctx.players = pd.read_csv(os.path.join(ctx.data_folder_path, "players.csv"))
         ctx.players['display_name'] = ctx.players['display_name'].str.strip()
-        ctx.fixtures_df = ProjectionService._cache.fixtures_df.copy()
-        ctx.b365_odds = ProjectionService._cache.b365_odds.copy()
-        ctx.stats_types = ProjectionService._cache.stats_types.copy()
+        ctx.fixtures_df = _maybe_copy(source.fixtures_df)
+        ctx.b365_odds = _maybe_copy(source.b365_odds)
+        ctx.stats_types = _maybe_copy(source.stats_types)
 
         # League / season IDs — needed before dataset loads so we can filter
-        # by competition_id in the DB read.
-        if league == 'Brazil Serie A':
-            ctx.league_id = 648
-        else:
-            ctx.league_id = get_league_id(league, ctx.comps)
+        # by competition_id in the DB read. In on-mode this was already
+        # resolved via _resolve_league_id_db before the loader scope ran.
+        if not league_id_resolved_early:
+            if league == 'Brazil Serie A':
+                ctx.league_id = 648
+            else:
+                ctx.league_id = get_league_id(league, ctx.comps)
 
-        # Direct DB Query Migration shadow capture (Phase 3). When the
-        # feature flag is set to "shadow", run the new LeagueDataLoader
-        # alongside DataCache and dump its DataFrames to /tmp/loader_shadow
-        # for offline diff vs CSV-mode equivalents (Phase 4 tooling).
-        # Failures inside capture_shadow_snapshot are swallowed — never
-        # interferes with the live projection.
+        # Shadow capture (Phase 3): when flag is "shadow", run the loader
+        # alongside the cache and dump DataFrames for offline diff. Skipped
+        # in on-mode — the loader IS the source there, no need to dual-load.
         if Config.USE_DB_LOADER == "shadow":
             league_weightings_path = os.path.join(ctx.data_folder_path, "League Weightings.xlsx")
             await capture_shadow_snapshot(
@@ -200,8 +254,8 @@ class ProjectionService:
         ctx.projection_accuracy_dataset_league = await load_accuracy_dataset_async(competition_id=ctx.league_id)
         ctx.projection_accuracy_dataset_all = await load_accuracy_dataset_async()
 
-        # Team ratings — sourced from DB via DataCache (was parquet file).
-        ctx.all_team_ratings = ProjectionService._cache.team_ratings.copy()
+        # Team ratings — sourced from current data source (cache or loader).
+        ctx.all_team_ratings = _maybe_copy(source.team_ratings)
 
         ctx.fixtures = ctx.fixtures_df[ctx.fixtures_df['competition_id'] == ctx.league_id]
         ctx.league_standings = ctx.standings_all[ctx.standings_all['competition_id'] == ctx.league_id]
@@ -516,7 +570,8 @@ class ProjectionService:
         # In[12]:
 
         # Team-name mapping: all mappings live in transfermarkt_team_mappings DB table.
-        db_mappings = ProjectionService._cache.transfermarkt_team_mappings
+        # Read from the current run's data source (cache or loader) — set in _setup_league.
+        db_mappings = ProjectionService._current_source.transfermarkt_team_mappings
         if not db_mappings.empty:
             team_mapping = dict(zip(db_mappings['from_name'], db_mappings['to_name']))
             logger.info(f"[{league}] Team mappings: {len(team_mapping)} entries (DB)")
@@ -529,7 +584,7 @@ class ProjectionService:
         try:
             # Try DB-driven promoted ratings first (from admin panel),
             # fall back to the per-league xlsx file.
-            db_promoted = ProjectionService._cache.promoted_team_ratings
+            db_promoted = ProjectionService._current_source.promoted_team_ratings
             db_promoted_rows = db_promoted[db_promoted['league_name'] == league] if not db_promoted.empty else pd.DataFrame()
 
             if len(db_promoted_rows) > 0:
@@ -733,7 +788,7 @@ class ProjectionService:
         ratings['League'] = league
         from app.repository.team_ratings_repo import insert_team_ratings_async
         await insert_team_ratings_async(
-            ratings, league, league_id, ProjectionService._cache.teams,
+            ratings, league, league_id, teams,
             comp_teams=comp_teams,
         )
 
