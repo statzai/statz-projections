@@ -130,6 +130,17 @@ class LeagueDataLoader:
         add pool churn."""
         conn = await get_source_connection()
         try:
+            # Euro-comp scope can have 10k+ player_ids in the IN list,
+            # exceeding MySQL's default 8MB range_optimizer_max_mem_size
+            # and falling back to full table scan on fixture_player_stats
+            # (15M rows). Lift the cap for this session — single connection,
+            # released to pool when load() returns. NOT a global config
+            # change; only this loader's queries see the bump.
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SET SESSION range_optimizer_max_mem_size = 0"
+                )
+
             await self._load_reference_tables(conn)
             await self._resolve_scope(conn)
             await self._resolve_fixture_ids(conn)
