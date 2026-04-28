@@ -36,7 +36,7 @@ from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import GridSearchCV, train_test_split
 
 from app.repository.projection_dataset_repo import load_model_dataset_async
-from app.repository.projection_model_repo import fetch_active_model, insert_projection_model
+from app.repository.projection_model_repo import fetch_active_model, insert_projection_model, promote_model
 from app.services.statz_functions import get_stat_list
 
 logger = logging.getLogger("retrain")
@@ -165,9 +165,15 @@ async def _train_one(
     stat_name: str,
     competition_id: Optional[int],
     label: str,
+    dry_run: bool = True,
 ) -> Optional[dict]:
     """Train one (optionally scoped) model. Returns summary dict or None if
-    insufficient data / training fails."""
+    insufficient data / training fails.
+
+    dry_run=True: Phase 4 — log promotion decision only.
+    dry_run=False: Phase 5 — if guardrail passes, call promote_model() to
+    flip is_active to the new row and demote the incumbent.
+    """
     predictors = _predictor_columns(stat_name)
     target = _target_column(stat_name)
 
@@ -220,6 +226,23 @@ async def _train_one(
     would_promote, reason = _decide_promotion(incumbent, holdout_mae)
     incumbent_mae = incumbent.get("holdout_mae") if incumbent else None
 
+    # Phase 5: when dry_run=False AND the guardrail passes, actually flip
+    # is_active to the new row. promote_model() does the demote-incumbent +
+    # activate-new in a single transaction so projections always see exactly
+    # one active model per (comp, stat). Failures are logged + swallowed —
+    # we'd rather lose a single promotion than abort the whole retrain run.
+    promoted = False
+    if not dry_run and would_promote:
+        try:
+            await promote_model(new_id, reason)
+            promoted = True
+        except Exception as promo_err:
+            logger.warning(
+                f"[retrain {label}] {stat_name}: promote_model({new_id}) failed — "
+                f"keeping incumbent active: {promo_err}",
+                exc_info=True,
+            )
+
     # Free the bulky sklearn objects before the next iteration.
     # Previous runs OOM'd around the 12th-13th grid_search because
     # GridSearchCV retains every CV-trained sub-model in .cv_results_
@@ -229,10 +252,11 @@ async def _train_one(
     del model, X, y, X_train, X_test, y_train, y_test, y_pred, train_df
     gc.collect()
 
+    action = "PROMOTED" if promoted else ("would_promote" if would_promote else "NOT promoting")
     logger.info(
         f"[retrain {label}] {stat_name}: algo={algo} rows={n_train_rows} "
         f"holdout_mae={holdout_mae:.4f} r2={holdout_r2:.4f} "
-        f"incumbent_mae={incumbent_mae} would_promote={would_promote} ({reason}) "
+        f"incumbent_mae={incumbent_mae} {action} ({reason}) "
         f"new_id={new_id}"
     )
 
@@ -244,24 +268,26 @@ async def _train_one(
         "holdout_r2": holdout_r2,
         "incumbent_mae": incumbent_mae,
         "would_promote": would_promote,
+        "promoted": promoted,
         "reason": reason,
         "new_id": new_id,
     }
 
 
-async def retrain_all_models(dry_run: bool = True) -> dict:
+async def retrain_all_models(dry_run: bool = False) -> dict:
     """Main entry point. Returns a summary dict with per-(league, stat) results.
 
-    dry_run=True (Phase 4 default): trains + inserts projection_models rows
-    with is_active=0, logs would-be-promotion decisions, does NOT flip
-    is_active. Intentional — run for 3–4 cycles to calibrate thresholds.
+    dry_run=False (Phase 5 default, since 2026-04-28): after each model
+    trains, if the guardrail in _decide_promotion() passes (new MAE ≤ 2%
+    worse than incumbent, or incumbent has no baseline), call
+    promote_model() to flip is_active. Models that degrade more than 10%
+    are rejected; 2-10% worse held without promotion.
 
-    dry_run=False: Phase 5. Not yet supported — will call promote_model()
-    after the guardrail clears.
+    dry_run=True: original Phase 4 behaviour — trains + inserts rows with
+    is_active=0, logs would-be promotion decisions, doesn't actually
+    promote. Useful for one-off retrains where you want to inspect the
+    holdout MAE without affecting live projections.
     """
-    if not dry_run:
-        raise NotImplementedError("Non-dry-run retraining lands in Phase 5")
-
     t_start = time.time()
     logger.info(f"[retrain] START dry_run={dry_run}")
 
@@ -290,7 +316,7 @@ async def retrain_all_models(dry_run: bool = True) -> dict:
 
         league_results = []
         for stat in stat_list:
-            r = await _train_one(league_df, stat, int(league_id), league_name)
+            r = await _train_one(league_df, stat, int(league_id), league_name, dry_run=dry_run)
             if r is not None:
                 league_results.append(r)
         results["per_league"][league_name] = league_results
@@ -299,7 +325,7 @@ async def retrain_all_models(dry_run: bool = True) -> dict:
     fallback_df = await _build_all_leagues_fallback_df(all_df)
     all_results = []
     for stat in stat_list:
-        r = await _train_one(fallback_df, stat, None, "All Leagues")
+        r = await _train_one(fallback_df, stat, None, "All Leagues", dry_run=dry_run)
         if r is not None:
             all_results.append(r)
     results["all_leagues"] = all_results
@@ -351,7 +377,7 @@ async def _build_all_leagues_fallback_df(all_df: pd.DataFrame) -> pd.DataFrame:
     return fallback_df
 
 
-async def retrain_partial(competition_id: Optional[int], stats: list, dry_run: bool = True) -> dict:
+async def retrain_partial(competition_id: Optional[int], stats: list, dry_run: bool = False) -> dict:
     """Train a subset of (competition, stat) pairs — used to fill gaps left
     by a partial-success full retrain without re-doing the per-league work
     that already completed.
@@ -364,10 +390,11 @@ async def retrain_partial(competition_id: Optional[int], stats: list, dry_run: b
     "Offsides"]) matching get_stat_list() output. Unknown stats are
     skipped with a warning.
 
+    dry_run defaults to False (Phase 5) — pass True for an inspection-only
+    run that doesn't flip is_active.
+
     Returns: { "scope": str, "results": [...], "skipped": [...] }
     """
-    if not dry_run:
-        raise NotImplementedError("Non-dry-run retraining lands in Phase 5")
     if not stats:
         return {"scope": "n/a", "results": [], "skipped": [], "message": "no stats specified"}
 
@@ -399,7 +426,7 @@ async def retrain_partial(competition_id: Optional[int], stats: list, dry_run: b
 
     results = []
     for stat in target_stats:
-        r = await _train_one(df, stat, competition_id, label)
+        r = await _train_one(df, stat, competition_id, label, dry_run=dry_run)
         if r is not None:
             results.append(r)
 

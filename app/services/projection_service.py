@@ -8,6 +8,9 @@ from app.repository.team_repo import insert_teams_async
 from app.repository.predicted_table_repo import insert_predicted_table_async
 from app.repository.player_stat_repo import insert_players_stats_async
 from app.repository.player_repo import insert_player_async, get_players_from_league
+from app.repository.fpl_repo import insert_fpl_projections_async
+from app.repository.opta_repo import insert_opta_projections_async
+from app.repository.fanteam_repo import insert_fanteam_projections_async
 from app.services.data_cache import DataCache
 from app.config import Config
 from app.data_loader import capture_shadow_snapshot, LeagueDataLoader
@@ -1492,6 +1495,142 @@ class ProjectionService:
         _t = time.time()
         await insert_player_async(pl_projections, teams=teams, competition_id=league_id, comp_teams=comp_teams)
         logger.info(f"[{league}] Player projections inserted ({time.time()-_t:.1f}s)")
+
+        # ## **FPL / OPTA / FanTeam Points** (Premier League only)
+        # Mirrors the block in projection_all_teams_service.py so daily
+        # scheduled PL projections (which go through this single-league
+        # path via /api/projections) write fresh fpl_projections /
+        # opta_projections / fanteam_projections rows. Previously these
+        # tables only updated when someone manually clicked "Run All
+        # Leagues" — silently broken on the daily schedule for months.
+        if fpl:
+            try:
+                fpl_file = os.path.join(data_folder_path, "PL Fantasy Players.xlsx")
+                pl_players = pd.read_excel(fpl_file)
+                pl_projections['Player'] = pl_projections['Player'].str.strip()
+                pl_projections['FPL Position'] = pl_projections['Player'].map(pl_players.set_index('Player')['FPL Position'])
+
+                # Compute extra stats per player (Clearances, Blocked Shots, Ball Recovery averages)
+                for _col in ['CBIT Hit Rate', 'CBIT Average', 'Clearances Average', 'Blocked Shots Average',
+                             'Ball Recovery Average', 'Tackles Won Average', 'Full Match Hit Rate']:
+                    if _col not in pl_projections.columns:
+                        pl_projections.loc[:, _col] = 0
+                for _player in pl_projections['Player'].unique():
+                    _team = pl_projections[pl_projections['Player'] == _player]['Team'].values[0]
+                    _pos = pl_projections[pl_projections['Player'] == _player]['FPL Position'].values[0]
+                    try:
+                        _cbit, _cbit_avg, _clr, _blk, _rec, _twon, _fmhr = get_extra_stats(
+                            _player, _pos, _team, teams, players, player_stats, fixtures_df, stats_types,
+                            weight=0.96, mins=50, games=50,
+                            competition_id=league_id, comp_teams=comp_teams)
+                        _mask = (pl_projections['Player'] == _player) & (pl_projections['Team'] == _team)
+                        pl_projections.loc[_mask, 'CBIT Hit Rate'] = _cbit
+                        pl_projections.loc[_mask, 'CBIT Average'] = _cbit_avg
+                        pl_projections.loc[_mask, 'Clearances Average'] = _clr
+                        pl_projections.loc[_mask, 'Blocked Shots Average'] = _blk
+                        pl_projections.loc[_mask, 'Ball Recovery Average'] = _rec
+                        pl_projections.loc[_mask, 'Tackles Won Average'] = _twon
+                        pl_projections.loc[_mask, 'Full Match Hit Rate'] = _fmhr
+                    except Exception:
+                        continue
+                logger.info(f"[{league}] FPL: extra stats computed for {len(pl_projections['Player'].unique())} players")
+
+                fpl_points_dict_gk = {'Goals': 10, 'Assists': 3, 'Clean Sheet': 4, 'Saves': 1, 'Penalties Saved': 5, 'Goals Conceded': -1, 'Yellow Card': -1}
+                fpl_points_dict_def = {'Goals': 6, 'Assists': 3, 'Clean Sheet': 4, 'Goals Conceded': -1, 'Yellow Card': -1}
+                fpl_points_dict_mid = {'Goals': 5, 'Assists': 3, 'Clean Sheet': 1, 'Yellow Card': -1}
+                fpl_points_dict_fwd = {'Goals': 4, 'Assists': 3, 'Yellow Card': -1}
+
+                fpl_bonus_dict_gk = {'Goals': 12, 'Winning Goal': 3, 'Assists': 9, 'Clean Sheet': 12, 'Saves': 2.66, 'Penalties Saved': 8, 'Key Passes': 1, 'Big Chances Created': 3, 'Successful Dribbles': 1, 'Clearance Offline': 9, 'Big Chances Missed': -3, 'Clearances, Blocks & Interceptions': 0.5, 'Recoveries': 0.33, 'Tackles Won': 2, 'Fouls Drawn': 1, 'Shots On Target': 2, 'Shots Off Target': -1, 'Offsides': -1, 'Fouls': -1, '70-79% Passes Completed': 2, '80-89% Passes Completed': 4, '90%+ Passes Completed': 6, 'Goals Conceded': -4, 'Yellow Card': -3}
+                fpl_bonus_dict_def = {'Goals': 12, 'Winning Goal': 3, 'Assists': 9, 'Clean Sheet': 12, 'Clearances, Blocks & Interceptions': 0.5, 'Recoveries': 0.33, 'Tackles Won': 2, 'Fouls Drawn': 1, 'Shots On Target': 2, 'Shots Off Target': -1, 'Offsides': -1, 'Fouls': -1, '70-79% Passes Completed': 2, '80-89% Passes Completed': 4, '90%+ Passes Completed': 6, 'Key Passes': 1, 'Big Chances Created': 3, 'Successful Dribbles': 1, 'Clearance Offline': 9, 'Big Chances Missed': -3, 'Goals Conceded': -4, 'Yellow Card': -3}
+                fpl_bonus_dict_mid = {'Goals': 18, 'Winning Goal': 3, 'Assists': 9, 'Clearances, Blocks & Interceptions': 0.5, 'Recoveries': 0.33, 'Tackles Won': 2, 'Fouls Drawn': 1, 'Shots On Target': 2, 'Shots Off Target': -1, 'Offsides': -1, 'Fouls': -1, '70-79% Passes Completed': 2, '80-89% Passes Completed': 4, '90%+ Passes Completed': 6, 'Key Passes': 1, 'Big Chances Created': 3, 'Successful Dribbles': 1, 'Clearance Offline': 9, 'Big Chances Missed': -3, 'Yellow Card': -3}
+                fpl_bonus_dict_fwd = {'Goals': 24, 'Winning Goal': 3, 'Assists': 9, 'Key Passes': 1, 'Big Chances Created': 3, 'Successful Dribbles': 1, 'Clearance Offline': 9, 'Big Chances Missed': -3, 'Clearances, Blocks & Interceptions': 0.5, 'Recoveries': 0.33, 'Tackles Won': 2, 'Fouls Drawn': 1, 'Shots On Target': 2, 'Shots Off Target': -1, 'Offsides': -1, 'Fouls': -1, '70-79% Passes Completed': 2, '80-89% Passes Completed': 4, '90%+ Passes Completed': 6, 'Yellow Card': -3}
+
+                for _col in ['CBIT Hit Rate', 'Clearances Average', 'Blocked Shots Average', 'Interceptions', 'Ball Recovery Average']:
+                    if _col not in pl_projections.columns:
+                        pl_projections.loc[:, _col] = 0
+                fpl_point_df = get_fpl_points(pl_projections, score_preds, fpl_points_dict_gk, fpl_points_dict_def, fpl_points_dict_mid, fpl_points_dict_fwd)
+                bps_df = bonus_points_score(pl_projections, score_preds, fpl_bonus_dict_gk, fpl_bonus_dict_def, fpl_bonus_dict_mid, fpl_bonus_dict_fwd)
+                bonus = get_bonus_points(bps_df, score_preds, expo_factor=0.1)
+
+                fpl_df = fpl_point_df.merge(bonus, on=['Player', 'Team', 'Opponent'], how='left', suffixes=('', '_Bonus'))
+                fpl_df['FPL Points'] = fpl_df['PTS'] + fpl_df['Bonus Points'].fillna(0)
+                fpl_df = fpl_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'FPL Points']].copy()
+                fpl_df = fpl_df.round(2)
+
+                logger.info(f"[{league}] Inserting FPL projections into DB ({len(fpl_df)} rows)...")
+                _t = time.time()
+                await insert_fpl_projections_async(fpl_df)
+                logger.info(f"[{league}] FPL projections inserted ({time.time()-_t:.1f}s)")
+            except Exception as e:
+                logger.warning(f"[{league}] FPL computation failed (skipping): {e}", exc_info=True)
+
+        # OPTA Points
+        if fpl:
+            try:
+                opta_points_dict = {
+                    'Goals': 10, 'Assists': 6, 'Shots Off': 2, 'Shots On Target': 4,
+                    'Passes': 0.2, 'Interceptions': 2, 'Tackles': 2, 'Blocked Shots': 2,
+                    'Total Crosses': 0.2, 'Yellow Cards': -2, 'Fouls': -1, 'Fouls Drawn': 1,
+                    'Saves': 5, 'Offsides': -1, 'Goals Conceded': -1, 'Penalties Saved': 5
+                }
+                for _col in ['Blocked Shots Average']:
+                    if _col not in pl_projections.columns:
+                        pl_projections.loc[:, _col] = 0
+                opta_df = get_opta_points(pl_projections, score_preds, opta_points_dict)
+                opta_df = opta_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'PTS', 'Floor PTS']].copy()
+                logger.info(f"[{league}] Inserting OPTA projections into DB ({len(opta_df)} rows)...")
+                _t = time.time()
+                await insert_opta_projections_async(opta_df)
+                logger.info(f"[{league}] OPTA projections inserted ({time.time()-_t:.1f}s)")
+            except Exception as e:
+                logger.warning(f"[{league}] OPTA computation failed (skipping): {e}", exc_info=True)
+
+        # FanTeam Points
+        if fpl:
+            try:
+                fanteam_points_dict_gk = {
+                    'Goals': 8, 'Assists': 3, 'Shots On Target': 1, 'Saves': 0.5,
+                    'Penalties Saved': 5, 'Clean Sheet': 4, 'Win': 0.3, 'Lose': -0.3,
+                    'Goals Conceded': -1, 'Yellow Card': -1
+                }
+                fanteam_points_dict_def = {
+                    'Goals': 6, 'Assists': 3, 'Shots On Target': 0.6, 'Clean Sheet': 4,
+                    'Win': 0.3, 'Lose': -0.3, 'Goals Conceded': -1, 'Yellow Card': -1
+                }
+                fanteam_points_dict_mid = {
+                    'Goals': 5, 'Assists': 3, 'Shots On Target': 0.4, 'Clean Sheet': 1,
+                    'Win': 0.3, 'Lose': -0.3, 'Yellow Card': -1, 'Full Match': 1
+                }
+                fanteam_points_dict_fwd = {
+                    'Goals': 4, 'Assists': 3, 'Shots On Target': 0.4,
+                    'Win': 0.3, 'Lose': -0.3, 'Yellow Card': -1, 'Full Match': 1
+                }
+                fanteam_mapping_file = os.path.join(data_folder_path, "Fanteam Mapping.xlsx")
+                fanteam_mapping = pd.read_excel(fanteam_mapping_file)
+                pl_projections['FanTeam Position'] = pl_projections['Player'].map(
+                    pl_players.set_index('Player')['FanTeam Position'])
+                pl_projections['FanTeam ID'] = pl_projections['player_id'].map(
+                    fanteam_mapping.set_index('SM Player ID')['FanTeam PlayerID'])
+                fanteam_data_file = os.path.join(data_folder_path, "Fanteam Data.csv")
+                if os.path.exists(fanteam_data_file):
+                    fanteam_csv = pd.read_csv(fanteam_data_file)
+                    pl_projections['Lineup'] = pl_projections['FanTeam ID'].map(fanteam_csv.set_index('PlayerID')['Lineup'])
+                    pl_projections['Price'] = pl_projections['FanTeam ID'].map(fanteam_csv.set_index('PlayerID')['Price'])
+                    ft_temp = pl_projections[pl_projections['Lineup'].isin(['expected', 'possible'])]
+                else:
+                    pl_projections['Price'] = 0
+                    ft_temp = pl_projections.copy()
+                ft_temp = ft_temp[ft_temp['FanTeam Position'].notna()].reset_index(drop=True)
+                fanteam_df = get_fanteam_points(ft_temp, score_preds, fanteam_points_dict_gk,
+                                                fanteam_points_dict_def, fanteam_points_dict_mid, fanteam_points_dict_fwd)
+                fanteam_df.dropna(inplace=True)
+                logger.info(f"[{league}] Inserting FanTeam projections into DB ({len(fanteam_df)} rows)...")
+                _t = time.time()
+                await insert_fanteam_projections_async(fanteam_df)
+                logger.info(f"[{league}] FanTeam projections inserted ({time.time()-_t:.1f}s)")
+            except Exception as e:
+                logger.warning(f"[{league}] FanTeam computation failed (skipping): {e}", exc_info=True)
+
         # ## **Player Stat Probabilities**
         #
         # Using Poisson Distribution to get the likelihood of players acheiving certain statistics.
