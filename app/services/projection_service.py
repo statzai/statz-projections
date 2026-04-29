@@ -47,6 +47,36 @@ class ProjectionService:
     _current_source = None
 
     @staticmethod
+    def _filter_upcoming_fixtures(league: str, fixtures, date_from, date_to):
+        """Slice fixtures to the projection scope for `league`.
+
+        Premier League: project 6 upcoming gameweeks (gameweek_id-based).
+        Aligns with the FPL gameweek concept and feeds the FPL planning
+        tools that want fixture/team/player projections out to ~5 weeks
+        for transfer + chip strategy. gameweek_id survives postponements
+        and double/blank gameweeks better than round_id or date-window.
+
+        All other leagues: stay on the date_from..date_to window
+        (typically today + PROJECTION_DAYS=5). gameweek_id isn't reliably
+        populated outside PL, so we don't risk an empty result.
+
+        If PL upcoming fixtures don't have gameweek_id populated (rare —
+        e.g. a fresh import that hasn't backfilled yet), falls back to
+        the date window with a warning.
+        """
+        fixtures = fixtures.copy()
+        fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
+        if league == 'Premier League':
+            future = fixtures[fixtures['kickoff_datetime'] >= pd.to_datetime('today')]
+            if not future.empty and 'gameweek_id' in future.columns and pd.notna(future['gameweek_id'].min()):
+                min_gw = future['gameweek_id'].min()
+                next_fix = future[future['gameweek_id'] < min_gw + 6]
+                logger.info(f"[{league}] gameweek-based filter: GW {int(min_gw)}–{int(min_gw)+5} ({len(next_fix)} fixtures)")
+                return next_fix
+            logger.warning(f"[{league}] gameweek_id missing/null — falling back to date-window")
+        return fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
+
+    @staticmethod
     async def _resolve_league_id_db(league_name: str) -> int:
         """Direct DB lookup of competition_id by name.
 
@@ -889,8 +919,8 @@ class ProjectionService:
 
         # In[18]:
 
+        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        next_fix = fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
         if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
             next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
             logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')
@@ -1745,8 +1775,8 @@ class ProjectionService:
 
         # In[18]:
 
+        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        next_fix = fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
         if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
             next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
             logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')
@@ -1935,8 +1965,8 @@ class ProjectionService:
 
         # In[18]:
 
+        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        next_fix = fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
         if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
             next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
             logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')
@@ -2269,8 +2299,8 @@ class ProjectionService:
 
         # In[18]:
 
+        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        next_fix = fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
         if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
             next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
             logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')
@@ -2730,8 +2760,8 @@ class ProjectionService:
 
         # In[18]:
 
+        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        next_fix = fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
         if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
             next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
             logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')
@@ -3372,8 +3402,8 @@ class ProjectionService:
 
         # In[18]:
 
+        next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-        next_fix = fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
         if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
             next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
             logger.info(f'[{league}] Filtered to {len(next_fix)} of {len(fixtures[(fixtures["kickoff_datetime"] >= date_from) & (fixtures["kickoff_datetime"] <= date_to)])} fixtures')

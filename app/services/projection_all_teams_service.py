@@ -876,8 +876,8 @@ class ProjectionAllTeams:
 
                 # In[18]:
 
+                next_fix = ProjectionService._filter_upcoming_fixtures(league, fixtures, date_from, date_to)
                 fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
-                next_fix = fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
                 next_fix = next_fix[
                     ['id', 'kickoff_datetime', 'name', 'home_team_id', 'away_team_id', 'bet365_home_odds_decimal',
                      'bet365_draw_odds_decimal', 'bet365_away_odds_decimal']]
