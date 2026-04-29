@@ -12,6 +12,7 @@ from app.repository.fpl_repo import insert_fpl_projections_async
 from app.repository.opta_repo import insert_opta_projections_async
 from app.repository.fanteam_repo import insert_fanteam_projections_async
 from app.repository.draftkings_repo import insert_draftkings_projections_async
+from app.repository.dream11_repo import insert_dream11_projections_async
 from app.services.data_cache import DataCache
 from app.config import Config
 from app.data_loader import capture_shadow_snapshot, LeagueDataLoader
@@ -1755,6 +1756,51 @@ class ProjectionService:
                 logger.info(f"[{league}] DraftKings projections inserted ({time.time()-_t:.1f}s)")
             except Exception as e:
                 logger.warning(f"[{league}] DraftKings computation failed (skipping): {e}", exc_info=True)
+
+        # Dream11 Points
+        # Same approach as DraftKings: 6-GW horizon, FPL Position reused as
+        # Dream11 Position (GK/DEF/MID/FWD taxonomy is identical).
+        if fpl:
+            try:
+                dream11_points_dict_gk = {
+                    'Goals': 60, 'Assists': 20, 'Key Passes': 3, 'Shots On Target': 6,
+                    'Successful Passes': 0.2, 'Tackles Won': 4, 'Interceptions': 4,
+                    'Clean Sheet': 20, 'Saves': 6, 'Penalties Saved': 50,
+                    'Goals Conceded': -2, 'Yellow Card': -4,
+                }
+                dream11_points_dict_def = {
+                    'Goals': 60, 'Assists': 20, 'Key Passes': 3, 'Shots On Target': 6,
+                    'Successful Passes': 0.2, 'Tackles Won': 4, 'Interceptions': 4,
+                    'Clean Sheet': 20, 'Goals Conceded': -2, 'Yellow Card': -4,
+                }
+                dream11_points_dict_mid = {
+                    'Goals': 50, 'Assists': 20, 'Key Passes': 3, 'Shots On Target': 6,
+                    'Successful Passes': 0.2, 'Tackles Won': 4, 'Interceptions': 4,
+                    'Yellow Card': -4,
+                }
+                dream11_points_dict_fwd = {
+                    'Goals': 40, 'Assists': 20, 'Key Passes': 3, 'Shots On Target': 6,
+                    'Successful Passes': 0.2, 'Tackles Won': 4, 'Interceptions': 4,
+                    'Yellow Card': -4,
+                }
+                pl_projections['Dream11 Position'] = pl_projections['FPL Position']
+                d11_temp = pl_projections[pl_projections['Dream11 Position'].notna()].reset_index(drop=True)
+                d11_df = get_dream11_points(d11_temp, score_preds, dream11_points_dict_gk,
+                                            dream11_points_dict_def, dream11_points_dict_mid,
+                                            dream11_points_dict_fwd)
+                d11_df = d11_df.dropna(subset=['player_id', 'fixture_id'])
+                _fix_idx_d11 = fixtures.set_index('id')
+                _home_id_d11 = d11_df['fixture_id'].map(_fix_idx_d11['home_team_id'])
+                _away_id_d11 = d11_df['fixture_id'].map(_fix_idx_d11['away_team_id'])
+                d11_df['Gameweek'] = d11_df['fixture_id'].map(_fix_idx_d11['gameweek_id'])
+                d11_df['team_id'] = np.where(d11_df['Venue'] == 'H', _home_id_d11, _away_id_d11)
+                d11_df['opponent_id'] = np.where(d11_df['Venue'] == 'H', _away_id_d11, _home_id_d11)
+                logger.info(f"[{league}] Inserting Dream11 projections into DB ({len(d11_df)} rows)...")
+                _t = time.time()
+                await insert_dream11_projections_async(d11_df)
+                logger.info(f"[{league}] Dream11 projections inserted ({time.time()-_t:.1f}s)")
+            except Exception as e:
+                logger.warning(f"[{league}] Dream11 computation failed (skipping): {e}", exc_info=True)
 
         # ## **Player Stat Probabilities**
         #
