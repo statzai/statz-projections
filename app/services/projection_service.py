@@ -1641,6 +1641,13 @@ class ProjectionService:
                 logger.warning(f"[{league}] OPTA computation failed (skipping): {e}", exc_info=True)
 
         # FanTeam Points
+        # Same approach as FPL: 6-GW horizon, every PL player in scope.
+        # FanTeam uses identical GK/DEF/MID/FWD groupings as FPL, so we
+        # reuse the FPL Position from fpl_player_mappings (already set on
+        # pl_projections by the FPL block above) — no separate xlsx /
+        # mapping table needed. Price + Lineup CSV import dropped per
+        # 2026-04-29: we project every player rather than gating on
+        # FanTeam's "expected/possible" lineup status.
         if fpl:
             try:
                 fanteam_points_dict_gk = {
@@ -1660,25 +1667,24 @@ class ProjectionService:
                     'Goals': 4, 'Assists': 3, 'Shots On Target': 0.4,
                     'Win': 0.3, 'Lose': -0.3, 'Yellow Card': -1, 'Full Match': 1
                 }
-                fanteam_mapping_file = os.path.join(data_folder_path, "Fanteam Mapping.xlsx")
-                fanteam_mapping = pd.read_excel(fanteam_mapping_file)
-                pl_projections['FanTeam Position'] = pl_projections['Player'].map(
-                    pl_players.set_index('Player')['FanTeam Position'])
-                pl_projections['FanTeam ID'] = pl_projections['player_id'].map(
-                    fanteam_mapping.set_index('SM Player ID')['FanTeam PlayerID'])
-                fanteam_data_file = os.path.join(data_folder_path, "Fanteam Data.csv")
-                if os.path.exists(fanteam_data_file):
-                    fanteam_csv = pd.read_csv(fanteam_data_file)
-                    pl_projections['Lineup'] = pl_projections['FanTeam ID'].map(fanteam_csv.set_index('PlayerID')['Lineup'])
-                    pl_projections['Price'] = pl_projections['FanTeam ID'].map(fanteam_csv.set_index('PlayerID')['Price'])
-                    ft_temp = pl_projections[pl_projections['Lineup'].isin(['expected', 'possible'])]
-                else:
-                    pl_projections['Price'] = 0
-                    ft_temp = pl_projections.copy()
-                ft_temp = ft_temp[ft_temp['FanTeam Position'].notna()].reset_index(drop=True)
+                # Reuse FPL Position (already mapped from fpl_player_mappings
+                # in the FPL block above). FanTeam Position column kept for
+                # backward-compat with get_fanteam_points internals.
+                pl_projections['FanTeam Position'] = pl_projections['FPL Position']
+                ft_temp = pl_projections[pl_projections['FanTeam Position'].notna()].reset_index(drop=True)
                 fanteam_df = get_fanteam_points(ft_temp, score_preds, fanteam_points_dict_gk,
                                                 fanteam_points_dict_def, fanteam_points_dict_mid, fanteam_points_dict_fwd)
-                fanteam_df.dropna(inplace=True)
+                # Defensive: drop only rows missing the join keys (player_id /
+                # fixture_id). Wholesale dropna() killed everything once we
+                # stopped sourcing Price from the CSV (NaN price → row drop).
+                fanteam_df = fanteam_df.dropna(subset=['player_id', 'fixture_id'])
+                # Stamp gameweek_id + team_id + opponent_id (parity with FPL).
+                _fix_idx_ft = fixtures.set_index('id')
+                _home_id_ft = fanteam_df['fixture_id'].map(_fix_idx_ft['home_team_id'])
+                _away_id_ft = fanteam_df['fixture_id'].map(_fix_idx_ft['away_team_id'])
+                fanteam_df['Gameweek'] = fanteam_df['fixture_id'].map(_fix_idx_ft['gameweek_id'])
+                fanteam_df['team_id'] = np.where(fanteam_df['Venue'] == 'H', _home_id_ft, _away_id_ft)
+                fanteam_df['opponent_id'] = np.where(fanteam_df['Venue'] == 'H', _away_id_ft, _home_id_ft)
                 logger.info(f"[{league}] Inserting FanTeam projections into DB ({len(fanteam_df)} rows)...")
                 _t = time.time()
                 await insert_fanteam_projections_async(fanteam_df)
