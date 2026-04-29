@@ -1539,8 +1539,12 @@ class ProjectionAllTeams:
                         fpl_df = fpl_point_df.merge(bonus, on=['Player', 'Team', 'Opponent'], how='left', suffixes=('', '_Bonus'))
                         fpl_df['FPL Points'] = fpl_df['PTS'] + fpl_df['Bonus Points'].fillna(0)
                         fpl_df = fpl_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'FPL Points']].copy()
-                        _gw_lookup = fixtures.set_index('id')['gameweek_id']
-                        fpl_df['Gameweek'] = fpl_df['fixture_id'].map(_gw_lookup)
+                        _fix_idx = fixtures.set_index('id')
+                        _home_id = fpl_df['fixture_id'].map(_fix_idx['home_team_id'])
+                        _away_id = fpl_df['fixture_id'].map(_fix_idx['away_team_id'])
+                        fpl_df['Gameweek'] = fpl_df['fixture_id'].map(_fix_idx['gameweek_id'])
+                        fpl_df['team_id'] = np.where(fpl_df['Venue'] == 'H', _home_id, _away_id)
+                        fpl_df['opponent_id'] = np.where(fpl_df['Venue'] == 'H', _away_id, _home_id)
                         fpl_df = fpl_df.round(2)
 
                         logger.info(f"[{league}] Inserting FPL projections into DB ({len(fpl_df)} rows)...")
