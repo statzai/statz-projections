@@ -1871,7 +1871,7 @@ def get_fanteam_points(pl_projections, score_preds, fanteam_points_dict_gk, fant
     import pandas as pd
     from scipy.stats import poisson
     fanteam_points_df = {'fixture_id': [], 'kickoff_datetime': [], 'player_id': [], 'Player': [], 'Position': [],
-                         'Team': [], 'Opponent': [], 'Venue': [], 'Price': [], 'FanTeam Points': [], 'Value': []}
+                         'Team': [], 'Opponent': [], 'Venue': [], 'FanTeam Points': []}
     fanteam_points_df['fixture_id'] = pl_projections['fixture_id'].tolist()
     fanteam_points_df['kickoff_datetime'] = pl_projections['kickoff_datetime'].tolist()
     fanteam_points_df['player_id'] = pl_projections['player_id'].tolist()
@@ -1880,7 +1880,6 @@ def get_fanteam_points(pl_projections, score_preds, fanteam_points_dict_gk, fant
     fanteam_points_df['Team'] = pl_projections['Team'].tolist()
     fanteam_points_df['Opponent'] = pl_projections['Opponent'].tolist()
     fanteam_points_df['Venue'] = pl_projections['Venue'].tolist()
-    fanteam_points_df['Price'] = pl_projections['Price'].tolist()
     for i in range(len(pl_projections)):
         fixture_id = pl_projections['fixture_id'][i]
         fix_score_pred = score_preds[score_preds['id'] == fixture_id]
@@ -1945,11 +1944,6 @@ def get_fanteam_points(pl_projections, score_preds, fanteam_points_dict_gk, fant
             lose_points = (float(lose_perc.replace('%', '')) / 100) * fanteam_points_dict['Lose']
         fanteam_points = goal_points + assists + shots_on_target + yellow_cards + saves + clean_sheet_points + goal_conceded_points + pen_save_points + win_points + lose_points + full_match_points + 2
         fanteam_points_df['FanTeam Points'].append(fanteam_points)
-        if pl_projections['Price'][i] > 0:
-            value = (fanteam_points / pl_projections['Price'][i]).round(2)
-        else:
-            value = 0
-        fanteam_points_df['Value'].append(value)
     fanteam_points_df = pd.DataFrame(fanteam_points_df)
     fanteam_points_df.sort_values(by='FanTeam Points', ascending=False, inplace=True)
     fanteam_points_df['FanTeam Points'] = fanteam_points_df['FanTeam Points'].round(2)
