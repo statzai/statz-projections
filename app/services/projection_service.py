@@ -11,6 +11,7 @@ from app.repository.player_repo import insert_player_async, get_players_from_lea
 from app.repository.fpl_repo import insert_fpl_projections_async
 from app.repository.opta_repo import insert_opta_projections_async
 from app.repository.fanteam_repo import insert_fanteam_projections_async
+from app.repository.draftkings_repo import insert_draftkings_projections_async
 from app.services.data_cache import DataCache
 from app.config import Config
 from app.data_loader import capture_shadow_snapshot, LeagueDataLoader
@@ -1698,6 +1699,62 @@ class ProjectionService:
                 logger.info(f"[{league}] FanTeam projections inserted ({time.time()-_t:.1f}s)")
             except Exception as e:
                 logger.warning(f"[{league}] FanTeam computation failed (skipping): {e}", exc_info=True)
+
+        # DraftKings Points
+        # Same approach as FPL/FanTeam: 6-GW horizon, every PL player with
+        # an FPL position. DraftKings positions (GK/DEF/MID/FWD) match FPL
+        # exactly so we reuse FPL Position from fpl_player_mappings — no
+        # separate mapping needed. Drops the legacy Draftkings Position
+        # column from PL Fantasy Players.xlsx.
+        if fpl:
+            try:
+                draftkings_points_dict_gk = {
+                    'Goals': 10, 'Assists': 6, 'Shots Total': 1, 'Shots On Target': 1,
+                    'Total Crosses': 0.7, 'Key Passes': 1, 'Successful Passes': 0.02,
+                    'Fouls Drawn': 1, 'Fouls Committed': -0.5, 'Tackles Won': 1,
+                    'Saves': 2, 'Penalties Saved': 5, 'Clean Sheet': 5, 'Win': 5,
+                    'Goals Conceded': -2, 'Yellow Card': -1.5,
+                }
+                draftkings_points_dict_def = {
+                    'Goals': 10, 'Assists': 6, 'Shots Total': 1, 'Shots On Target': 1,
+                    'Total Crosses': 0.7, 'Key Passes': 1, 'Successful Passes': 0.02,
+                    'Fouls Drawn': 1, 'Fouls Committed': -0.5, 'Tackles Won': 1,
+                    'Interceptions': 0.5, 'Clean Sheet': 3, 'Yellow Card': -1.5,
+                }
+                draftkings_points_dict_mid = {
+                    'Goals': 10, 'Assists': 6, 'Shots Total': 1, 'Shots On Target': 1,
+                    'Total Crosses': 0.7, 'Key Passes': 1, 'Successful Passes': 0.02,
+                    'Fouls Drawn': 1, 'Fouls Committed': -0.5, 'Tackles Won': 1,
+                    'Interceptions': 0.5, 'Yellow Card': -1.5,
+                }
+                draftkings_points_dict_fwd = {
+                    'Goals': 10, 'Assists': 6, 'Shots Total': 1, 'Shots On Target': 1,
+                    'Total Crosses': 0.7, 'Key Passes': 1, 'Successful Passes': 0.02,
+                    'Fouls Drawn': 1, 'Fouls Committed': -0.5, 'Tackles Won': 1,
+                    'Interceptions': 0.5, 'Yellow Card': -1.5,
+                }
+                # get_draftkings_points reads pl_projections['Draftkings Position'].
+                # Reuse FPL Position (already mapped from fpl_player_mappings
+                # in the FPL block above).
+                pl_projections['Draftkings Position'] = pl_projections['FPL Position']
+                dk_temp = pl_projections[pl_projections['Draftkings Position'].notna()].reset_index(drop=True)
+                dk_df = get_draftkings_points(dk_temp, score_preds, draftkings_points_dict_gk,
+                                              draftkings_points_dict_def, draftkings_points_dict_mid,
+                                              draftkings_points_dict_fwd)
+                dk_df = dk_df.dropna(subset=['player_id', 'fixture_id'])
+                # Stamp gameweek_id + team_id + opponent_id (parity with FPL/FanTeam).
+                _fix_idx_dk = fixtures.set_index('id')
+                _home_id_dk = dk_df['fixture_id'].map(_fix_idx_dk['home_team_id'])
+                _away_id_dk = dk_df['fixture_id'].map(_fix_idx_dk['away_team_id'])
+                dk_df['Gameweek'] = dk_df['fixture_id'].map(_fix_idx_dk['gameweek_id'])
+                dk_df['team_id'] = np.where(dk_df['Venue'] == 'H', _home_id_dk, _away_id_dk)
+                dk_df['opponent_id'] = np.where(dk_df['Venue'] == 'H', _away_id_dk, _home_id_dk)
+                logger.info(f"[{league}] Inserting DraftKings projections into DB ({len(dk_df)} rows)...")
+                _t = time.time()
+                await insert_draftkings_projections_async(dk_df)
+                logger.info(f"[{league}] DraftKings projections inserted ({time.time()-_t:.1f}s)")
+            except Exception as e:
+                logger.warning(f"[{league}] DraftKings computation failed (skipping): {e}", exc_info=True)
 
         # ## **Player Stat Probabilities**
         #
