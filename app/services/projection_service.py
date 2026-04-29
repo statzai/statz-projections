@@ -1633,6 +1633,13 @@ class ProjectionService:
                         pl_projections.loc[:, _col] = 0
                 opta_df = get_opta_points(pl_projections, score_preds, opta_points_dict)
                 opta_df = opta_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'PTS', 'Floor PTS']].copy()
+                # Stamp gameweek_id + team_id + opponent_id (parity with FPL/FanTeam).
+                _fix_idx_op = fixtures.set_index('id')
+                _home_id_op = opta_df['fixture_id'].map(_fix_idx_op['home_team_id'])
+                _away_id_op = opta_df['fixture_id'].map(_fix_idx_op['away_team_id'])
+                opta_df['Gameweek'] = opta_df['fixture_id'].map(_fix_idx_op['gameweek_id'])
+                opta_df['team_id'] = np.where(opta_df['Venue'] == 'H', _home_id_op, _away_id_op)
+                opta_df['opponent_id'] = np.where(opta_df['Venue'] == 'H', _away_id_op, _home_id_op)
                 logger.info(f"[{league}] Inserting OPTA projections into DB ({len(opta_df)} rows)...")
                 _t = time.time()
                 await insert_opta_projections_async(opta_df)
