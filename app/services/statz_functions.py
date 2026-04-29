@@ -318,6 +318,14 @@ def get_market_value(league_dashed, div, country_code):
     for y in range(len(list)):
         team = list[y].text.strip()
         teams.append(team)
+    if not teams:
+        # Empty scrape — Transfermarkt rate-limit, page change, or wrong URL.
+        # Raise a descriptive error so the MV block's try/except logs WHICH
+        # league failed instead of a cryptic "Length mismatch" from the
+        # downstream df.columns = ['Team'] assignment on a 0-col DataFrame.
+        raise RuntimeError(
+            f"get_market_value: Transfermarkt scrape returned 0 teams for {league_dashed} (HTTP {response.status_code}, url={url})"
+        )
     df = pd.DataFrame(teams)
     df.columns = ['Team']
     mvalue = []

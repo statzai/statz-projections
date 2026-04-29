@@ -486,7 +486,12 @@ class EuroCompProjectionService:
         team_projections = get_team_round_predictions(
             next_fix, stat_list, fixtures_df, team_stats, teams, stats_types, models,
             ratings=ratings, comp_id=league_ids, games=50,
-            comp_teams=comp_teams[comp_teams['competition_id'] == comp_id],
+            # comp_teams must cover all 8 domestic leagues (league_ids), not
+            # just the euro comp itself — downstream get_team_id scopes via
+            # .isin(league_ids) and would miss every PSG/Bayern/Atletico/etc
+            # if comp_teams was filtered to comp_id alone (~880 fallback
+            # warnings per nightly run pre-fix).
+            comp_teams=comp_teams[comp_teams['competition_id'].isin(league_ids + [comp_id])],
         )
 
         team_projections.drop(
