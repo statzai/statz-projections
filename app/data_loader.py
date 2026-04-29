@@ -121,6 +121,7 @@ class LeagueDataLoader:
         self.promoted_team_ratings: Optional[pd.DataFrame] = None
         self.transfermarkt_team_mappings: Optional[pd.DataFrame] = None
         self.team_ratings: Optional[pd.DataFrame] = None
+        self.fpl_player_mappings: Optional[pd.DataFrame] = None
 
         self._loaded = False
 
@@ -506,6 +507,21 @@ class LeagueDataLoader:
         # b365_odds — DataCache keeps it as an empty frame; nothing critical
         # reads it directly. Same here for parity.
         self.b365_odds = pd.DataFrame()
+
+        # FPL player mappings — Sportmonks player_id → FPL element data,
+        # source of truth for FPL Position (1=GK, 2=DEF, 3=MID, 4=FWD via
+        # fpl_element_type). Used by the FPL projection block in
+        # projection_service.py / projection_all_teams_service.py.
+        # Replaces the legacy `PL Fantasy Players.xlsx` lookup which
+        # joined by Player NAME (fragile) — this joins by player_id.
+        self.fpl_player_mappings = await self._sql_to_df(
+            conn,
+            """
+            SELECT player_id, fpl_id, fpl_code, fpl_element_type,
+                   fpl_first_name, fpl_second_name, fpl_web_name
+            FROM fpl_player_mappings
+            """,
+        )
 
     def _load_local_files(self) -> None:
         """League Weightings.xlsx is the only non-DB reference. Loaded if

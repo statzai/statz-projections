@@ -12,11 +12,29 @@ async def insert_fpl_projections_async(data_list):
     df = data_list.copy()
     df = df.rename(columns={
         "FPL Points": "fpl_points",
-        "Venue": "venue"
+        "Venue": "venue",
+        "Gameweek": "gameweek_id",
     })
 
     if hasattr(df['kickoff_datetime'].iloc[0], 'strftime'):
         df['kickoff_datetime'] = df['kickoff_datetime'].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    # gameweek_id is optional — kept nullable in the DB so older fpl_projections
+    # rows without a GW survive. Coerce NaN/None safely.
+    has_gw = "gameweek_id" in df.columns
+
+    def _gw_or_none(v):
+        if v is None:
+            return None
+        try:
+            if v != v:  # NaN
+                return None
+        except Exception:
+            pass
+        try:
+            return int(v)
+        except Exception:
+            return None
 
     values = [
         (
@@ -25,18 +43,20 @@ async def insert_fpl_projections_async(data_list):
             row.get("kickoff_datetime"),
             row.get("venue"),
             row.get("fpl_points"),
+            _gw_or_none(row.get("gameweek_id")) if has_gw else None,
         )
         for _, row in df.iterrows()
     ]
 
     sql = """
     INSERT INTO fpl_projections (
-        fixture_id, player_id, kickoff_datetime, venue, fpl_points,
+        fixture_id, player_id, kickoff_datetime, venue, fpl_points, gameweek_id,
         created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+    ) VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW())
     AS new
     ON DUPLICATE KEY UPDATE
         fpl_points = new.fpl_points,
+        gameweek_id = new.gameweek_id,
         updated_at = NOW()
     """
     return await execute_chunked(sql, values, label="[fpl_projections]")

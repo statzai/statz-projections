@@ -1477,10 +1477,22 @@ class ProjectionAllTeams:
                 # ## **FPL Points** (Premier League only)
                 if fpl:
                     try:
+                        # FPL position from fpl_player_mappings (joined by
+                        # player_id) — see projection_service.py for the
+                        # rationale. xlsx still loaded for FanTeam below.
                         fpl_file = os.path.join(data_folder_path, "PL Fantasy Players.xlsx")
                         pl_players = pd.read_excel(fpl_file)
                         pl_projections['Player'] = pl_projections['Player'].str.strip()
-                        pl_projections['FPL Position'] = pl_projections['Player'].map(pl_players.set_index('Player')['FPL Position'])
+                        fpl_mappings = ProjectionService._current_source.fpl_player_mappings
+                        if fpl_mappings is None or fpl_mappings.empty:
+                            raise RuntimeError("fpl_player_mappings reference table empty — check loader")
+                        _pos_by_pid = (
+                            fpl_mappings
+                            .drop_duplicates(subset=['player_id'])
+                            .set_index('player_id')['fpl_element_type']
+                            .map({1: 'GK', 2: 'DEF', 3: 'MID', 4: 'FWD'})
+                        )
+                        pl_projections['FPL Position'] = pl_projections['player_id'].map(_pos_by_pid)
 
                         # Compute extra stats per player (Clearances, Blocked Shots, Ball Recovery averages)
                         for _col in ['CBIT Hit Rate', 'CBIT Average', 'Clearances Average', 'Blocked Shots Average',
@@ -1527,6 +1539,8 @@ class ProjectionAllTeams:
                         fpl_df = fpl_point_df.merge(bonus, on=['Player', 'Team', 'Opponent'], how='left', suffixes=('', '_Bonus'))
                         fpl_df['FPL Points'] = fpl_df['PTS'] + fpl_df['Bonus Points'].fillna(0)
                         fpl_df = fpl_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'FPL Points']].copy()
+                        _gw_lookup = fixtures.set_index('id')['gameweek_id']
+                        fpl_df['Gameweek'] = fpl_df['fixture_id'].map(_gw_lookup)
                         fpl_df = fpl_df.round(2)
 
                         logger.info(f"[{league}] Inserting FPL projections into DB ({len(fpl_df)} rows)...")
