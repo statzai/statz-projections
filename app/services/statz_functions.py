@@ -392,6 +392,15 @@ def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_
         matches['Weighted Goals Against'] = matches['Adjusted Goals Against'] * matches['Game Weight']
         attack_rating = matches['Weighted Goals'].sum() / matches['Game Weight'].sum()
         defense_rating = matches['Weighted Goals Against'].sum() / matches['Game Weight'].sum()
+        # TEMP DIAG (2026-04-30): dump Brugge's matches df to find rating inflation source.
+        if team == 'Club Brugge':
+            import logging as _l
+            _l.getLogger("projection").info(
+                f"[get_ratings] Club Brugge matches df ({len(matches)} rows):\n" + matches.to_string(max_rows=60)
+            )
+            _l.getLogger("projection").info(
+                f"[get_ratings] Club Brugge SUMS: Weighted Goals={matches['Weighted Goals'].sum():.3f}, Game Weight={matches['Game Weight'].sum():.3f}, attack_rating={attack_rating:.3f}"
+            )
         team_ratings.append([team, attack_rating, defense_rating])
     team_ratings = pd.DataFrame(team_ratings, columns=['Team', 'Attack', 'Defense'])
     return team_ratings[['Team', 'Attack', 'Defense']]
