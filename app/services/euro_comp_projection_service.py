@@ -134,9 +134,13 @@ class EuroCompProjectionService:
         # (backfilled 2026-04-22). Built into the same shape the legacy xlsx
         # had (League / Coefficient Index columns) so downstream lookups work
         # unchanged. xlsx is no longer read.
+        # Cast to float: aiomysql reads MySQL DECIMAL → decimal.Decimal,
+        # which doesn't divide with float (downstream `team_projections /
+        # (diff + 1)` raises TypeError). xlsx path got float for free.
         uefa_coef = comps[['name', 'uefa_coefficient_index']].rename(
             columns={'name': 'League', 'uefa_coefficient_index': 'Coefficient Index'}
         ).dropna(subset=['Coefficient Index']).reset_index(drop=True)
+        uefa_coef['Coefficient Index'] = pd.to_numeric(uefa_coef['Coefficient Index'], errors='coerce')
 
         comp_id = get_league_id(league, comps)
         league_ids = [get_league_id(l, comps) for l in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.keys()]
