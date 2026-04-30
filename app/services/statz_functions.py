@@ -43,6 +43,35 @@ TEAM_NAME_FIXES = {
 # See nan_guard_share_inflation.md memory for full context.
 _NAN_GUARD_HITS: list = []
 
+# Per-run dedup set for stat-coverage warnings (stat, scope) pairs.
+# Fires when filter-by-stat-name returns 0 rows but parent df is populated —
+# strong signal that the loader's TEAM_STAT_NAMES / PLAYER_STAT_NAMES list
+# in projection_stats.py is missing the stat. Without that entry, the share
+# calc silently returns 0 across every player. Reset alongside NaN-guard.
+_STAT_COVERAGE_WARNINGS: set = set()
+
+
+def _warn_stat_coverage_miss(stat, scope):
+    """Emit at most one WARNING per (stat, scope) per run.
+
+    Caught patterns this protects against:
+      * 'Assists' / 'Key Passes' missing from TEAM_STAT_NAMES (caught after
+        regression — Sep-style would be 587 NaN-guard hits before the warning).
+      * 'Fouls Drawn' missing from PLAYER_STAT_NAMES (caught after silent
+        all-zero-projection regression — every player projecting 0).
+    """
+    key = (stat, scope)
+    if key in _STAT_COVERAGE_WARNINGS:
+        return
+    _STAT_COVERAGE_WARNINGS.add(key)
+    import logging as _logging
+    list_name = "PLAYER_STAT_NAMES" if scope == "player" else "TEAM_STAT_NAMES"
+    _logging.getLogger("projection").warning(
+        f"[stat-coverage] '{stat}' has 0 rows in loaded {scope}_stats — "
+        f"likely missing from {list_name} in app/services/projection_stats.py. "
+        f"Without it, '{stat}' projections silently zero out across every player."
+    )
+
 
 def _log_nan_guard_summary(competition_id, comps, teams):
     """Emit a single WARNING line summarising NaN-guard hits for the run.
@@ -216,13 +245,17 @@ def get_team_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='
     team_id = get_team_id(team, teams, comp_id, comp_teams)
     fixtures = get_team_fixtures(team, fixtures, teams, comp_id=comp_id,
                                  season_id=season_id, comp_teams=comp_teams)
+    _lookup_stat = 'Fouls' if stat == 'Fouls Drawn' else stat
+    _stat_id = get_stat_id(_lookup_stat, stats_types)
+    if not team_stats.empty and team_stats[team_stats['stats_type_id'] == _stat_id].empty:
+        _warn_stat_coverage_miss(_lookup_stat, "team")
     if stat == 'Fouls Drawn':
         team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
-                                (team_stats['stats_type_id'] == get_stat_id('Fouls', stats_types)) &
+                                (team_stats['stats_type_id'] == _stat_id) &
                                 (team_stats['team_id'] != team_id)].reset_index(drop=True)
     else:
         team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
-                                (team_stats['stats_type_id'] == get_stat_id(stat, stats_types)) &
+                                (team_stats['stats_type_id'] == _stat_id) &
                                 (team_stats['team_id'] == team_id)].reset_index(drop=True)
     team_stats = team_stats[['fixture_id', 'value', 'team_id']]
     team_stats = team_stats.merge(fixtures, left_on='fixture_id', right_on='id',
@@ -254,13 +287,17 @@ def get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Y
     team_id = get_team_id(team, teams, comp_id, comp_teams)
     fixtures = get_team_fixtures(team, fixtures, teams, comp_id=comp_id,
                                  season_id=season_id, comp_teams=comp_teams)
+    _lookup_stat = 'Fouls' if stat == 'Fouls Drawn' else stat
+    _stat_id = get_stat_id(_lookup_stat, stats_types)
+    if not team_stats.empty and team_stats[team_stats['stats_type_id'] == _stat_id].empty:
+        _warn_stat_coverage_miss(_lookup_stat, "team")
     if stat == 'Fouls Drawn':
         team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
-                                (team_stats['stats_type_id'] == get_stat_id('Fouls', stats_types)) &
+                                (team_stats['stats_type_id'] == _stat_id) &
                                 (team_stats['team_id'] == team_id)].reset_index(drop=True)
     else:
         team_stats = team_stats[team_stats['fixture_id'].isin((fixtures).id.unique()) &
-                                (team_stats['stats_type_id'] == get_stat_id(stat, stats_types)) &
+                                (team_stats['stats_type_id'] == _stat_id) &
                                 (team_stats['team_id'] != team_id)].reset_index(drop=True)
     team_stats = team_stats[['fixture_id', 'value', 'team_id']]
     team_stats = team_stats.merge(fixtures, left_on='fixture_id', right_on='id',
@@ -1224,7 +1261,12 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
         ]
         player_minutes = player_minutes.drop(columns=['sub_type']).reset_index(drop=True)
 
+    _ps_pre = player_stats
     player_stats = player_stats[player_stats['name'] == stat]
+    if player_stats.empty and not _ps_pre.empty:
+        # Player has data for OTHER stats but not this one — loader filter
+        # excluded it. See projection_stats.py PLAYER_STAT_NAMES.
+        _warn_stat_coverage_miss(stat, "player")
     player_stats.drop(columns=['team_id'], inplace=True)
     player_stats = player_minutes.merge(player_stats, left_on='fixture_id', right_on='fixture_id', how='left')
     player_stats['value'].fillna(0, inplace=True)
@@ -1284,8 +1326,13 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
     else:
         _lookup_stat_name = 'Successful Passes' if stat == 'Accurate Passes' else stat
         _target_stat_id = get_stat_id(_lookup_stat_name, stats_types)
+        _target_team_rows = team_df[team_df['stats_type_id'] == _target_stat_id]
+        if _target_team_rows.empty and not team_df.empty:
+            # Loaded team_df has rows for OTHER stats but not this one —
+            # missing from TEAM_STAT_NAMES.
+            _warn_stat_coverage_miss(_lookup_stat_name, "team")
         _team_lookup = (
-            team_df[team_df['stats_type_id'] == _target_stat_id][['fixture_id', 'team_id', 'value']]
+            _target_team_rows[['fixture_id', 'team_id', 'value']]
             .rename(columns={'value': _team_col})
             .drop_duplicates(subset=['fixture_id', 'team_id'])
         )
@@ -1406,9 +1453,10 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
                                            teams, comps, weight, season_id=None, competition_id=None, comp_teams=None):
     import numpy as np
     import pandas as pd
-    # Reset NaN-guard accumulator for this league's pass; summary line is
-    # emitted at the end of the function (see _log_nan_guard_summary above).
+    # Reset per-run accumulators. Stat-coverage warnings dedup across all
+    # get_player_stats / get_team_stats / get_opp_stats calls in this run.
     _NAN_GUARD_HITS.clear()
+    _STAT_COVERAGE_WARNINGS.clear()
     team_predictions = team_predictions.drop(columns=['Corners'])
     stat_list = team_predictions.columns[5:].to_list()
     # debug print removed
@@ -1518,6 +1566,21 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
     df.columns.name = None  # Remove the aggregation name
     df = df.round(2)  # Round all values to 2 decimal places
     existing_stats = [s for s in stat_list if s in df.columns]
+    # All-zero column scan: any projected stat where 100% of player rows
+    # are 0 is almost certainly a silent bug (loader-filter omission, share
+    # collapse, model error, etc). Surface as a single WARNING so the
+    # daily digest catches it. Genuinely all-zero is implausible at the
+    # league level — no league has 0 Yellowcards, 0 Goals, etc. across
+    # every projected player.
+    if len(df) > 0:
+        zero_cols = [s for s in existing_stats if df[s].sum() == 0]
+        if zero_cols:
+            import logging as _logging
+            _logging.getLogger("projection").warning(
+                f"[stat-coverage] All-zero projection columns: {zero_cols}. "
+                f"Likely loader-filter omission (check projection_stats.py) or "
+                f"share-calc bug. {len(df)} player×fixture rows scanned."
+            )
     _log_nan_guard_summary(competition_id, comps, teams)
     return df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Team', 'Opponent', 'Venue'] + existing_stats]
 
