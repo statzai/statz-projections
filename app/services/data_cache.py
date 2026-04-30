@@ -117,7 +117,12 @@ class DataCache:
 
         self.stats_types = pd.read_csv(os.path.join(path, "stats_types.csv"))
 
-        self.league_weightings = pd.read_excel(os.path.join(path, "League Weightings.xlsx"))
+        # League Weightings xlsx is dead post-2026-04-22 migration to
+        # competition_projection_config (DataCache only used in off-mode
+        # legacy path — slated for Phase 7 deletion 2026-05-05). Tolerate
+        # missing file so the cache still loads if someone toggles off-mode.
+        _lw_path = os.path.join(path, "League Weightings.xlsx")
+        self.league_weightings = pd.read_excel(_lw_path) if os.path.exists(_lw_path) else pd.DataFrame()
 
         # DB-driven projection config (from competition_projection_config table).
         # Falls back gracefully if the CSV doesn't exist yet (first fetch hasn't run).

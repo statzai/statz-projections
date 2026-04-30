@@ -189,8 +189,13 @@ class ProjectionAllTeams:
                                   league_below_attack_weight, league_below_defense_weight]
                     logger.info(f"[{league}] Config loaded from DB (projection_config.csv)")
                 else:
+                    # xlsx fallback is dead code now (DB covers all 21
+                    # projected leagues); guard the read so missing xlsx
+                    # rides through to the defaults branch.
                     league_weightings_df = source.league_weightings
-                    league_row = league_weightings_df[league_weightings_df['League'] == league]
+                    league_row = league_weightings_df[league_weightings_df['League'] == league] if (
+                        league_weightings_df is not None and not league_weightings_df.empty and 'League' in league_weightings_df.columns
+                    ) else pd.DataFrame()
                     if len(league_row) > 0:
                         league_below = league_row['League Below'].values[0]
                         league_above = league_row['League Above'].values[0]

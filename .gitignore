@@ -10,8 +10,8 @@ app/data/*.parquet
 app/data/*.xlsx
 app/data/last_fetch.txt
 app/data/Team
-!app/data/League Weightings.xlsx
-!app/data/League Coefficients.xlsx
+# League Weightings + League Coefficients dropped 2026-04-30 — both now
+# sourced from DB (competition_projection_config + competitions.uefa_coefficient_index).
 !app/data/Team Ratings.xlsx
 !app/data/Fanteam Mapping.xlsx
 !app/data/PL Fantasy Players.xlsx

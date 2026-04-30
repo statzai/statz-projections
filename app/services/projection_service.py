@@ -204,9 +204,16 @@ class ProjectionService:
             ctx.fpl = (league == 'Premier League')  # FPL is always PL-only
             logger.info(f"[{league}] Config loaded from DB (projection_config.csv)")
         else:
-            # Fallback to xlsx for leagues not yet in the DB config table
+            # Fallback to xlsx for leagues not yet in the DB config table.
+            # Both `League Weightings.xlsx` and the DB are empty paths now
+            # mostly defensive — competition_projection_config covers all 21
+            # domestic projected leagues. If the xlsx file is missing
+            # (post-2026-04-30 deletion), source.league_weightings is an
+            # empty DataFrame and we drop straight into the defaults branch.
             league_weightings_df = source.league_weightings
-            league_row = league_weightings_df[league_weightings_df['League'] == league]
+            league_row = league_weightings_df[league_weightings_df['League'] == league] if (
+                league_weightings_df is not None and not league_weightings_df.empty and 'League' in league_weightings_df.columns
+            ) else pd.DataFrame()
 
             if len(league_row) > 0:
                 ctx.league_below = league_row['League Below'].values[0]

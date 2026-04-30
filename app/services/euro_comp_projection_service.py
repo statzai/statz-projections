@@ -124,11 +124,19 @@ class EuroCompProjectionService:
         # Ratings Dataset — DB-sourced (cache or per-league loader).
         all_team_ratings = _maybe_copy(source.team_ratings)
 
-        # League Weightings (for domestic rating calculations) — loader populates this from the xlsx already.
-        league_weightings_df = source.league_weightings if (source.league_weightings is not None and not source.league_weightings.empty) else pd.read_excel(os.path.join(data_folder_path, "League Weightings.xlsx"))
+        # League Weightings (for domestic rating calculations) — loader
+        # populates this from competition_projection_config; xlsx fallback
+        # only fires if the DB table is unexpectedly empty.
+        _lw_xlsx = os.path.join(data_folder_path, "League Weightings.xlsx")
+        league_weightings_df = source.league_weightings if (source.league_weightings is not None and not source.league_weightings.empty) else (pd.read_excel(_lw_xlsx) if os.path.exists(_lw_xlsx) else pd.DataFrame())
 
-        # UEFA Coefficients
-        uefa_coef = pd.read_excel(os.path.join(data_folder_path, "League Coefficients.xlsx"))
+        # UEFA Coefficients — DB-sourced from competitions.uefa_coefficient_index
+        # (backfilled 2026-04-22). Built into the same shape the legacy xlsx
+        # had (League / Coefficient Index columns) so downstream lookups work
+        # unchanged. xlsx is no longer read.
+        uefa_coef = comps[['name', 'uefa_coefficient_index']].rename(
+            columns={'name': 'League', 'uefa_coefficient_index': 'Coefficient Index'}
+        ).dropna(subset=['Coefficient Index']).reset_index(drop=True)
 
         comp_id = get_league_id(league, comps)
         league_ids = [get_league_id(l, comps) for l in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.keys()]
