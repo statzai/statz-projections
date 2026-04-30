@@ -359,6 +359,11 @@ class EuroCompProjectionService:
             ratings[['Team', 'Attack', 'Defense', 'Overall', 'Attack_xG', 'Defense_xG', 'Overall_xG']].copy(),
             league, comp_id, teams,
             comp_teams=comp_teams,
+            # Ratings are written under the euro comp's id but cover teams
+            # from all 8 domestic top tiers (Barcelona/Bayern/PSG aren't
+            # in EL's competition_season_teams pool, so a comp_id-scoped
+            # lookup misses them — ~11 fallback warnings/run pre-fix).
+            lookup_competition_ids=league_ids + [comp_id],
         )
 
         # ── Fixture projections ──

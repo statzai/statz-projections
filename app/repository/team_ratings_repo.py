@@ -5,7 +5,7 @@ from app.repository.db_utils import execute_chunked, resolve_team_id
 logger = logging.getLogger("team_ratings_repo")
 
 
-async def insert_team_ratings_async(ratings_df, league_name, competition_id, teams, comp_teams=None):
+async def insert_team_ratings_async(ratings_df, league_name, competition_id, teams, comp_teams=None, lookup_competition_ids=None):
     """
     Insert/upsert team ratings for one league into the team_ratings DB table.
 
@@ -20,12 +20,20 @@ async def insert_team_ratings_async(ratings_df, league_name, competition_id, tea
             League column for observability and as a fallback if FK
             resolution fails.
         competition_id: Resolved Laravel competition_id for this league.
+            Stored on every row.
         teams: DataFrame of teams (id, name, ...) from DataCache, used to
             resolve Team name → team_id.
+        comp_teams: competition_season_teams DataFrame for scoped lookup.
+        lookup_competition_ids: Optional list of competition_ids to scope
+            the team-name resolution against, when it differs from
+            `competition_id`. Used by Euro comps that write 144 cross-league
+            ratings (Barcelona/Bayern/PSG/etc) under the euro comp's id but
+            need to resolve names against the 8 domestic-league pool.
 
     Rows with unresolved team_id are dropped with a warning — ratings for
     a team we can't FK-resolve are useless (the UI layer joins via the FK).
     """
+    lookup_id = lookup_competition_ids if lookup_competition_ids is not None else competition_id
     if ratings_df is None or len(ratings_df) == 0:
         logger.info(f"[team_ratings] {league_name}: nothing to insert")
         return
@@ -46,7 +54,7 @@ async def insert_team_ratings_async(ratings_df, league_name, competition_id, tea
         if team_name is None or (isinstance(team_name, float) and pd.isna(team_name)):
             unresolved += 1
             continue
-        team_id = resolve_team_id(team_name, teams, competition_id, comp_teams) if teams is not None else None
+        team_id = resolve_team_id(team_name, teams, lookup_id, comp_teams) if teams is not None else None
         if team_id is None:
             unresolved += 1
             continue
