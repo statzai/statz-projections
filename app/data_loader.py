@@ -347,23 +347,44 @@ class LeagueDataLoader:
         self.fixtures_df = df
 
     async def _load_team_stats(self, conn) -> None:
-        """Both teams' stats for in-scope-team fixtures only.
+        """Team stats for the UNION fixture set, filtered to projection-relevant
+        stat_types only.
 
-        No `team_id` filter: get_opp_stats needs opposing-team rows. Scope
-        deliberately limited to team_fixture_ids — cross-club fixtures
-        (Bernal at Barcelona) excluded since no projection path reads
-        team_stats from out-of-scope clubs. See loader_scope_rules.md."""
-        if not self.team_fixture_ids:
+        Two things changed 2026-04-30 vs the original Phase-2 design:
+
+        1. Fixture scope = `self.fixture_ids` (UNION) NOT `self.team_fixture_ids`.
+           The original comment claimed "no projection path reads team_stats
+           from out-of-scope clubs" — wrong. `get_player_stats` does a per-row
+           merge against `team_df` keyed on (fixture_id, team_id), where the
+           team_id is whatever club the player was at for that fixture. For
+           transferred players (Souza at Tottenham, history still at his old
+           club) those rows fail to merge against in-league-scoped team_df and
+           the share denominator collapses to 0 → NaN-guard fires, projection
+           forced to 0.
+
+        2. stats_type_id filter pulls only `TEAM_STAT_NAMES` (~13 of ~1,116
+           stat types). Reduces ~70% of row volume — pays for the +cross-club
+           rows from change #1 several times over.
+
+        No `team_id` filter: get_opp_stats needs opposing-team rows.
+        See loader_scope_rules.md.
+        """
+        from app.services.projection_stats import TEAM_STAT_NAMES, resolve_stat_ids
+
+        if not self.fixture_ids:
             self.team_stats = pd.DataFrame()
             return
 
-        fix_ph = ",".join(["%s"] * len(self.team_fixture_ids))
+        team_stat_type_ids = resolve_stat_ids(TEAM_STAT_NAMES, self.stats_types)
+        fix_ph = ",".join(["%s"] * len(self.fixture_ids))
+        stat_ph = ",".join(["%s"] * len(team_stat_type_ids))
         sql = f"""
             SELECT * FROM fixture_team_stats
             WHERE fixture_id IN ({fix_ph})
+              AND stats_type_id IN ({stat_ph})
         """
         async with conn.cursor() as cur:
-            await cur.execute(sql, tuple(self.team_fixture_ids))
+            await cur.execute(sql, tuple(self.fixture_ids) + tuple(team_stat_type_ids))
             rows = await cur.fetchall()
             cols = [d[0] for d in cur.description]
         df = pd.DataFrame(rows, columns=cols)
@@ -391,15 +412,24 @@ class LeagueDataLoader:
         falls back to full table scan on fixture_player_stats (15M rows).
         Splitting into player-id chunks of `_PLAYER_CHUNK_SIZE` keeps each
         query small enough for the optimizer to use indexes.
+
+        2026-04-30: stats_type_id filter added to pull only PLAYER_STAT_NAMES
+        (~23 of ~1,116 stat types). ~70% volume reduction without changing
+        any caller behaviour — projection paths only read these stat names.
         """
+        from app.services.projection_stats import PLAYER_STAT_NAMES, resolve_stat_ids
+
         if not self.player_ids or not self.fixture_ids:
             self.player_stats = pd.DataFrame()
             return
 
+        player_stat_type_ids = resolve_stat_ids(PLAYER_STAT_NAMES, self.stats_types)
         chunks = []
         cols = None
         fix_ph = ",".join(["%s"] * len(self.fixture_ids))
+        stat_ph = ",".join(["%s"] * len(player_stat_type_ids))
         fix_params = tuple(self.fixture_ids)
+        stat_params = tuple(player_stat_type_ids)
 
         for i in range(0, len(self.player_ids), _PLAYER_CHUNK_SIZE):
             batch = self.player_ids[i : i + _PLAYER_CHUNK_SIZE]
@@ -408,8 +438,9 @@ class LeagueDataLoader:
                 SELECT * FROM fixture_player_stats
                 WHERE player_id IN ({player_ph})
                   AND fixture_id IN ({fix_ph})
+                  AND stats_type_id IN ({stat_ph})
             """
-            params = tuple(batch) + fix_params
+            params = tuple(batch) + fix_params + stat_params
             async with conn.cursor() as cur:
                 await cur.execute(sql, params)
                 rows = await cur.fetchall()
