@@ -60,6 +60,15 @@ TEAM_STAT_NAMES = (
     "Total Crosses",
     "Interceptions",
     "Offsides",
+    # Assists + Key Passes are computed columns added to team_predictions
+    # downstream of get_team_round_predictions (Assists = Goals × 0.82,
+    # Key Passes = Shots Total × 0.75). distribute_team_predictions_to_players
+    # iterates these as part of stat_list, calling get_player_weighted_average
+    # which hits team_stats per row by stat_type_id. Without these in the
+    # loaded set, the merge fillna's to 0 → denominator collapses → NaN-guard
+    # fires for every PL player on these two stats.
+    "Assists",
+    "Key Passes",
 )
 
 # Stats queried from fixture_player_stats.
