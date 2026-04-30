@@ -35,6 +35,63 @@ TEAM_NAME_FIXES = {
     "Milan": "AC Milan",
 }
 
+# Per-run accumulator for the NaN-guard inside get_player_weighted_average.
+# Populated when team_weighted_sum collapses to 0 (cross-club share inflation
+# or team_stats data gaps). Reset at start of distribute_team_predictions_to_players,
+# summary line emitted at end. Module-level state is safe because projection
+# runs are serialised by the cross-worker file lock — only one runs at a time.
+# See nan_guard_share_inflation.md memory for full context.
+_NAN_GUARD_HITS: list = []
+
+
+def _log_nan_guard_summary(competition_id, comps, teams):
+    """Emit a single WARNING line summarising NaN-guard hits for the run.
+
+    Per-hit detail is at DEBUG level inside get_player_weighted_average; this
+    aggregates them into one observable summary so the daily digest counts
+    1 per run (not 50-100). Top affected teams + stats included so the
+    summary is actionable without needing to dig.
+    """
+    if not _NAN_GUARD_HITS:
+        return
+    import logging
+    from collections import Counter
+    _log = logging.getLogger("projection")
+
+    n = len(_NAN_GUARD_HITS)
+    unique_pairs = len({(h['player_id'], h['stat']) for h in _NAN_GUARD_HITS})
+
+    league = "?"
+    try:
+        if competition_id is not None and comps is not None:
+            cid = competition_id[0] if isinstance(competition_id, (list, tuple)) else competition_id
+            row = comps[comps['id'] == cid]
+            if not row.empty:
+                league = str(row['name'].iloc[0])
+    except Exception:
+        pass
+
+    team_counter = Counter(h['team_id'] for h in _NAN_GUARD_HITS)
+    stat_counter = Counter(h['stat'] for h in _NAN_GUARD_HITS)
+
+    def _team_name(tid):
+        try:
+            r = teams[teams['id'] == tid]
+            return str(r['name'].iloc[0]) if not r.empty else f"team_id={tid}"
+        except Exception:
+            return f"team_id={tid}"
+
+    top_teams = ", ".join(f"{_team_name(tid)}×{c}" for tid, c in team_counter.most_common(5))
+    top_stats = ", ".join(f"{stat}×{c}" for stat, c in stat_counter.most_common(5))
+
+    _log.warning(
+        f"[{league}] NaN-guard summary: {n} hits across {unique_pairs} (player,stat) pairs — "
+        f"those projections forced to 0. "
+        f"Top teams: {top_teams}. Top stats: {top_stats}. "
+        f"DEBUG-level per-hit detail available; see nan_guard_share_inflation.md."
+    )
+    _NAN_GUARD_HITS.clear()
+
 def get_team_id(team_name, teams, competition_id=None, comp_teams=None):
     """
     Resolve a team name to its id. When competition_id + comp_teams are
@@ -301,6 +358,47 @@ def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_
         team_ratings.append([team, attack_rating, defense_rating])
     team_ratings = pd.DataFrame(team_ratings, columns=['Team', 'Attack', 'Defense'])
     return team_ratings[['Team', 'Attack', 'Defense']]
+
+
+async def get_market_value_with_cache(league_dashed, div, country_code):
+    """Async wrapper that scrapes Transfermarkt and persists the result —
+    or falls back to the most recent cached snapshot when the scrape fails.
+
+    Why: 2026-04-28 saw 6 leagues' MV blocks fail in a 1-hour window
+    (classic IP rate-limit). The bare `get_market_value` raises in that
+    case, the MV adjustment is skipped entirely, and ratings get no MV
+    bump. With the cache fallback, the run uses yesterday's MV values —
+    invisible to projection accuracy because MVs change on weeks-to-months
+    timescales.
+    """
+    import logging
+    _log = logging.getLogger("projection")
+    from app.repository.transfermarkt_mv_repo import (
+        insert_market_value_snapshots_async,
+        read_latest_market_values_async,
+    )
+    try:
+        df = get_market_value(league_dashed, div, country_code)
+        # Async-write the snapshot; failure here shouldn't break the run
+        # because we already have today's values in df.
+        try:
+            await insert_market_value_snapshots_async(df, league_dashed)
+        except Exception as cache_write_err:
+            _log.warning(
+                f"[transfermarkt_mv:{league_dashed}] Snapshot write failed (non-fatal): {cache_write_err}"
+            )
+        return df
+    except Exception as scrape_err:
+        _log.warning(
+            f"[transfermarkt_mv:{league_dashed}] Live scrape failed: {scrape_err} — "
+            f"trying last-good cached snapshot."
+        )
+        cached = await read_latest_market_values_async(league_dashed)
+        if cached.empty:
+            # No prior snapshot — re-raise so the MV block's existing
+            # try/except logs the failure and skips MV adjustment.
+            raise
+        return cached
 
 
 def get_market_value(league_dashed, div, country_code):
@@ -1262,10 +1360,19 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
     if team_weighted_sum == 0:
         raw_team_total = player_stats[f'Team {stat}'].sum()
         n_player_rows = int((player_stats[f'Player {stat}'] > 0).sum())
-        # Extra diagnostic: show what team_ids are in the merged rows + which
-        # fixture IDs + their raw Team {stat} values. Reveals whether the
-        # merge is failing (team_id dtype mismatch, fixture_id dtype
-        # mismatch, stats_type_id filter dropping real rows, etc.).
+        # Aggregate per-run for a single summary line at end of
+        # distribute_team_predictions_to_players (~50-100 hits per nightly
+        # run pre-aggregation made the digest unreadable). Per-hit detail
+        # demoted to DEBUG so it's still reachable when needed.
+        _NAN_GUARD_HITS.append({
+            'player_id': player_id,
+            'team_id': team_id,
+            'stat': stat,
+            'weighted_player_sum': float(weighted_sum),
+            'raw_team_total': float(raw_team_total) if raw_team_total is not None else 0,
+            'n_player_rows': n_player_rows,
+            'total_rows': len(player_stats),
+        })
         try:
             sample = player_stats[['fixture_id', 'team_id', f'Player {stat}', f'Team {stat}']].head(5).to_dict('records')
             team_id_dtype = str(player_stats['team_id'].dtype)
@@ -1273,7 +1380,7 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
         except Exception:
             sample = 'n/a'
             team_id_dtype = fixture_id_dtype = '?'
-        _logger.warning(
+        _logger.debug(
             f"[NaN-guard] player_id={player_id} team_id={team_id} stat={stat!r} "
             f"has weighted_player_sum={weighted_sum:.3f} but team_weighted_sum=0 "
             f"(raw team total={raw_team_total}, player-recorded fixtures={n_player_rows}, "
@@ -1299,6 +1406,9 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
                                            teams, comps, weight, season_id=None, competition_id=None, comp_teams=None):
     import numpy as np
     import pandas as pd
+    # Reset NaN-guard accumulator for this league's pass; summary line is
+    # emitted at the end of the function (see _log_nan_guard_summary above).
+    _NAN_GUARD_HITS.clear()
     team_predictions = team_predictions.drop(columns=['Corners'])
     stat_list = team_predictions.columns[5:].to_list()
     # debug print removed
@@ -1395,6 +1505,7 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
 
     if df.empty or 'value' not in df.columns or 'stat_name' not in df.columns:
         cols = ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Team', 'Opponent', 'Venue'] + stat_list
+        _log_nan_guard_summary(competition_id, comps, teams)
         return pd.DataFrame(columns=cols)
 
     df = df.pivot_table(
@@ -1407,6 +1518,7 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
     df.columns.name = None  # Remove the aggregation name
     df = df.round(2)  # Round all values to 2 decimal places
     existing_stats = [s for s in stat_list if s in df.columns]
+    _log_nan_guard_summary(competition_id, comps, teams)
     return df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Team', 'Opponent', 'Venue'] + existing_stats]
 
 def get_player_position(player, team, players, teams, competition_id=None, comp_teams=None):

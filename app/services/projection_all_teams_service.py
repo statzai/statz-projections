@@ -760,7 +760,7 @@ class ProjectionAllTeams:
 
                 if country_code is not None:
                     try:
-                        market_values = get_market_value(league_dashed, div, country_code)
+                        market_values = await get_market_value_with_cache(league_dashed, div, country_code)
                         market_values['MV Index'] = market_values['Market Value'].astype(float) / market_values['Market Value'].astype(
                             float).median()
                         market_values['MV Index'] = np.log1p(market_values['MV Index'])
