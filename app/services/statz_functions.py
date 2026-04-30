@@ -325,7 +325,8 @@ def get_opp_stats(stat, team, fixtures, team_stats, teams, stats_types, venue='Y
 
 # UPDATED - New Parameter: previous_team_ratings
 def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_ids, comp_teams, teams_df, fixtures_df,
-                team_stats, stats_types, weight, games, weightings):
+                team_stats, stats_types, weight, games, weightings,
+                league_above_id=None, league_below_id=None):
     import pandas as pd
     # Pre-filter comp_teams to THIS league's rows, so downstream get_team_id
     # can disambiguate duplicate names (e.g. 'Nacional' Portugal vs Uruguay)
@@ -333,17 +334,24 @@ def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_
     # filter in get_team_fixtures and drop the cross-comp previous-season data
     # we deliberately rely on for promoted/relegated teams.
     scoped_comp_teams = comp_teams[comp_teams['competition_id'] == league_id] if comp_teams is not None else None
-    # Restrict previous_team_ratings to the projecting league only. Teams that
-    # also play in Euro comps have ratings under those competitions in the
-    # team_ratings table, but those are stored on a different scale (raw xG,
-    # not the domestic-mean=100 scale). Without this filter, the opponent
-    # lookup picks up cross-competition rows and the divide-by-Defense step
-    # explodes — Anderlecht's EL Defense=10.7 inflated Brugge's xG by ~9× on
-    # one Belgian Pro League fixture, pushing their attack rating from
-    # ~2.1 → 3.76. Documented 2026-04-30 during Belgian Pro League spot-check.
+    # Restrict previous_team_ratings to the projecting league + tier-adjacent
+    # leagues only (current, above, below). Cross-tier inclusion lets us look
+    # up Championship opponents' ratings when computing a promoted team's
+    # PL rating (their previous-season fixtures are still in scope per
+    # all_season_ids). Both tiers share the domestic mean=100 storage scale.
+    #
+    # Euro comps (EL/CL/EConfL) are NOT in this list — they're stored on a
+    # different scale (raw xG values) and would explode the divide-by-Defense
+    # step. Anderlecht's EL Defense=10.7 inflated Brugge's xG by ~9× on one
+    # Belgian Pro League fixture before this filter shipped 2026-04-30.
     if previous_team_ratings is not None and 'competition_id' in previous_team_ratings.columns:
+        allowed_comp_ids = [league_id]
+        if league_above_id is not None:
+            allowed_comp_ids.append(league_above_id)
+        if league_below_id is not None:
+            allowed_comp_ids.append(league_below_id)
         previous_team_ratings = previous_team_ratings[
-            previous_team_ratings['competition_id'] == league_id
+            previous_team_ratings['competition_id'].isin(allowed_comp_ids)
         ]
     comp_teams = get_comp_teams(league_id, current_season_id, comp_teams, teams=teams_df)
     team_ratings = []

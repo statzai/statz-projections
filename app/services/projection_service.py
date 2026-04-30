@@ -607,7 +607,8 @@ class ProjectionService:
                               all_season_ids=[current_season_id, previous_season_id, previous_season_id_above,
                                               previous_season_id_below],
                               comp_teams=comp_teams, teams_df=teams, fixtures_df=fixtures_df, team_stats=team_stats,
-                              stats_types=stats_types, weight=0.96, games=30, weightings=weightings)
+                              stats_types=stats_types, weight=0.96, games=30, weightings=weightings,
+                              league_above_id=league_above_id, league_below_id=league_below_id)
         ratings.to_csv(f"{save_file_path}/{league} Get Ratings.csv", index=False)
         # In[12]:
 

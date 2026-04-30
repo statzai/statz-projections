@@ -236,7 +236,8 @@ class EuroCompProjectionService:
                 current_season_id=league_current_season_id,
                 all_season_ids=[league_current_season_id, previous_season_id, previous_season_id_above, previous_season_id_below],
                 comp_teams=comp_teams, teams_df=teams, fixtures_df=fixtures_df, team_stats=team_stats,
-                stats_types=stats_types, weight=0.95, games=30, weightings=weightings
+                stats_types=stats_types, weight=0.95, games=30, weightings=weightings,
+                league_above_id=league_above_id, league_below_id=league_below_id,
             )
 
             # Promoted team ratings adjustment — try DB first (admin panel),
