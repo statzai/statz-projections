@@ -93,6 +93,15 @@ PLAYER_STAT_NAMES = (
     "Total Crosses",
     "Interceptions",
     "Offsides",
+    # Fouls Drawn IS queried as a per-player stat. distribute_team_predictions
+    # iterates 'Fouls Drawn' (computed column from get_team_round_predictions)
+    # → calls get_player_weighted_average('Fouls Drawn') → get_player_stats
+    # filters player rows to name == 'Fouls Drawn'. Without this entry the
+    # filter returns 0 rows → weighted_sum=0 → early return → projection
+    # forced to 0 (silent — doesn't hit NaN-guard). Team-side is fine: the
+    # special-case in get_player_stats looks up opponent's 'Fouls' which is
+    # already in TEAM_STAT_NAMES.
+    "Fouls Drawn",
     # Player-only outputs
     "Assists",
     "Saves",
