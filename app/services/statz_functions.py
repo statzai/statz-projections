@@ -333,6 +333,18 @@ def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_
     # filter in get_team_fixtures and drop the cross-comp previous-season data
     # we deliberately rely on for promoted/relegated teams.
     scoped_comp_teams = comp_teams[comp_teams['competition_id'] == league_id] if comp_teams is not None else None
+    # Restrict previous_team_ratings to the projecting league only. Teams that
+    # also play in Euro comps have ratings under those competitions in the
+    # team_ratings table, but those are stored on a different scale (raw xG,
+    # not the domestic-mean=100 scale). Without this filter, the opponent
+    # lookup picks up cross-competition rows and the divide-by-Defense step
+    # explodes — Anderlecht's EL Defense=10.7 inflated Brugge's xG by ~9× on
+    # one Belgian Pro League fixture, pushing their attack rating from
+    # ~2.1 → 3.76. Documented 2026-04-30 during Belgian Pro League spot-check.
+    if previous_team_ratings is not None and 'competition_id' in previous_team_ratings.columns:
+        previous_team_ratings = previous_team_ratings[
+            previous_team_ratings['competition_id'] == league_id
+        ]
     comp_teams = get_comp_teams(league_id, current_season_id, comp_teams, teams=teams_df)
     team_ratings = []
     for team in comp_teams:
@@ -392,15 +404,6 @@ def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_
         matches['Weighted Goals Against'] = matches['Adjusted Goals Against'] * matches['Game Weight']
         attack_rating = matches['Weighted Goals'].sum() / matches['Game Weight'].sum()
         defense_rating = matches['Weighted Goals Against'].sum() / matches['Game Weight'].sum()
-        # TEMP DIAG (2026-04-30): dump Brugge's matches df to find rating inflation source.
-        if team == 'Club Brugge':
-            import logging as _l
-            _l.getLogger("projection").info(
-                f"[get_ratings] Club Brugge matches df ({len(matches)} rows):\n" + matches.to_string(max_rows=60)
-            )
-            _l.getLogger("projection").info(
-                f"[get_ratings] Club Brugge SUMS: Weighted Goals={matches['Weighted Goals'].sum():.3f}, Game Weight={matches['Game Weight'].sum():.3f}, attack_rating={attack_rating:.3f}"
-            )
         team_ratings.append([team, attack_rating, defense_rating])
     team_ratings = pd.DataFrame(team_ratings, columns=['Team', 'Attack', 'Defense'])
     return team_ratings[['Team', 'Attack', 'Defense']]

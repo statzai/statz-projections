@@ -679,17 +679,6 @@ class ProjectionService:
 
         # In[ ]:
 
-        # TEMP DIAG (2026-04-30): log pre-MV ratings + MV index + post-MV
-        # ratings for spot-check on Belgian Pro League power rankings.
-        # Remove after investigation.
-        try:
-            _pre_mv = ratings[['Team', 'Attack', 'Defense']].copy().sort_values('Attack', ascending=False)
-            logger.info(
-                f"[{league}] PRE-MV RATINGS:\n" + _pre_mv.to_string(index=False, max_rows=30)
-            )
-        except Exception as _e:
-            logger.warning(f"[{league}] Could not log pre-MV ratings: {_e}")
-
         try:
             market_values = await get_market_value_with_cache(league_dashed, div, country_code)
             market_values['MV Index'] = market_values['Market Value'].astype(float) / market_values['Market Value'].astype(
@@ -778,17 +767,6 @@ class ProjectionService:
             ratings['MV Defense Underperformance %'] = ratings['MV Defense Underperformance'] / ratings['Defense']
             ratings['Attack'] = ratings['Attack'] * (1 + ratings['MV Attack Underperformance %'])
             ratings['Defense'] = ratings['Defense'] * (1 + ratings['MV Defense Underperformance %'])
-            # TEMP DIAG (2026-04-30): log post-MV ratings + the MV multipliers
-            # used per team. Remove after investigation.
-            try:
-                _diag = ratings[['Team', 'Attack', 'Defense', 'MV Attack Underperformance %', 'MV Defense Underperformance %']].copy()
-                _diag.columns = ['Team', 'Attack_post', 'Defense_post', 'MV_Att%', 'MV_Def%']
-                _diag = _diag.sort_values('Attack_post', ascending=False)
-                logger.info(
-                    f"[{league}] POST-MV RATINGS + MV MULTIPLIERS:\n" + _diag.to_string(index=False, max_rows=30)
-                )
-            except Exception as _e:
-                logger.warning(f"[{league}] Could not log post-MV ratings: {_e}")
             ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance', 'MV Index',
                                   'MV Defense Underperformance %', 'MV Attack Underperformance %', 'MV Index Reverse'],
                          inplace=True)
