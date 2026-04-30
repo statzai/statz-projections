@@ -1261,12 +1261,19 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
         ]
         player_minutes = player_minutes.drop(columns=['sub_type']).reset_index(drop=True)
 
-    _ps_pre = player_stats
+    # Stat-coverage check: a per-player filter being empty is NOT a signal
+    # of loader-filter omission (a CB with 0 Assists in their last 50
+    # fixtures is normal). The right check is global: does the loaded
+    # stat_df contain ANY rows for this stat_type_id across all players?
+    # If not, the loader filter (PLAYER_STAT_NAMES in projection_stats.py)
+    # is missing it and projections silently zero out for everyone.
+    if not stat_df.empty:
+        _st_match = stats_types[stats_types['name'] == stat]
+        if not _st_match.empty:
+            _target_sid = _st_match['id'].iloc[0]
+            if stat_df[stat_df['stats_type_id'] == _target_sid].empty:
+                _warn_stat_coverage_miss(stat, "player")
     player_stats = player_stats[player_stats['name'] == stat]
-    if player_stats.empty and not _ps_pre.empty:
-        # Player has data for OTHER stats but not this one — loader filter
-        # excluded it. See projection_stats.py PLAYER_STAT_NAMES.
-        _warn_stat_coverage_miss(stat, "player")
     player_stats.drop(columns=['team_id'], inplace=True)
     player_stats = player_minutes.merge(player_stats, left_on='fixture_id', right_on='fixture_id', how='left')
     player_stats['value'].fillna(0, inplace=True)
