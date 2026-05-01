@@ -70,11 +70,21 @@ TEAM_STAT_NAMES = (
     "Assists",
     "Key Passes",
     # Expected Assists (xA) — FPL-only synthetic stat. No Sportmonks rows
-    # exist; LeagueDataLoader._overlay_fpl_xg_xa injects per-fixture team
+    # exist; LeagueDataLoader._overlay_fpl_stats injects per-fixture team
     # totals (sum of FPL player xA) into team_stats in-memory for PL only.
     # Used by distribute_team_predictions_to_players to blend into the
     # Assists projection (mirrors Goals/xG blend).
     "Expected Assists (xA)",
+    # Defensive stats — required at TEAM level for the team-down CBIT
+    # projection (project team total per fixture × player share %).
+    # 'Tackles' is already above. 'Ball Recovery' added here because
+    # team_stats didn't previously load it. 'Clearances Blocks
+    # Interceptions (FPL)' is FPL-synthetic (id 999002): SM has 3
+    # separate components (Clearances/Blocked Shots/Interceptions) but
+    # no combined total — _overlay_fpl_stats injects the FPL combined
+    # value as a fresh team_stats row.
+    "Ball Recovery",
+    "Clearances Blocks Interceptions (FPL)",
 )
 
 # Stats queried from fixture_player_stats.
@@ -121,9 +131,16 @@ PLAYER_STAT_NAMES = (
     "Key Passes",
     "Big Chances Created",
     # Expected Assists (xA) — FPL-only synthetic stat. Player rows are
-    # injected by LeagueDataLoader._overlay_fpl_xg_xa for PL only.
+    # injected by LeagueDataLoader._overlay_fpl_stats for PL only.
     # Used by get_player_weighted_average inside the Assists/xA blend.
     "Expected Assists (xA)",
+    # Clearances Blocks Interceptions (FPL) — synthetic stat (id 999002),
+    # FPL-only. Sportmonks tracks the 3 components separately (Clearances,
+    # Blocked Shots, Interceptions — all already in this list above) but
+    # no combined total. _overlay_fpl_stats injects per-player FPL CBI
+    # rows for PL fixtures. Required so the team-down CBIT projection
+    # can compute the player's CBI share of the team CBI total.
+    "Clearances Blocks Interceptions (FPL)",
 )
 
 
