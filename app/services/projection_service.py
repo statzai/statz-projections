@@ -1352,49 +1352,6 @@ class ProjectionService:
         team_projections['Goals'] = goals
         team_projections['Assists'] = assists
 
-        # PL only: project team-level Ball Recovery + CBI(FPL) per fixture.
-        # No PoissonRegressor exists for these stats (Sportmonks contributes
-        # zero team-level rows); use get_simple_team_stat_prediction's
-        # closed-form opponent-adjusted weighted average.
-        # distribute_team_predictions_to_players auto-projects per-player
-        # values from any column on team_projections, so adding these here
-        # gives us per-player Recoveries + CBI for the team-down CBIT calc.
-        if fpl:
-            _lw_def = [league_above_attack_weight, league_above_defense_weight,
-                       league_below_attack_weight, league_below_defense_weight]
-            _sid_def = [current_season_id, previous_season_id,
-                        previous_season_id_above, previous_season_id_below]
-            _cpl_def = comp_teams[comp_teams['competition_id'] == league_id]
-            _rec_col = []
-            _cbi_col = []
-            for i in range(len(team_projections)):
-                _row = team_projections.iloc[i]
-                try:
-                    rec_v, _, _ = get_simple_team_stat_prediction(
-                        _row['Team'], _row['Opponent'], fixtures_df, 'Ball Recovery',
-                        team_stats, teams, stats_types,
-                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
-                        league_weightings=_lw_def, season_id=_sid_def, games=50,
-                        comp_teams=_cpl_def,
-                    )
-                except Exception:
-                    rec_v = 0
-                try:
-                    cbi_v, _, _ = get_simple_team_stat_prediction(
-                        _row['Team'], _row['Opponent'], fixtures_df,
-                        'Clearances Blocks Interceptions (FPL)',
-                        team_stats, teams, stats_types,
-                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
-                        league_weightings=_lw_def, season_id=_sid_def, games=50,
-                        comp_teams=_cpl_def,
-                    )
-                except Exception:
-                    cbi_v = 0
-                _rec_col.append(rec_v)
-                _cbi_col.append(cbi_v)
-            team_projections['Ball Recovery'] = _rec_col
-            team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
-
         saves = []
         for i in range(len(team_projections)):
             # opp = team_projections['Opponent'].iloc[i]
@@ -1415,13 +1372,9 @@ class ProjectionService:
         team_projections['Saves'] = saves
         team_projections['Saves'] = team_projections['Saves'].round(2)  # NEW - Round saves to 2 decimal places
         team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
-        # Retain Ball Recovery + CBI(FPL) columns when present (added by the
-        # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
-                           if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
-             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
+             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves']]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
         
@@ -1636,36 +1589,6 @@ class ProjectionService:
                     except Exception:
                         continue
                 logger.info(f"[{league}] FPL: extra stats computed for {len(pl_projections['Player'].unique())} players")
-
-                # Team-down CBIT Hit Rate — overrides the empirical hit rate
-                # stamped above. Uses per-player Tackles + Ball Recovery +
-                # CBI(FPL) projections that distribute_team_predictions_to_players
-                # auto-projected from the team_projections columns we added
-                # above. Sum per FPL position, apply Poisson SF for hit%.
-                # PL-only by construction (we're inside `if fpl:`).
-                from scipy.stats import poisson as _td_poisson
-                def _td_safe(v):
-                    if v is None or pd.isna(v):
-                        return 0.0
-                    return float(v)
-                def _td_cbit_hit_rate(row):
-                    pos = row.get('FPL Position')
-                    if pos == 'GK' or pos is None or (isinstance(pos, float) and pd.isna(pos)):
-                        return 0.0
-                    tackles = _td_safe(row.get('Tackles'))
-                    cbi = _td_safe(row.get('Clearances Blocks Interceptions (FPL)'))
-                    if pos == 'DEF':
-                        total = tackles + cbi
-                        threshold = 10
-                    else:
-                        recoveries = _td_safe(row.get('Ball Recovery'))
-                        total = tackles + recoveries + cbi
-                        threshold = 12
-                    if total <= 0:
-                        return 0.0
-                    return float(_td_poisson.sf(threshold - 1, total))
-                pl_projections['CBIT Hit Rate'] = pl_projections.apply(_td_cbit_hit_rate, axis=1)
-                logger.info(f"[{league}] FPL: CBIT Hit Rate replaced with team-down projection")
 
                 fpl_points_dict_gk = {'Goals': 10, 'Assists': 3, 'Clean Sheet': 4, 'Saves': 1, 'Penalties Saved': 5, 'Goals Conceded': -1, 'Yellow Card': -1}
                 fpl_points_dict_def = {'Goals': 6, 'Assists': 3, 'Clean Sheet': 4, 'Goals Conceded': -1, 'Yellow Card': -1}
@@ -2867,49 +2790,6 @@ class ProjectionService:
         team_projections['Goals'] = goals
         team_projections['Assists'] = assists
 
-        # PL only: project team-level Ball Recovery + CBI(FPL) per fixture.
-        # No PoissonRegressor exists for these stats (Sportmonks contributes
-        # zero team-level rows); use get_simple_team_stat_prediction's
-        # closed-form opponent-adjusted weighted average.
-        # distribute_team_predictions_to_players auto-projects per-player
-        # values from any column on team_projections, so adding these here
-        # gives us per-player Recoveries + CBI for the team-down CBIT calc.
-        if fpl:
-            _lw_def = [league_above_attack_weight, league_above_defense_weight,
-                       league_below_attack_weight, league_below_defense_weight]
-            _sid_def = [current_season_id, previous_season_id,
-                        previous_season_id_above, previous_season_id_below]
-            _cpl_def = comp_teams[comp_teams['competition_id'] == league_id]
-            _rec_col = []
-            _cbi_col = []
-            for i in range(len(team_projections)):
-                _row = team_projections.iloc[i]
-                try:
-                    rec_v, _, _ = get_simple_team_stat_prediction(
-                        _row['Team'], _row['Opponent'], fixtures_df, 'Ball Recovery',
-                        team_stats, teams, stats_types,
-                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
-                        league_weightings=_lw_def, season_id=_sid_def, games=50,
-                        comp_teams=_cpl_def,
-                    )
-                except Exception:
-                    rec_v = 0
-                try:
-                    cbi_v, _, _ = get_simple_team_stat_prediction(
-                        _row['Team'], _row['Opponent'], fixtures_df,
-                        'Clearances Blocks Interceptions (FPL)',
-                        team_stats, teams, stats_types,
-                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
-                        league_weightings=_lw_def, season_id=_sid_def, games=50,
-                        comp_teams=_cpl_def,
-                    )
-                except Exception:
-                    cbi_v = 0
-                _rec_col.append(rec_v)
-                _cbi_col.append(cbi_v)
-            team_projections['Ball Recovery'] = _rec_col
-            team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
-
         saves = []
         for i in range(len(team_projections)):
             fixture_id = team_projections['fixture_id'].iloc[i]
@@ -2924,13 +2804,9 @@ class ProjectionService:
         team_projections['Saves'] = saves
         team_projections['Saves'] = team_projections['Saves'].round(2)  # NEW - Round saves to 2 decimal places
         team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
-        # Retain Ball Recovery + CBI(FPL) columns when present (added by the
-        # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
-                           if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
-             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
+             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves']]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
         
@@ -3424,49 +3300,6 @@ class ProjectionService:
         team_projections['Goals'] = goals
         team_projections['Assists'] = assists
 
-        # PL only: project team-level Ball Recovery + CBI(FPL) per fixture.
-        # No PoissonRegressor exists for these stats (Sportmonks contributes
-        # zero team-level rows); use get_simple_team_stat_prediction's
-        # closed-form opponent-adjusted weighted average.
-        # distribute_team_predictions_to_players auto-projects per-player
-        # values from any column on team_projections, so adding these here
-        # gives us per-player Recoveries + CBI for the team-down CBIT calc.
-        if fpl:
-            _lw_def = [league_above_attack_weight, league_above_defense_weight,
-                       league_below_attack_weight, league_below_defense_weight]
-            _sid_def = [current_season_id, previous_season_id,
-                        previous_season_id_above, previous_season_id_below]
-            _cpl_def = comp_teams[comp_teams['competition_id'] == league_id]
-            _rec_col = []
-            _cbi_col = []
-            for i in range(len(team_projections)):
-                _row = team_projections.iloc[i]
-                try:
-                    rec_v, _, _ = get_simple_team_stat_prediction(
-                        _row['Team'], _row['Opponent'], fixtures_df, 'Ball Recovery',
-                        team_stats, teams, stats_types,
-                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
-                        league_weightings=_lw_def, season_id=_sid_def, games=50,
-                        comp_teams=_cpl_def,
-                    )
-                except Exception:
-                    rec_v = 0
-                try:
-                    cbi_v, _, _ = get_simple_team_stat_prediction(
-                        _row['Team'], _row['Opponent'], fixtures_df,
-                        'Clearances Blocks Interceptions (FPL)',
-                        team_stats, teams, stats_types,
-                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
-                        league_weightings=_lw_def, season_id=_sid_def, games=50,
-                        comp_teams=_cpl_def,
-                    )
-                except Exception:
-                    cbi_v = 0
-                _rec_col.append(rec_v)
-                _cbi_col.append(cbi_v)
-            team_projections['Ball Recovery'] = _rec_col
-            team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
-
         saves = []
         for i in range(len(team_projections)):
             # opp = team_projections['Opponent'].iloc[i]
@@ -3487,13 +3320,9 @@ class ProjectionService:
         team_projections['Saves'] = saves
         team_projections['Saves'] = team_projections['Saves'].round(2)  # NEW - Round saves to 2 decimal places
         team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
-        # Retain Ball Recovery + CBI(FPL) columns when present (added by the
-        # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
-                           if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
-             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
+             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves']]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
         
@@ -4111,49 +3940,6 @@ class ProjectionService:
         team_projections['Goals'] = goals
         team_projections['Assists'] = assists
 
-        # PL only: project team-level Ball Recovery + CBI(FPL) per fixture.
-        # No PoissonRegressor exists for these stats (Sportmonks contributes
-        # zero team-level rows); use get_simple_team_stat_prediction's
-        # closed-form opponent-adjusted weighted average.
-        # distribute_team_predictions_to_players auto-projects per-player
-        # values from any column on team_projections, so adding these here
-        # gives us per-player Recoveries + CBI for the team-down CBIT calc.
-        if fpl:
-            _lw_def = [league_above_attack_weight, league_above_defense_weight,
-                       league_below_attack_weight, league_below_defense_weight]
-            _sid_def = [current_season_id, previous_season_id,
-                        previous_season_id_above, previous_season_id_below]
-            _cpl_def = comp_teams[comp_teams['competition_id'] == league_id]
-            _rec_col = []
-            _cbi_col = []
-            for i in range(len(team_projections)):
-                _row = team_projections.iloc[i]
-                try:
-                    rec_v, _, _ = get_simple_team_stat_prediction(
-                        _row['Team'], _row['Opponent'], fixtures_df, 'Ball Recovery',
-                        team_stats, teams, stats_types,
-                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
-                        league_weightings=_lw_def, season_id=_sid_def, games=50,
-                        comp_teams=_cpl_def,
-                    )
-                except Exception:
-                    rec_v = 0
-                try:
-                    cbi_v, _, _ = get_simple_team_stat_prediction(
-                        _row['Team'], _row['Opponent'], fixtures_df,
-                        'Clearances Blocks Interceptions (FPL)',
-                        team_stats, teams, stats_types,
-                        ratings=ratings, venue=_row['Venue'], comp_id=league_id,
-                        league_weightings=_lw_def, season_id=_sid_def, games=50,
-                        comp_teams=_cpl_def,
-                    )
-                except Exception:
-                    cbi_v = 0
-                _rec_col.append(rec_v)
-                _cbi_col.append(cbi_v)
-            team_projections['Ball Recovery'] = _rec_col
-            team_projections['Clearances Blocks Interceptions (FPL)'] = _cbi_col
-
         saves = []
         for i in range(len(team_projections)):
             # opp = team_projections['Opponent'].iloc[i]
@@ -4174,13 +3960,9 @@ class ProjectionService:
         team_projections['Saves'] = saves
         team_projections['Saves'] = team_projections['Saves'].round(2)  # NEW - Round saves to 2 decimal places
         team_projections['Key Passes'] = (team_projections['Shots Total'] * 0.75).round(2)
-        # Retain Ball Recovery + CBI(FPL) columns when present (added by the
-        # PL-only block above). Other leagues skip these columns.
-        _extra_def_cols = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
-                           if c in team_projections.columns]
         team_projections = team_projections[
             ['fixture_id', 'kickoff_datetime', 'Team', 'Opponent', 'Venue', 'Goals', 'Assists',
-             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
+             'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves']]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
         
