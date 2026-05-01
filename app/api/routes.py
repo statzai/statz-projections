@@ -37,26 +37,45 @@ euro_comp_service = EuroCompProjectionService()
 projection_all_teams_service = ProjectionAllTeams()
 fetch_all_data_service = FetchAllDataService()
 
-# Cross-worker lock via an OS file-lock on /tmp. Previously used a
-# Python module global `_projection_running` — but globals under
-# gunicorn are per-worker — with 2 workers each held its own copy,
-# defeating the serialisation and letting two concurrent fetches
-# corrupt fixture_team_stats.csv on 2026-04-24.
-# flock is held by the kernel for the PID that owns the file handle,
-# so it's truly process-wide. Released automatically if the worker
-# crashes (kernel closes FD), so no zombie-lock risk.
+# Two-tier lock: an OS file-lock for cross-worker serialisation + an
+# in-process boolean for cross-coroutine serialisation within a single
+# worker.
+#
+# Why both: Linux flock(2) is per-open-file-description, NOT per-process.
+# So two open() calls in the same process produce different OFDs, and
+# flock() on each succeeds — within one worker, multiple concurrent
+# coroutines could each open the file, lock it, and proceed in parallel.
+# Surfaced 2026-04-30 evening when 9 rapid-fire triggerCompetition calls
+# resulted in 3 leagues running concurrently with deadlock retries on
+# shared player_projections / model_dataset writes.
+#
+# Originally the code used a Python module global `_projection_running`,
+# replaced 2026-04-24 with the file lock alone after a 2-worker incident
+# corrupted fixture_team_stats.csv. The replacement was an over-correction
+# — the file lock handles cross-worker, but you ALSO need an in-process
+# guard. Restored 2026-04-30.
+#
+# flock is held by the kernel for the FD that owns the file handle, so
+# it's truly cross-process. Released automatically if the worker crashes
+# (kernel closes FD), so no zombie-lock risk. The in-process boolean is
+# safe because asyncio coroutines only context-switch at await points,
+# and _try_acquire_lock has no awaits — so the check + set is atomic.
 _LOCK_PATH = "/tmp/_statz_projection.lock"
 _lock_fh = None
+_in_process_running = False
 
 def _try_acquire_lock() -> bool:
     """Non-blocking acquire. Returns True on success, False if another
-    worker/process already holds the lock."""
-    global _lock_fh
+    worker/process/coroutine already holds the lock."""
+    global _lock_fh, _in_process_running
+    if _in_process_running:
+        return False
     try:
         _lock_fh = open(_LOCK_PATH, "w")
         fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         _lock_fh.write(str(os.getpid()))
         _lock_fh.flush()
+        _in_process_running = True
         return True
     except (IOError, OSError):
         if _lock_fh:
@@ -68,7 +87,7 @@ def _try_acquire_lock() -> bool:
         return False
 
 def _release_lock() -> None:
-    global _lock_fh
+    global _lock_fh, _in_process_running
     if _lock_fh is not None:
         try:
             fcntl.flock(_lock_fh, fcntl.LOCK_UN)
@@ -76,6 +95,7 @@ def _release_lock() -> None:
         except Exception:
             pass
         _lock_fh = None
+    _in_process_running = False
 
 
 async def _report_status(competition_id: str, status: str, started_at: str, finished_at: str = None, exit_code: int = None, stdout: str = None, stderr: str = None):
