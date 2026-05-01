@@ -1530,6 +1530,31 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
                             #        player_pred_stats[stat_list[i]] = predicted_stat.round(2)
                         except:
                             pass
+                    elif stat_list[stat] == 'Assists' and competition_id == 8:
+                        # PL only: blend Assists with FPL xA, mirroring the Goals/xG
+                        # blend above. xA is FPL-only — Sportmonks doesn't provide it,
+                        # so the LeagueDataLoader._overlay_fpl_xg_xa hook injects xA
+                        # rows in-memory before this runs. Other leagues fall through
+                        # to the default Assists-only branch below.
+                        try:
+                            stat_prop_assists = get_player_weighted_average(
+                                player_stats, team_df, id, team_id, 'Assists',
+                                stats_types, fixtures, comps, weight, games=50,
+                            )
+                            try:
+                                stat_prop_xA = get_player_weighted_average(
+                                    player_stats, team_df, id, team_id,
+                                    'Expected Assists (xA)', stats_types, fixtures,
+                                    comps, weight, games=50,
+                                )
+                                if stat_prop_xA == 0:
+                                    stat_prop = stat_prop_assists
+                                else:
+                                    stat_prop = (stat_prop_assists + stat_prop_xA) / 2
+                            except:
+                                stat_prop = stat_prop_assists
+                        except:
+                            pass
                     else:
                         try:
                             # UPDATED - Pass team_id and comps

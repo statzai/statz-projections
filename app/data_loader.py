@@ -154,6 +154,7 @@ class LeagueDataLoader:
             await self._load_fixtures(conn)
             await self._load_team_stats(conn)
             await self._load_player_stats(conn)
+            await self._overlay_fpl_xg_xa(conn)
             self._load_local_files()
             self._loaded = True
             logger.info(
@@ -458,6 +459,221 @@ class LeagueDataLoader:
             if "value" in df.columns:
                 df["value"] = pd.to_numeric(df["value"], errors="coerce")
         self.player_stats = df
+
+    async def _overlay_fpl_xg_xa(self, conn) -> None:
+        """Premier League only: overlay FPL expected_goals/expected_assists
+        onto the in-memory player_stats and team_stats DataFrames.
+
+        Why: FPL provides per-fixture xG (Opta-sourced) which is generally
+        considered more accurate than Sportmonks' xG. xA is FPL-only —
+        Sportmonks doesn't track it, so the projection's Assists branch
+        previously had no xA blend (unlike Goals which already blends with
+        Sportmonks xG).
+
+        Per-row fallback: where FPL has data, use it; where FPL is null,
+        keep Sportmonks. Sportmonks rows are mutated in-memory only — the
+        DB is not touched.
+
+        Team-level FPL xG/xA derived by summing player rows per
+        (fixture_id, team_id). Sum of player xG = team xG by construction.
+
+        See projection_stats.py for the loader filter; 'Expected Assists
+        (xA)' is in PLAYER_STAT_NAMES + TEAM_STAT_NAMES so the column is
+        recognised downstream, but the Sportmonks load returns 0 rows for
+        it (it doesn't exist in their data) — this overlay fills it.
+        """
+        # Premier League scope only. Other leagues stay on Sportmonks.
+        if self.league_id != 8:
+            return
+        if self.player_stats is None or self.player_stats.empty:
+            return
+        if not self.player_ids or not self.fixture_ids:
+            return
+
+        # Resolve stat_type_ids
+        xg_match = self.stats_types[self.stats_types["name"] == "Expected Goals (xG)"]
+        if xg_match.empty:
+            logger.warning("[FPL overlay] Expected Goals (xG) stat_type missing — skipping overlay entirely")
+            return
+        xg_id = int(xg_match["id"].iloc[0])
+
+        xa_match = self.stats_types[self.stats_types["name"] == "Expected Assists (xA)"]
+        if xa_match.empty:
+            logger.warning(
+                "[FPL overlay] Expected Assists (xA) stat_type missing — xG overlay will run, "
+                "but xA injection will skip. Run the migration."
+            )
+            xa_id = None
+        else:
+            xa_id = int(xa_match["id"].iloc[0])
+
+        # Fetch FPL data for our (player, fixture) scope. Only rows with at
+        # least one of xG or xA non-null — null-only rows are noise.
+        p_ph = ",".join(["%s"] * len(self.player_ids))
+        f_ph = ",".join(["%s"] * len(self.fixture_ids))
+        sql = f"""
+            SELECT player_id, fixture_id, expected_goals, expected_assists
+            FROM fpl_player_stats
+            WHERE player_id IN ({p_ph})
+              AND fixture_id IN ({f_ph})
+              AND (expected_goals IS NOT NULL OR expected_assists IS NOT NULL)
+        """
+        async with conn.cursor() as cur:
+            await cur.execute(sql, tuple(self.player_ids) + tuple(self.fixture_ids))
+            rows = await cur.fetchall()
+            cols = [d[0] for d in cur.description]
+
+        if not rows:
+            logger.info("[FPL overlay] No FPL xG/xA rows for in-scope players × fixtures.")
+            return
+
+        fpl = pd.DataFrame(rows, columns=cols)
+        fpl["expected_goals"] = pd.to_numeric(fpl["expected_goals"], errors="coerce")
+        fpl["expected_assists"] = pd.to_numeric(fpl["expected_assists"], errors="coerce")
+
+        # Map player→team for in-scope rows. We need this to:
+        # 1. Stamp new injected player_stats rows with the right team_id
+        # 2. Aggregate per-team xG/xA at team level
+        team_lookup = (
+            self.player_stats[["player_id", "fixture_id", "team_id", "season_id"]]
+            .drop_duplicates(subset=["player_id", "fixture_id"])
+        )
+        fpl = fpl.merge(team_lookup, on=["player_id", "fixture_id"], how="left")
+        # Drop rows we couldn't team-stamp (player_stats had no row for that
+        # (player, fixture) — usually a fixture where the player didn't play).
+        # Without team_id we can't aggregate to team-level, and the row
+        # wouldn't pass the Minutes Played filter downstream anyway.
+        fpl = fpl.dropna(subset=["team_id"])
+        if fpl.empty:
+            logger.info("[FPL overlay] FPL rows didn't team-stamp via player_stats — likely no qualifying fixtures.")
+            return
+
+        # ════════════ PLAYER-SIDE xG OVERLAY ════════════
+        fpl_xg = fpl[fpl["expected_goals"].notna()][
+            ["player_id", "fixture_id", "team_id", "season_id", "expected_goals"]
+        ].copy()
+        n_xg_overlaid = 0
+        n_xg_appended = 0
+        if not fpl_xg.empty:
+            ps = self.player_stats
+            # Build (player, fixture) → fpl xG map for fast lookup
+            xg_map = fpl_xg.set_index(["player_id", "fixture_id"])["expected_goals"]
+
+            # Update value on existing Sportmonks xG rows
+            mask = ps["stats_type_id"] == xg_id
+            existing = ps[mask]
+            if not existing.empty:
+                existing_keys = list(zip(existing["player_id"], existing["fixture_id"]))
+                # Vectorised: build a Series of FPL values aligned to existing rows
+                idx = pd.MultiIndex.from_tuples(existing_keys, names=["player_id", "fixture_id"])
+                fpl_aligned = xg_map.reindex(idx)
+                # Only overwrite where FPL has a value
+                overlay_mask = fpl_aligned.notna().values
+                if overlay_mask.any():
+                    ps_idx = existing.index[overlay_mask]
+                    new_vals = fpl_aligned.values[overlay_mask]
+                    ps.loc[ps_idx, "value"] = new_vals
+                    n_xg_overlaid = int(overlay_mask.sum())
+
+            # Append rows for FPL xG that have no Sportmonks counterpart
+            sm_keys = set(zip(ps[mask]["player_id"], ps[mask]["fixture_id"]))
+            fpl_only = fpl_xg[
+                ~fpl_xg.apply(lambda r: (r["player_id"], r["fixture_id"]) in sm_keys, axis=1)
+            ]
+            if not fpl_only.empty:
+                new_rows = pd.DataFrame({
+                    "player_id": fpl_only["player_id"].astype("int64"),
+                    "fixture_id": fpl_only["fixture_id"].astype("int64"),
+                    "team_id": fpl_only["team_id"].astype("int64"),
+                    "season_id": fpl_only["season_id"].astype("int64"),
+                    "stats_type_id": xg_id,
+                    "value": fpl_only["expected_goals"].astype(float),
+                })
+                self.player_stats = pd.concat([ps, new_rows], ignore_index=True)
+                n_xg_appended = len(new_rows)
+
+        # ════════════ PLAYER-SIDE xA INJECTION ════════════
+        n_xa_injected = 0
+        if xa_id is not None:
+            fpl_xa = fpl[fpl["expected_assists"].notna()][
+                ["player_id", "fixture_id", "team_id", "season_id", "expected_assists"]
+            ].copy()
+            if not fpl_xa.empty:
+                new_xa = pd.DataFrame({
+                    "player_id": fpl_xa["player_id"].astype("int64"),
+                    "fixture_id": fpl_xa["fixture_id"].astype("int64"),
+                    "team_id": fpl_xa["team_id"].astype("int64"),
+                    "season_id": fpl_xa["season_id"].astype("int64"),
+                    "stats_type_id": xa_id,
+                    "value": fpl_xa["expected_assists"].astype(float),
+                })
+                self.player_stats = pd.concat([self.player_stats, new_xa], ignore_index=True)
+                n_xa_injected = len(new_xa)
+
+        # ════════════ TEAM-SIDE OVERLAY (sum per fixture × team) ════════════
+        team_xg = fpl[fpl["expected_goals"].notna()].groupby(
+            ["fixture_id", "team_id"], as_index=False
+        )["expected_goals"].sum()
+        team_xa = fpl[fpl["expected_assists"].notna()].groupby(
+            ["fixture_id", "team_id"], as_index=False
+        )["expected_assists"].sum() if xa_id is not None else pd.DataFrame(columns=["fixture_id","team_id","expected_assists"])
+
+        n_team_xg_overlaid = 0
+        n_team_xg_appended = 0
+        n_team_xa_injected = 0
+
+        if self.team_stats is not None and not self.team_stats.empty:
+            ts = self.team_stats
+
+            # Team xG overlay: replace Sportmonks team xG values where FPL aggregate exists
+            if not team_xg.empty:
+                xg_map_t = team_xg.set_index(["fixture_id", "team_id"])["expected_goals"]
+                t_mask = ts["stats_type_id"] == xg_id
+                existing_t = ts[t_mask]
+                if not existing_t.empty:
+                    idx_t = pd.MultiIndex.from_arrays(
+                        [existing_t["fixture_id"], existing_t["team_id"]],
+                        names=["fixture_id", "team_id"],
+                    )
+                    fpl_aligned_t = xg_map_t.reindex(idx_t)
+                    overlay_mask_t = fpl_aligned_t.notna().values
+                    if overlay_mask_t.any():
+                        ts_idx = existing_t.index[overlay_mask_t]
+                        ts.loc[ts_idx, "value"] = fpl_aligned_t.values[overlay_mask_t]
+                        n_team_xg_overlaid = int(overlay_mask_t.sum())
+
+                # Append for FPL-only (fixture, team) pairs
+                sm_team_keys = set(zip(ts[t_mask]["fixture_id"], ts[t_mask]["team_id"]))
+                fpl_only_t = team_xg[
+                    ~team_xg.apply(lambda r: (r["fixture_id"], r["team_id"]) in sm_team_keys, axis=1)
+                ]
+                if not fpl_only_t.empty:
+                    new_team_xg = pd.DataFrame({
+                        "fixture_id": fpl_only_t["fixture_id"].astype("int64"),
+                        "team_id": fpl_only_t["team_id"].astype("int64"),
+                        "stats_type_id": xg_id,
+                        "value": fpl_only_t["expected_goals"].astype(float),
+                    })
+                    self.team_stats = pd.concat([ts, new_team_xg], ignore_index=True)
+                    n_team_xg_appended = len(new_team_xg)
+
+            # Team xA injection (no Sportmonks counterpart)
+            if xa_id is not None and not team_xa.empty:
+                new_team_xa = pd.DataFrame({
+                    "fixture_id": team_xa["fixture_id"].astype("int64"),
+                    "team_id": team_xa["team_id"].astype("int64"),
+                    "stats_type_id": xa_id,
+                    "value": team_xa["expected_assists"].astype(float),
+                })
+                self.team_stats = pd.concat([self.team_stats, new_team_xa], ignore_index=True)
+                n_team_xa_injected = len(new_team_xa)
+
+        logger.info(
+            "[FPL overlay] PL: player_xG overlaid=%d appended=%d, player_xA injected=%d, "
+            "team_xG overlaid=%d appended=%d, team_xA injected=%d",
+            n_xg_overlaid, n_xg_appended, n_xa_injected,
+            n_team_xg_overlaid, n_team_xg_appended, n_team_xa_injected,
+        )
 
     # ── Reference tables (small; bulk-loaded each run for now) ────────────
 

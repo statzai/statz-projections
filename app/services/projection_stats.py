@@ -69,6 +69,12 @@ TEAM_STAT_NAMES = (
     # fires for every PL player on these two stats.
     "Assists",
     "Key Passes",
+    # Expected Assists (xA) — FPL-only synthetic stat. No Sportmonks rows
+    # exist; LeagueDataLoader._overlay_fpl_xg_xa injects per-fixture team
+    # totals (sum of FPL player xA) into team_stats in-memory for PL only.
+    # Used by distribute_team_predictions_to_players to blend into the
+    # Assists projection (mirrors Goals/xG blend).
+    "Expected Assists (xA)",
 )
 
 # Stats queried from fixture_player_stats.
@@ -114,6 +120,10 @@ PLAYER_STAT_NAMES = (
     # FPL bonus chance creation
     "Key Passes",
     "Big Chances Created",
+    # Expected Assists (xA) — FPL-only synthetic stat. Player rows are
+    # injected by LeagueDataLoader._overlay_fpl_xg_xa for PL only.
+    # Used by get_player_weighted_average inside the Assists/xA blend.
+    "Expected Assists (xA)",
 )
 
 
