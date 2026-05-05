@@ -1675,15 +1675,6 @@ class ProjectionService:
                         return 0.0
                     return float(_td_poisson.sf(threshold - 1, total))
                 pl_projections['CBIT Hit Rate'] = pl_projections.apply(_td_cbit_hit_rate, axis=1)
-                # DEBUG TEMP: Senesi diagnostic
-                _dbg = pl_projections[pl_projections['Player'].str.contains('Senesi', case=False, na=False)]
-                for _, _r in _dbg.iterrows():
-                    logger.info(
-                        f"[{league}] DEBUG Senesi fix={_r['fixture_id']} opp={_r['Opponent']} venue={_r['Venue']} "
-                        f"T={_r.get('Tackles')} BR={_r.get('Ball Recovery')} "
-                        f"CBI={_r.get('Clearances Blocks Interceptions (FPL)')} "
-                        f"FPL_Pos={_r.get('FPL Position')} CBIT_Hit_Rate={_r.get('CBIT Hit Rate')}"
-                    )
                 logger.info(f"[{league}] FPL: CBIT Hit Rate replaced with team-down projection")
 
                 fpl_points_dict_gk = {'Goals': 10, 'Assists': 3, 'Clean Sheet': 4, 'Saves': 1, 'Penalties Saved': 5, 'Goals Conceded': -1, 'Yellow Card': -1}
