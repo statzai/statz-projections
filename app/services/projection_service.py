@@ -1547,13 +1547,21 @@ class ProjectionService:
         ]
         pl_projections.drop(columns=['_player_id', '_team_id', 'position'], inplace=True, errors='ignore')
 
+        # PL only: retain Ball Recovery + CBI(FPL) team-down columns through
+        # the explicit column filter so the team-down CBIT post-pass below
+        # can read them. distribute_team_predictions_to_players propagated
+        # them from team_projections via pivot; without this they'd be
+        # dropped here and the post-pass would compute hit rate on Tackles
+        # alone (giving ~0% for everyone).
+        _def_extra = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+                      if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue',
              'Start?',
              'Assists', 'Key Passes', 'Accurate Passes', 'Goals',
              'Shots Total',
              'Shots On Target',  'Passes',  'Interceptions', 'Tackles', 'Total Crosses',
-             'Yellowcards', 'Offsides', 'Fouls', 'Fouls Drawn', 'Saves']]
+             'Yellowcards', 'Offsides', 'Fouls', 'Fouls Drawn', 'Saves'] + _def_extra]
 
         pl_projections.rename(columns={'Yellowcards': 'Yellow Cards'}, inplace=True)
 
@@ -1564,11 +1572,13 @@ class ProjectionService:
         # In[ ]:
 
         logger.info(f"[{league}] Player projections: {len(pl_projections)} rows")
+        _def_extra2 = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+                       if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'Start?', 'Shots Total',
               'Goals', 'Assists', 'Key Passes', 'Accurate Passes',
              'Shots On Target', 'Passes', 'Interceptions', 'Tackles', 'Total Crosses',
-             'Yellow Cards', 'Offsides', 'Fouls', 'Fouls Drawn', 'Saves']]
+             'Yellow Cards', 'Offsides', 'Fouls', 'Fouls Drawn', 'Saves'] + _def_extra2]
         pl_projections = pl_projections.round(2)
 
         # In[ ]:
@@ -1665,17 +1675,6 @@ class ProjectionService:
                         return 0.0
                     return float(_td_poisson.sf(threshold - 1, total))
                 pl_projections['CBIT Hit Rate'] = pl_projections.apply(_td_cbit_hit_rate, axis=1)
-                # DEBUG: log a sample row for Anderson to verify column propagation
-                _dbg = pl_projections[pl_projections['Player'].str.contains('Anderson', case=False, na=False)].head(1)
-                if not _dbg.empty:
-                    _r = _dbg.iloc[0]
-                    _cols = list(pl_projections.columns)
-                    logger.info(f"[{league}] DEBUG Anderson row: cols={_cols}")
-                    logger.info(
-                        f"[{league}] DEBUG Anderson values: Tackles={_r.get('Tackles')} "
-                        f"BR={_r.get('Ball Recovery')} CBI={_r.get('Clearances Blocks Interceptions (FPL)')} "
-                        f"Pos={_r.get('FPL Position')} CBIT_Hit_Rate={_r.get('CBIT Hit Rate')}"
-                    )
                 logger.info(f"[{league}] FPL: CBIT Hit Rate replaced with team-down projection")
 
                 fpl_points_dict_gk = {'Goals': 10, 'Assists': 3, 'Clean Sheet': 4, 'Saves': 1, 'Penalties Saved': 5, 'Goals Conceded': -1, 'Yellow Card': -1}
@@ -3616,13 +3615,21 @@ class ProjectionService:
         ]
         pl_projections.drop(columns=['_player_id', '_team_id', 'position'], inplace=True, errors='ignore')
 
+        # PL only: retain Ball Recovery + CBI(FPL) team-down columns through
+        # the explicit column filter so the team-down CBIT post-pass below
+        # can read them. distribute_team_predictions_to_players propagated
+        # them from team_projections via pivot; without this they'd be
+        # dropped here and the post-pass would compute hit rate on Tackles
+        # alone (giving ~0% for everyone).
+        _def_extra = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+                      if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue',
              'Start?',
              'Assists', 'Key Passes', 'Accurate Passes', 'Goals',
              'Shots Total',
              'Shots On Target',  'Passes',  'Interceptions', 'Tackles', 'Total Crosses',
-             'Yellowcards', 'Offsides', 'Fouls', 'Fouls Drawn', 'Saves']]
+             'Yellowcards', 'Offsides', 'Fouls', 'Fouls Drawn', 'Saves'] + _def_extra]
 
         pl_projections.rename(columns={'Yellowcards': 'Yellow Cards'}, inplace=True)
 
@@ -3633,11 +3640,13 @@ class ProjectionService:
         # In[ ]:
 
         logger.info(f"[{league}] Player projections: {len(pl_projections)} rows")
+        _def_extra2 = [c for c in ['Ball Recovery', 'Clearances Blocks Interceptions (FPL)']
+                       if c in pl_projections.columns]
         pl_projections = pl_projections[
             ['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'Start?', 'Shots Total',
               'Goals', 'Assists', 'Key Passes', 'Accurate Passes',
              'Shots On Target', 'Passes', 'Interceptions', 'Tackles', 'Total Crosses',
-             'Yellow Cards', 'Offsides', 'Fouls', 'Fouls Drawn', 'Saves']]
+             'Yellow Cards', 'Offsides', 'Fouls', 'Fouls Drawn', 'Saves'] + _def_extra2]
         pl_projections = pl_projections.round(2)
 
         # In[ ]:
