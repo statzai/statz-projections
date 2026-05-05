@@ -1665,6 +1665,17 @@ class ProjectionService:
                         return 0.0
                     return float(_td_poisson.sf(threshold - 1, total))
                 pl_projections['CBIT Hit Rate'] = pl_projections.apply(_td_cbit_hit_rate, axis=1)
+                # DEBUG: log a sample row for Anderson to verify column propagation
+                _dbg = pl_projections[pl_projections['Player'].str.contains('Anderson', case=False, na=False)].head(1)
+                if not _dbg.empty:
+                    _r = _dbg.iloc[0]
+                    _cols = list(pl_projections.columns)
+                    logger.info(f"[{league}] DEBUG Anderson row: cols={_cols}")
+                    logger.info(
+                        f"[{league}] DEBUG Anderson values: Tackles={_r.get('Tackles')} "
+                        f"BR={_r.get('Ball Recovery')} CBI={_r.get('Clearances Blocks Interceptions (FPL)')} "
+                        f"Pos={_r.get('FPL Position')} CBIT_Hit_Rate={_r.get('CBIT Hit Rate')}"
+                    )
                 logger.info(f"[{league}] FPL: CBIT Hit Rate replaced with team-down projection")
 
                 fpl_points_dict_gk = {'Goals': 10, 'Assists': 3, 'Clean Sheet': 4, 'Saves': 1, 'Penalties Saved': 5, 'Goals Conceded': -1, 'Yellow Card': -1}
