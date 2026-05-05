@@ -32,6 +32,8 @@ from fastapi import Response
 logger = logging.getLogger("projection")
 
 class ProjectionAllTeams:
+    # Backstop in case the DB lookup below fails for any reason. The actual
+    # default at runtime comes from `competitions WHERE is_projected = 1`.
     DEFAULT_LEAGUES = [
         "Championship",
         "Premier League",
@@ -46,9 +48,39 @@ class ProjectionAllTeams:
         "Europa League",
     ]
 
+    @staticmethod
+    async def _resolve_default_leagues() -> list[str]:
+        """Fetch all is_projected=true competition names from the source DB.
+
+        Mirrors Laravel's `triggerRunAll()` which already queries
+        `Competition::where('is_projected', true)`. When the /api/projections/all-leagues
+        endpoint is hit without an explicit `leagues` list (e.g. direct curl,
+        ad-hoc trigger), this is the source of truth — not the static
+        DEFAULT_LEAGUES list, which goes stale every time a new comp is
+        added via the admin panel.
+        """
+        from app.source_database import get_source_connection, release_source_connection
+        conn = await get_source_connection()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT name FROM competitions "
+                    "WHERE is_projected = 1 "
+                    "ORDER BY `order` IS NULL, `order`, name"
+                )
+                rows = await cur.fetchall()
+            return [r[0] for r in rows]
+        finally:
+            release_source_connection(conn)
+
     async def projectionAllTeams(self, leagues=None):
         if leagues is None:
-            leagues = ProjectionAllTeams.DEFAULT_LEAGUES
+            try:
+                leagues = await ProjectionAllTeams._resolve_default_leagues()
+                logger.info(f"All-leagues: resolved {len(leagues)} leagues from DB (is_projected=true)")
+            except Exception as e:
+                logger.warning(f"All-leagues: DB lookup failed ({e}); falling back to hardcoded DEFAULT_LEAGUES")
+                leagues = ProjectionAllTeams.DEFAULT_LEAGUES
 
         _total_start = time.time()
         _league_times = {}
