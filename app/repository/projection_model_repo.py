@@ -19,6 +19,8 @@ for schema. Key queries:
 import asyncio
 import json
 import logging
+import os
+import shutil
 from decimal import Decimal
 from typing import Optional
 
@@ -104,26 +106,80 @@ async def fetch_active_model(competition_id: Optional[int], stat_name: str) -> O
             _db.pool.release(conn)
 
 
-async def promote_model(new_model_id: int, reason: str):
-    """Atomically: demote incumbent, activate new. Invariant: at most one
-    is_active=1 row per (competition_id, stat_name) at any moment.
+def _unversioned_target_path(versioned_file_path: str, league_dir_name: str, stat_name: str) -> str:
+    """Compute the fixed-filename .sav path that load_model() reads at
+    projection runtime. Lives next to the versioned file in the same
+    directory.
 
-    Not wired in Phase 4 (dry-run); Phase 5 calls this after the guardrail
-    check. Added now so the transaction boundary lives alongside insert.
+    Conventions match load_model() in statz_functions.py:
+      Per-league:    {dir}/{league}_{stat}_model.sav
+      All Leagues:   {dir}/All_Leagues_{stat}_model.sav  (note underscore)
+    """
+    if league_dir_name == "All Leagues":
+        target_basename = f"All_Leagues_{stat_name}_model.sav"
+    else:
+        target_basename = f"{league_dir_name}_{stat_name}_model.sav"
+    return os.path.join(os.path.dirname(versioned_file_path), target_basename)
+
+
+async def promote_model(new_model_id: int, reason: str):
+    """Atomically: demote incumbent, activate new, AND swap the .sav file
+    that load_model() reads at projection runtime.
+
+    Two-part atomicity:
+      1. DB transaction: demote + activate.
+      2. After commit: rename a pre-staged .tmp copy over the unversioned
+         filename. os.replace is atomic on POSIX.
+
+    Why both halves matter: load_model() in statz_functions.py reads a
+    fixed filename ({league}_{stat}_model.sav) — it does NOT consult
+    projection_models.is_active. Without the file swap, promotion would
+    flip DB metadata but the runtime would keep loading the old model.
+    Caught 2026-05-05 reviewing Phase 5 wiring before the first
+    auto-promote firing.
+
+    Failure handling:
+      - Source .sav missing → raise (the new model's file_path was
+        deleted — abort, don't promote)
+      - DB transaction fails → rollback + clean up .tmp + raise
+      - File rename fails after DB commit → log loud error, leave DB
+        committed (recoverable: next promotion overwrites; rollback
+        button can re-attempt)
     """
     conn = None
+    target_tmp = None
     try:
         conn = await asyncio.wait_for(get_connection(), timeout=30)
         async with conn.cursor() as cursor:
-            # Fetch the new model's (comp_id, stat) so we know which incumbent to demote
+            # Fetch new model's (comp_id, stat, file_path) + competition name
+            # so we can compute the unversioned-filename target.
             await cursor.execute(
-                "SELECT competition_id, stat_name FROM projection_models WHERE id = %s",
+                "SELECT pm.competition_id, pm.stat_name, pm.file_path, c.name AS comp_name "
+                "FROM projection_models pm "
+                "LEFT JOIN competitions c ON c.id = pm.competition_id "
+                "WHERE pm.id = %s",
                 (new_model_id,),
             )
             row = await cursor.fetchone()
             if not row:
                 raise ValueError(f"promote_model: id={new_model_id} not found")
-            comp_id, stat_name = row
+            comp_id, stat_name, file_path, comp_name = row
+
+            # Verify the versioned source exists BEFORE touching the DB.
+            if not file_path or not os.path.exists(file_path):
+                raise FileNotFoundError(
+                    f"promote_model: id={new_model_id} source file_path "
+                    f"{file_path!r} does not exist; refusing to promote"
+                )
+
+            league_dir_name = comp_name if comp_id is not None else "All Leagues"
+            target_path = _unversioned_target_path(file_path, league_dir_name, stat_name)
+            target_tmp = target_path + ".tmp"
+
+            # Pre-stage the file copy as .tmp so the post-commit step is just
+            # an atomic rename. If the .tmp copy itself fails (disk full /
+            # permission), abort before any DB write.
+            shutil.copy2(file_path, target_tmp)
 
             await conn.begin()
             try:
@@ -148,13 +204,37 @@ async def promote_model(new_model_id: int, reason: str):
                     (reason, new_model_id),
                 )
                 await conn.commit()
-                logger.info(
-                    f"[projection_models] promoted id={new_model_id} "
-                    f"(comp={comp_id}, stat={stat_name}): {reason}"
-                )
             except Exception:
                 await conn.rollback()
                 raise
+
+            # DB transaction succeeded. Atomically swap .tmp → unversioned
+            # filename. POSIX os.replace is atomic; on failure we log loud
+            # but don't roll back the DB (next promotion will overwrite).
+            try:
+                os.replace(target_tmp, target_path)
+                target_tmp = None  # consumed
+                logger.info(
+                    f"[projection_models] promoted id={new_model_id} "
+                    f"(comp={comp_id}, stat={stat_name}): {reason} | "
+                    f"file: {os.path.basename(file_path)} -> {os.path.basename(target_path)}"
+                )
+            except Exception as rename_err:
+                logger.error(
+                    f"[projection_models] DB promoted id={new_model_id} but "
+                    f"file rename failed ({target_tmp} -> {target_path}): "
+                    f"{rename_err}. Runtime will keep loading the previous "
+                    f"unversioned file until the next successful promotion.",
+                    exc_info=True,
+                )
+                raise
     finally:
+        # Clean up .tmp if it's still around (DB rollback or rename failure)
+        if target_tmp:
+            try:
+                if os.path.exists(target_tmp):
+                    os.remove(target_tmp)
+            except Exception:
+                pass
         if conn and _db.pool:
             _db.pool.release(conn)
