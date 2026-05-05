@@ -1101,30 +1101,44 @@ def get_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, 
     return (team_stat[0]).round(2), team_history, opponent_history  # UPDATED - return histories
 
 
+# Weight on team_history in get_simple_team_stat_prediction's team-vs-opp
+# blend. team_proj = ALPHA * team_history + (1 - ALPHA) * opp_history.
+# Higher = trust team's intrinsic style more, less responsive to opponent.
+#
+# Why 0.7 and not 1.0 or 0.5: validated 2026-05-05 against actual PL hit
+# rates this season. Anderson (MID, Forest) calibrated to 70% predicted
+# vs 70.6% actual at α=0.7. Senesi (DEF, Bournemouth) — α=0.7 lifts him
+# to ~43% vs 70.6% actual; the residual gap there is in the SHARE
+# calculation (his per-game DefCon avg is 11.2 but shares × team_hist
+# gives ~10.05), not the team-projection formula. See in-progress memory
+# `team_down_cbit_in_progress.md` for the share-calc follow-up.
+#
+# Was multiplicative (`team_hist × opp_hist / league_avg`) before
+# 2026-05-05. Multiplicative compounded both teams' below-average factors
+# and projected BELOW both inputs — fine for offensive stats where
+# attack/defence interaction really is multiplicative, structurally wrong
+# for defensive stats where defensive activity is mostly determined by
+# game state (which opp_history measures imperfectly anyway — high-
+# possession teams' opp_history_CBI is LOWER because their opponents
+# don't get as many CBI events, not because they're "tough on CBI").
+SIMPLE_PROJECTION_ALPHA = 0.7
+
+
 def get_simple_team_stat_prediction(team, opponent, fixtures, stat, team_stats, teams, stats_types,
                                     ratings=None, venue=None, comp_id=None, league_weightings=None,
                                     season_id=None, games=None, comp_teams=None):
     """Model-free sibling of get_team_stat_prediction.
 
     Same recency-weighted machinery (get_team_weighted_average +
-    get_opp_weighted_average + venue effects) — replaces the trained
-    model.predict([[team_hist, opp_hist]]) call with a closed-form
-    opponent-adjusted multiplier:
+    get_opp_weighted_average + venue effects) — combines the two with a
+    weighted blend instead of a multiplicative ratio:
 
-        team_stat = team_history × (opp_history / league_avg)
+        team_stat = α × team_history + (1 - α) × opp_history
 
-    Used for stats where no trained PoissonRegressor exists yet (Ball
-    Recovery, FPL CBI). Returns (projected_value, team_history, opp_history)
-    — same tuple shape as the model path so call sites are interchangeable.
-
-    Scope assumption: team_stats has been FPL-overlaid by data_loader for
-    PL only. For Ball Recovery and 'Clearances Blocks Interceptions (FPL)',
-    Sportmonks contributes zero team-level rows (verified empirically), so
-    every row in team_stats for those stat_type_ids comes from the FPL
-    overlay → naturally PL-scoped → league_avg from a simple mean is the
-    PL season average without further filtering. If this is ever called
-    for a stat with cross-league SM team_stats rows, league_avg would
-    cross-pollinate and need a comp_id filter; not a concern today.
+    where α = SIMPLE_PROJECTION_ALPHA (currently 0.7). Used for stats
+    where no trained PoissonRegressor exists yet (Ball Recovery, FPL CBI).
+    Returns (projected_value, team_history, opp_history) — same tuple
+    shape as the model path so call sites are interchangeable.
     """
     import pandas as pd
     if venue is None:
@@ -1153,16 +1167,16 @@ def get_simple_team_stat_prediction(team, opponent, fixtures, stat, team_stats, 
                                        opponent_venue, comp_id=comp_id, games=games * 2 if games else None,
                                        season_id=season_id, comp_teams=comp_teams)
 
-    stat_id = get_stat_id(stat, stats_types)
-    league_rows = team_stats[team_stats['stats_type_id'] == stat_id]
-    league_avg = league_rows['value'].mean() if not league_rows.empty else 0
-
-    if league_avg and league_avg > 0 and not pd.isna(opponent_history) and not pd.isna(team_history):
-        team_stat = team_history * (opponent_history / league_avg)
+    t_nan = pd.isna(team_history)
+    o_nan = pd.isna(opponent_history)
+    if not t_nan and not o_nan:
+        team_stat = SIMPLE_PROJECTION_ALPHA * team_history + (1 - SIMPLE_PROJECTION_ALPHA) * opponent_history
+    elif not t_nan:
+        team_stat = team_history
+    elif not o_nan:
+        team_stat = opponent_history
     else:
-        # Fallback: no league data or one of the histories is NaN.
-        # Prefer team's own weighted average; if even that's missing, return 0.
-        team_stat = team_history if not pd.isna(team_history) else 0
+        team_stat = 0
 
     return round(float(team_stat), 2), team_history, opponent_history
 
