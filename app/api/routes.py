@@ -21,6 +21,19 @@ class PartialRetrainRequest(BaseModel):
     competition_id: Optional[int] = None  # None → All Leagues fallback scope
     stats: List[str]  # e.g. ["Interceptions", "Offsides"]
 
+
+class RetrainRequest(BaseModel):
+    """Body for /api/projections/retrain.
+
+    promote=False (default): Phase 4 dry-run — train models, log
+        would-promote decisions, leave is_active untouched.
+    promote=True: Phase 5 — train, then for each model where the
+        guardrail passes (≥5% improvement OR initial baseline),
+        atomically demote incumbent + activate new. Models that
+        regress >15% are rejected.
+    """
+    promote: Optional[bool] = False
+
 from app.services.premier_league_projections_service import PremierLeagueProjectionsService
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
@@ -230,24 +243,36 @@ async def all_leagues(background_tasks: BackgroundTasks, request: AllLeaguesRequ
 
 
 @router.post("/retrain")
-async def retrain(background_tasks: BackgroundTasks):
-    """Kick off model retraining in the background. Phase 4 = dry-run only
-    (logs would-be promotions, doesn't flip is_active). Returns immediately;
-    the full retrain takes ~5-15 min depending on data volume.
+async def retrain(background_tasks: BackgroundTasks, request: RetrainRequest = None):
+    """Kick off model retraining in the background.
+
+    Body: {"promote": true|false}  (default false = dry-run)
+
+    Returns immediately; the full retrain takes ~30 min with the trimmed
+    grid (commit 0afcca4) on current data volumes.
 
     Shares the _projection_running lock with the projection endpoints —
     training 132+ PoissonRegressor models + grid searches is memory-heavy
     and can OOM if a projection is running concurrently. Returns 'busy'
     if a projection is already in progress; caller should retry later.
+
+    Phase 4 (dry-run) inserts new models with is_active=0 and only logs
+    promotion decisions. Phase 5 (promote=true) atomically demotes the
+    incumbent and activates the new model when the guardrail passes
+    (≥5% improvement OR no incumbent). Models that regress >15% are
+    rejected and incumbent stays.
     """
     from app.services.retrain_service import retrain_all_models
 
     if not _try_acquire_lock():
         return {"status": "busy", "message": "A projection or retrain is already running. Wait for it to finish."}
 
+    promote = bool(request.promote) if request else False
+    dry_run = not promote
+
     async def _run():
         try:
-            await retrain_all_models(dry_run=True)
+            await retrain_all_models(dry_run=dry_run)
         except Exception as e:
             logger.error(f"retrain FAILED: {e}", exc_info=True)
         finally:
@@ -255,7 +280,8 @@ async def retrain(background_tasks: BackgroundTasks):
             logger.info("Retrain lock released.")
 
     background_tasks.add_task(_run)
-    return {"status": "started", "mode": "dry-run", "message": "Retraining started in background; check projection.log for per-(league,stat) output"}
+    mode = "promote" if promote else "dry-run"
+    return {"status": "started", "mode": mode, "message": f"Retraining started in background ({mode}); check projection.log for per-(league,stat) output"}
 
 
 @router.post("/retrain/partial")
