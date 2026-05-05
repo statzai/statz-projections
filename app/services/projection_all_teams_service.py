@@ -1,4 +1,6 @@
+import gc
 import logging
+import resource
 import time
 from datetime import datetime, timezone
 from app.repository.projection_run_repo import touch_all_running, upsert_run_complete
@@ -1806,6 +1808,29 @@ class ProjectionAllTeams:
                     )
                 except Exception as _status_err:
                     logger.error(f"[{league}] failed to write status row: {_status_err}")
+            finally:
+                # Memory hygiene between leagues. The all-leagues batch has
+                # OOM-killed the gunicorn worker mid-run multiple times
+                # (Apr 22 retrain, 2026-05-05 Saudi Pro mid-batch). Each
+                # iteration loads a per-league LeagueDataLoader (50k+ team
+                # rows, 200k+ player rows for euro comps) plus model dicts
+                # plus per-player projection DataFrames. References can pin
+                # via ProjectionService._current_source class attr, closures,
+                # or downstream caches. Explicit nullification + gc.collect
+                # forces release between iterations. RSS log line lets us
+                # see if the leak is bounded going forward.
+                try:
+                    del source
+                except (NameError, UnboundLocalError):
+                    pass
+                try:
+                    del _loader
+                except (NameError, UnboundLocalError):
+                    pass
+                ProjectionService._current_source = None
+                gc.collect()
+                _rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                logger.info(f"[{league}] memory after cleanup: peak RSS={_rss_mb:.0f} MB")
 
         _total_elapsed = (time.time() - _total_start) / 60
         logger.info("=" * 60)
