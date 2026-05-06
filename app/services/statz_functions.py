@@ -1501,6 +1501,17 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
     # UDATED - pass team_id and comps to get_weighted_player_stats function
     player_stats = get_weighted_player_stats(df, team_df, player_id, team_id, stat, stats_types, fixtures, comps,
                                              weight, mins, games)
+    # Drop rows where Team {stat} is 0. These represent fixtures where the
+    # team-level value isn't in team_stats — typically cup/international
+    # games not loaded in team_df, or FPL-only synthetic stats (Ball
+    # Recovery, CBI(FPL)) that only have team rows for the current PL
+    # season. Without this filter, the player's value still counts toward
+    # the numerator while the denominator excludes those fixtures, which
+    # massively inflates share for players with cup/international history.
+    # Caught 2026-05-06 via Yates / Reed Recoveries projections at
+    # 53% / 37% share (real PL share ~5-15%) → DM FPL points 4-5 PTS
+    # vs realistic 1-2.
+    player_stats = player_stats[player_stats[f'Team {stat}'] > 0].reset_index(drop=True)
     weighted_sum = player_stats[f'Weighted Player {stat}'].sum()
     if weighted_sum == 0:
         return 0
