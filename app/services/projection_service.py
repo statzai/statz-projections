@@ -1919,8 +1919,9 @@ class ProjectionService:
         _t = time.time()
         player_stat_probs = get_poisson_probs(pl_projections, perc_stats, lines)
         # Yellowcards: single threshold (1+ only).
-        if 'Yellowcards' in pl_projections.columns:
-            yellow_probs = get_poisson_probs(pl_projections, ['Yellowcards'], [1])
+        # Note: 'Yellowcards' is renamed to 'Yellow Cards' upstream of this point.
+        if 'Yellow Cards' in pl_projections.columns:
+            yellow_probs = get_poisson_probs(pl_projections, ['Yellow Cards'], [1])
             player_stat_probs = pd.concat([player_stat_probs, yellow_probs], ignore_index=True)
         logger.info(f"[{league}] Player stat probabilities done ({time.time()-_t:.1f}s)")
         player_stat_probs = player_stat_probs.round(2)
@@ -4352,8 +4353,9 @@ class ProjectionService:
 
 
         player_stat_probs = get_poisson_probs(pl_projections, perc_stats, lines)
-        if 'Yellowcards' in pl_projections.columns:
-            yellow_probs = get_poisson_probs(pl_projections, ['Yellowcards'], [1])
+        # Note: 'Yellowcards' is renamed to 'Yellow Cards' upstream of this point.
+        if 'Yellow Cards' in pl_projections.columns:
+            yellow_probs = get_poisson_probs(pl_projections, ['Yellow Cards'], [1])
             player_stat_probs = pd.concat([player_stat_probs, yellow_probs], ignore_index=True)
         player_stat_probs = player_stat_probs.round(2)
         player_stat_probs.to_csv(f"{ProjectionService.SAVE_FILE_PATH}/{league} Player Stat Probabilities.csv", index=False)

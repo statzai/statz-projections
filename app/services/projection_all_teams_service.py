@@ -1777,8 +1777,9 @@ class ProjectionAllTeams:
                 # In[ ]:
 
                 player_stat_probs = get_poisson_probs(pl_projections, perc_stats, lines)
-                if 'Yellowcards' in pl_projections.columns:
-                    yellow_probs = get_poisson_probs(pl_projections, ['Yellowcards'], [1])
+                # Note: 'Yellowcards' is renamed to 'Yellow Cards' upstream of this point.
+                if 'Yellow Cards' in pl_projections.columns:
+                    yellow_probs = get_poisson_probs(pl_projections, ['Yellow Cards'], [1])
                     player_stat_probs = pd.concat([player_stat_probs, yellow_probs], ignore_index=True)
                 player_stat_probs = player_stat_probs.round(2)
                 # player_stat_probs.to_csv(rf"{save_file_path}\{league} Player Stat Probabilities.csv", index=False)
