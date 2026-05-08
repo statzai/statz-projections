@@ -685,10 +685,14 @@ class EuroCompProjectionService:
 
         pl_projections.rename(columns={'Fouls': 'Fouls Committed'}, inplace=True)
 
-        perc_stats = ['Shots On Target', 'Fouls Committed', 'Fouls Drawn']
+        perc_stats = ['Shots On Target', 'Fouls Committed', 'Fouls Drawn',
+                      'Goals', 'Tackles', 'Shots Total', 'Offsides']
         lines = [1, 2, 3]
 
         player_stat_probs = get_poisson_probs(pl_projections, perc_stats, lines)
+        if 'Yellowcards' in pl_projections.columns:
+            yellow_probs = get_poisson_probs(pl_projections, ['Yellowcards'], [1])
+            player_stat_probs = pd.concat([player_stat_probs, yellow_probs], ignore_index=True)
         player_stat_probs = player_stat_probs.round(2)
 
         # Save player stat props

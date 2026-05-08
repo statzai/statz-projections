@@ -15,6 +15,7 @@ STATUS_TYPES = {
     "Assists": 79,
     "Passes": 80,
     "Yellow Cards": 84,
+    "Yellowcards": 84,  # alias — projection column name is 'Yellowcards' (no space)
     "Shots On Target": 86,
     "Fouls Drawn": 96,
     "Total Crosses": 98,

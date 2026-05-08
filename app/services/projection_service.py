@@ -1907,7 +1907,10 @@ class ProjectionService:
 
         # In[ ]:
 
-        perc_stats = ['Shots On Target', 'Fouls Committed', 'Fouls Drawn']
+        # Multi-line markets (1+, 2+, 3+). Yellowcards handled separately below
+        # because 2+ yellows = red card (probability ~0, not a useful market).
+        perc_stats = ['Shots On Target', 'Fouls Committed', 'Fouls Drawn',
+                      'Goals', 'Tackles', 'Shots Total', 'Offsides']
         lines = [1, 2, 3]
 
         # In[ ]:
@@ -1915,6 +1918,10 @@ class ProjectionService:
         logger.info(f"[{league}] Computing player stat probabilities...")
         _t = time.time()
         player_stat_probs = get_poisson_probs(pl_projections, perc_stats, lines)
+        # Yellowcards: single threshold (1+ only).
+        if 'Yellowcards' in pl_projections.columns:
+            yellow_probs = get_poisson_probs(pl_projections, ['Yellowcards'], [1])
+            player_stat_probs = pd.concat([player_stat_probs, yellow_probs], ignore_index=True)
         logger.info(f"[{league}] Player stat probabilities done ({time.time()-_t:.1f}s)")
         player_stat_probs = player_stat_probs.round(2)
         # player_stat_probs.to_csv(rf"{save_file_path}\{league} Player Stat Probabilities.csv", index=False)
@@ -4339,11 +4346,15 @@ class ProjectionService:
         pl_projections.rename(columns={'Fouls': 'Fouls Committed'}, inplace=True)
 
 
-        perc_stats = ['Shots On Target', 'Fouls Committed', 'Fouls Drawn']
+        perc_stats = ['Shots On Target', 'Fouls Committed', 'Fouls Drawn',
+                      'Goals', 'Tackles', 'Shots Total', 'Offsides']
         lines = [1, 2, 3]
 
 
         player_stat_probs = get_poisson_probs(pl_projections, perc_stats, lines)
+        if 'Yellowcards' in pl_projections.columns:
+            yellow_probs = get_poisson_probs(pl_projections, ['Yellowcards'], [1])
+            player_stat_probs = pd.concat([player_stat_probs, yellow_probs], ignore_index=True)
         player_stat_probs = player_stat_probs.round(2)
         player_stat_probs.to_csv(f"{ProjectionService.SAVE_FILE_PATH}/{league} Player Stat Probabilities.csv", index=False)
         await insert_players_stats_async(player_stat_probs, teams=teams, competition_id=league_id, comp_teams=comp_teams)
