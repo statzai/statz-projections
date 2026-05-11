@@ -10,7 +10,6 @@ from app.repository.projection_run_repo import upsert_run_complete
 
 class AllLeaguesRequest(BaseModel):
     leagues: Optional[List[str]] = None
-    fetch_first: Optional[bool] = False
 
 
 class PromoteModelRequest(BaseModel):
@@ -39,7 +38,6 @@ from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
 from app.models.requests.league_request import LeagueRequest
 from app.services.projection_all_teams_service import ProjectionAllTeams
-from app.services.fetch_all_data_service import FetchAllDataService
 
 router = APIRouter(prefix="/api/projections", tags=["API"])
 logger = logging.getLogger("routes")
@@ -48,7 +46,6 @@ projection_service = ProjectionService()
 premier_league_service = PremierLeagueProjectionsService()
 euro_comp_service = EuroCompProjectionService()
 projection_all_teams_service = ProjectionAllTeams()
-fetch_all_data_service = FetchAllDataService()
 
 # Two-tier lock: an OS file-lock for cross-worker serialisation + an
 # in-process boolean for cross-coroutine serialisation within a single
@@ -137,24 +134,8 @@ def _league_to_competition_id(league: str) -> str:
     return league.lower().replace(' ', '-').replace('.', '')
 
 
-async def _run_fetch_if_needed(fetch_first: bool):
-    """Run data fetch before projections when triggered from admin panel."""
-    if not fetch_first:
-        return
-    logger.info("fetch_first=True — fetching fresh data before projecting...")
+async def _run_all_leagues(leagues=None, **_unused):
     try:
-        await fetch_all_data_service.import_all_tables()
-        # Invalidate cache so the next projection loads fresh CSVs
-        ProjectionService._cache.invalidate()
-        logger.info("fetch_first: data fetch complete, cache invalidated")
-    except Exception as e:
-        logger.error(f"fetch_first: data fetch FAILED: {e}", exc_info=True)
-        # Continue with projection anyway — better stale data than no projection
-
-
-async def _run_all_leagues(leagues=None, fetch_first=False):
-    try:
-        await _run_fetch_if_needed(fetch_first)
         await projection_all_teams_service.projectionAllTeams(leagues=leagues)
     except Exception as e:
         logger.error(f"All-leagues projection FAILED: {e}", exc_info=True)
@@ -167,7 +148,6 @@ async def _run_single_league(request):
     competition_id = _league_to_competition_id(request.league)
     started_at = datetime.now(timezone.utc).isoformat()
     try:
-        await _run_fetch_if_needed(getattr(request, 'fetch_first', False))
         if EuroCompProjectionService.is_euro_comp(request.league):
             await euro_comp_service.projections(request)
         else:
@@ -181,13 +161,6 @@ async def _run_single_league(request):
     finally:
         _release_lock()
         logger.info("Projection lock released.")
-
-
-async def _run_fetch_data():
-    try:
-        await fetch_all_data_service.import_all_tables()
-    except Exception as e:
-        logger.error(f"fetch-data FAILED: {e}", exc_info=True)
 
 
 @router.post("")
@@ -235,11 +208,9 @@ async def all_leagues(background_tasks: BackgroundTasks, request: AllLeaguesRequ
     if not _try_acquire_lock():
         return {"status": "busy", "message": "A projection is already running. Wait for it to finish."}
     leagues = request.leagues if request else None
-    fetch_first = request.fetch_first if request else False
-    background_tasks.add_task(_run_all_leagues, leagues, fetch_first)
+    background_tasks.add_task(_run_all_leagues, leagues)
     msg = f"leagues: {leagues}" if leagues else "all leagues"
-    fetch_msg = " (fetching data first)" if fetch_first else ""
-    return {"status": "started", "message": f"Projection started ({msg}){fetch_msg}"}
+    return {"status": "started", "message": f"Projection started ({msg})"}
 
 
 @router.post("/retrain")
@@ -338,29 +309,8 @@ async def promote_model_endpoint(model_id: int, request: PromoteModelRequest = N
         return {"status": "error", "message": f"Internal error: {type(e).__name__}"}
 
 
-@router.post("/fetch-data")
-async def fetch_data():
-    """Fetch latest data from source DB and invalidate cache (synchronous).
-
-    Shares the _projection_running lock with projections and retrains. Prior
-    to 2026-04-24 this endpoint had no lock — concurrent calls (e.g. admin
-    panel button clicked twice, or fast successive SSH curls) would race
-    inside _merge_csv: worker B could read the CSV, worker A write, then
-    worker B overwrite with its stale merge result. Net effect was partial
-    truncation of big tables (fixture_player_stats, fixture_team_stats) —
-    PL alone lost ~170k rows in one such race today, silently breaking
-    every projection downstream. Lock prevents the race entirely.
-    """
-    if not _try_acquire_lock():
-        return {"status": "busy", "message": "A projection, retrain or fetch is already running. Wait for it to finish."}
-    try:
-        ProjectionService._cache.invalidate()
-        t0 = time.time()
-        logger.info("fetch-data: starting import_all_tables...")
-        await fetch_all_data_service.import_all_tables()
-        elapsed = round(time.time() - t0, 1)
-        logger.info(f"fetch-data: done in {elapsed}s")
-        return {"status": "done", "message": f"Data fetch complete in {elapsed}s"}
-    finally:
-        _release_lock()
-        logger.info("Fetch-data lock released.")
+# /fetch-data endpoint removed 2026-05-11 in Phase 7.2 cleanup. Was the
+# legacy CSV-cache primer from before the 2026-04-28 DB-loader migration.
+# All callers gone: admin panel "Run Now"/"Run All" stopped passing
+# fetch_first (commit 7.1b), schedule-check stopped calling it (commit
+# 0b5e8d65), admin endpoint removed (commit 7.1).

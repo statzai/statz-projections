@@ -10,8 +10,3 @@ class LeagueRequest(BaseModel):
     # accuracy numbers that were already computed by the morning 2am run.
     # See memory/projections_system.md for the full justification.
     mode: Optional[str] = "full"
-    # When true, fetch fresh data from source DB before projecting. Used by
-    # the admin panel "Run Now" button so users get current data without
-    # having to manually trigger fetch first. Scheduled runs don't use this
-    # (the scheduler handles fetch separately with polling + timeout).
-    fetch_first: Optional[bool] = False
