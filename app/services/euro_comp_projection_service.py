@@ -10,7 +10,7 @@ from app.repository.player_stat_repo import insert_players_stats_async
 from app.repository.player_repo import insert_player_async, get_players_from_league
 from app.services.data_cache import DataCache
 from app.config import Config
-from app.data_loader import LeagueDataLoader, capture_shadow_snapshot
+from app.data_loader import LeagueDataLoader
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
@@ -75,35 +75,29 @@ class EuroCompProjectionService:
         date_to = date_from + pd.DateOffset(days=EuroCompProjectionService.DAYS)
         odds_weight = 0.5
 
-        # ── Pick data source ──
         # Euro comp scope spans the comp itself + 8 domestic top-tiers
-        # (LEAGUE_COUNTRY_DICT). In on-mode we resolve those IDs up-front
-        # via direct DB queries, then pass them to LeagueDataLoader so the
-        # team scope covers all relevant clubs.
+        # (LEAGUE_COUNTRY_DICT). Resolve IDs up-front via direct DB queries,
+        # then pass them to LeagueDataLoader so the team scope covers all
+        # relevant clubs.
         from app.services.projection_service import ProjectionService
-        if Config.USE_DB_LOADER == "on":
-            comp_id_for_load = await ProjectionService._resolve_league_id_db(league)
-            domestic_ids = []
-            for dom_league in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.keys():
-                domestic_ids.append(await ProjectionService._resolve_league_id_db(dom_league))
-            league_weightings_path = os.path.join(data_folder_path, "League Weightings.xlsx")
-            _loader = LeagueDataLoader(
-                comp_id_for_load,
-                extra_league_ids=domestic_ids,
-                league_weightings_xlsx_path=league_weightings_path,
-            )
-            await _loader.load()
-            source = _loader
-            needs_copy = False
-            logger.info(f"[{league}] Data source: LeagueDataLoader (db_loader=on, +8 domestic comps)")
-        else:
-            if not EuroCompProjectionService._cache.is_loaded():
-                EuroCompProjectionService._cache.load(str(data_folder_path))
-            source = EuroCompProjectionService._cache
-            needs_copy = True
+        comp_id_for_load = await ProjectionService._resolve_league_id_db(league)
+        domestic_ids = []
+        for dom_league in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.keys():
+            domestic_ids.append(await ProjectionService._resolve_league_id_db(dom_league))
+        league_weightings_path = os.path.join(data_folder_path, "League Weightings.xlsx")
+        _loader = LeagueDataLoader(
+            comp_id_for_load,
+            extra_league_ids=domestic_ids,
+            league_weightings_xlsx_path=league_weightings_path,
+        )
+        await _loader.load()
+        source = _loader
+        logger.info(f"[{league}] Data source: LeagueDataLoader (+8 domestic comps)")
         ProjectionService._current_source = source
+        # Loader is per-call so mutation safety isn't a concern. _maybe_copy
+        # kept as a no-op shim so call sites don't churn.
         def _maybe_copy(df):
-            return df.copy() if needs_copy and df is not None else df
+            return df
 
         player_stats = _maybe_copy(source.player_stats)
         team_stats = _maybe_copy(source.team_stats)

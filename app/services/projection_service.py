@@ -15,7 +15,7 @@ from app.repository.draftkings_repo import insert_draftkings_projections_async
 from app.repository.dream11_repo import insert_dream11_projections_async
 from app.services.data_cache import DataCache
 from app.config import Config
-from app.data_loader import capture_shadow_snapshot, LeagueDataLoader
+from app.data_loader import LeagueDataLoader
 from app.source_database import get_source_connection, release_source_connection
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -155,35 +155,25 @@ class ProjectionService:
         ctx.date_from = pd.to_datetime('today')
         ctx.date_to = ctx.date_from + pd.DateOffset(days=ProjectionService.DAYS)
 
-        # Pick data source based on USE_DB_LOADER flag.
-        #   off / shadow → CSV+DataCache (existing path; shadow runs the
-        #                  loader on the side for offline diffing)
-        #   on           → LeagueDataLoader is the source of truth
-        # The loader is per-league; the cache is a singleton. Either way, the
-        # downstream code reads the same attributes (player_stats, team_stats,
-        # fixtures_df, ...) so the rest of _setup_league is source-agnostic.
-        league_id_resolved_early = False
-        if Config.USE_DB_LOADER == "on":
-            ctx.league_id = await self._resolve_league_id_db(league)
-            league_id_resolved_early = True
-            league_weightings_path = os.path.join(ctx.data_folder_path, "League Weightings.xlsx")
-            loader = LeagueDataLoader(
-                ctx.league_id,
-                league_weightings_xlsx_path=league_weightings_path,
-            )
-            await loader.load()
-            source = loader
-            logger.info(f"[{league}] Data source: LeagueDataLoader (db_loader=on)")
-        else:
-            if not ProjectionService._cache.is_loaded():
-                ProjectionService._cache.load(str(ctx.data_folder_path))
-            source = ProjectionService._cache
+        # Data source: per-league LeagueDataLoader reads from the source DB
+        # directly. Phase 7 cleanup (2026-05-11) flattened the previous
+        # if Config.USE_DB_LOADER == "on" / else CSV+DataCache conditional —
+        # USE_DB_LOADER has been the de-facto default since 2026-04-28 and
+        # the off/shadow paths were dead code.
+        ctx.league_id = await self._resolve_league_id_db(league)
+        league_weightings_path = os.path.join(ctx.data_folder_path, "League Weightings.xlsx")
+        loader = LeagueDataLoader(
+            ctx.league_id,
+            league_weightings_xlsx_path=league_weightings_path,
+        )
+        await loader.load()
+        source = loader
+        logger.info(f"[{league}] Data source: LeagueDataLoader")
         ProjectionService._current_source = source
-        # In on-mode the loader is per-call so mutation safety isn't a concern —
-        # skip defensive .copy() to save ~250MB of allocations per league.
-        needs_copy = (Config.USE_DB_LOADER != "on")
+        # Loader is per-call so mutation safety isn't a concern — no defensive
+        # .copy() needed. Kept as a no-op shim so call sites don't churn.
         def _maybe_copy(df):
-            return df.copy() if needs_copy and df is not None else df
+            return df
 
         db_config = source.projection_config
         db_row = db_config[db_config['league_name'] == league] if not db_config.empty else pd.DataFrame()
@@ -264,25 +254,8 @@ class ProjectionService:
         ctx.b365_odds = _maybe_copy(source.b365_odds)
         ctx.stats_types = _maybe_copy(source.stats_types)
 
-        # League / season IDs — needed before dataset loads so we can filter
-        # by competition_id in the DB read. In on-mode this was already
-        # resolved via _resolve_league_id_db before the loader scope ran.
-        if not league_id_resolved_early:
-            if league == 'Brazil Serie A':
-                ctx.league_id = 648
-            else:
-                ctx.league_id = get_league_id(league, ctx.comps)
-
-        # Shadow capture (Phase 3): when flag is "shadow", run the loader
-        # alongside the cache and dump DataFrames for offline diff. Skipped
-        # in on-mode — the loader IS the source there, no need to dual-load.
-        if Config.USE_DB_LOADER == "shadow":
-            league_weightings_path = os.path.join(ctx.data_folder_path, "League Weightings.xlsx")
-            await capture_shadow_snapshot(
-                league_name=league,
-                league_id=ctx.league_id,
-                league_weightings_xlsx_path=league_weightings_path,
-            )
+        # League / season IDs — ctx.league_id was already resolved via
+        # _resolve_league_id_db before the loader scope ran.
 
         # Model and accuracy datasets — Phase 3: read from DB (projection_model_dataset
         # + projection_accuracy_dataset) instead of parquet files. Eliminates the

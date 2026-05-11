@@ -7,7 +7,7 @@ from app.repository.projection_run_repo import touch_all_running, upsert_run_com
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
 from app.config import Config
-from app.data_loader import LeagueDataLoader, capture_shadow_snapshot
+from app.data_loader import LeagueDataLoader
 from app.models.requests.league_request import LeagueRequest
 from scipy.stats import poisson
 import warnings
@@ -87,16 +87,9 @@ class ProjectionAllTeams:
         _total_start = time.time()
         _league_times = {}
 
-        # Load all shared source data ONCE before the loop (eliminates 11x
-        # redundant file reads). Skipped in db-loader mode — there each
-        # league instantiates its own LeagueDataLoader scoped to its teams.
+        # Per-league LeagueDataLoader (created in the loop below) reads
+        # from the source DB directly. No shared cache pre-load needed.
         data_folder_path = ProjectionService.DATA_FOLDER_PATH
-        if Config.USE_DB_LOADER != "on":
-            if not ProjectionService._cache.is_loaded():
-                ProjectionService._cache.load(str(data_folder_path))
-            logger.info("All-leagues: shared source data loaded into cache")
-        else:
-            logger.info("All-leagues: db_loader=on — per-league loaders, no shared cache")
 
         _euro_comp_service = EuroCompProjectionService()
 
@@ -136,33 +129,26 @@ class ProjectionAllTeams:
 
                 logger.info(f"[{league}] START projections"); _start_time = time.time()
 
-                # Per-league data source selection. In on-mode each league
-                # gets its own LeagueDataLoader scoped to its team set; in
-                # off/shadow mode all leagues share the singleton DataCache
-                # (loaded once before the loop). The downstream code reads
-                # source.X for the same attribute names regardless.
-                if Config.USE_DB_LOADER == "on":
-                    if league == 'Campeonato Brasileiro':
-                        _league_id_for_load = 648
-                    else:
-                        _league_id_for_load = await ProjectionService._resolve_league_id_db(league)
-                    league_weightings_path = os.path.join(
-                        ProjectionService.DATA_FOLDER_PATH, "League Weightings.xlsx"
-                    )
-                    _loader = LeagueDataLoader(
-                        _league_id_for_load,
-                        league_weightings_xlsx_path=league_weightings_path,
-                    )
-                    await _loader.load()
-                    source = _loader
-                    logger.info(f"[{league}] Data source: LeagueDataLoader (db_loader=on)")
-                    needs_copy = False
+                # Per-league LeagueDataLoader scoped to this league's teams.
+                if league == 'Campeonato Brasileiro':
+                    _league_id_for_load = 648
                 else:
-                    source = ProjectionService._cache
-                    needs_copy = True
+                    _league_id_for_load = await ProjectionService._resolve_league_id_db(league)
+                league_weightings_path = os.path.join(
+                    ProjectionService.DATA_FOLDER_PATH, "League Weightings.xlsx"
+                )
+                _loader = LeagueDataLoader(
+                    _league_id_for_load,
+                    league_weightings_xlsx_path=league_weightings_path,
+                )
+                await _loader.load()
+                source = _loader
+                logger.info(f"[{league}] Data source: LeagueDataLoader")
                 ProjectionService._current_source = source
+                # Loader is per-call so mutation safety isn't a concern.
+                # _maybe_copy kept as a no-op shim so call sites don't churn.
                 def _maybe_copy(df):
-                    return df.copy() if needs_copy and df is not None else df
+                    return df
             # - Fixture Player Stats
             # - Fixture Team Stats
             # - Standings
@@ -284,28 +270,8 @@ class ProjectionAllTeams:
                 ## seed + Phase 2 dual-write filter contamination by
                 ## fixture.competition_id).
 
-                # Resolve league_id up-front so we can filter the DB reads.
-                # In on-mode this was already resolved before the loader
+                # _league_id_for_load was resolved before the loader scope
                 # ran (see source-picking block above).
-                if Config.USE_DB_LOADER != "on":
-                    if league == 'Campeonato Brasileiro':
-                        _league_id_for_load = 648
-                    else:
-                        _league_id_for_load = get_league_id(league, source.comps)
-
-                # Shadow capture for parity verification — runs alongside
-                # the CSV path, dumps loader DataFrames to /tmp/loader_shadow.
-                # Skipped in on-mode (loader IS the source). Failures non-fatal.
-                if Config.USE_DB_LOADER == "shadow":
-                    league_weightings_path = os.path.join(
-                        ProjectionService.DATA_FOLDER_PATH, "League Weightings.xlsx"
-                    )
-                    await capture_shadow_snapshot(
-                        league_name=league,
-                        league_id=_league_id_for_load,
-                        league_weightings_xlsx_path=league_weightings_path,
-                    )
-
                 from app.repository.projection_dataset_repo import (
                     load_model_dataset_async, load_accuracy_dataset_async,
                 )
