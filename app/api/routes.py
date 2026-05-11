@@ -33,7 +33,6 @@ class RetrainRequest(BaseModel):
     """
     promote: Optional[bool] = False
 
-from app.services.premier_league_projections_service import PremierLeagueProjectionsService
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
 from app.models.requests.league_request import LeagueRequest
@@ -43,7 +42,6 @@ router = APIRouter(prefix="/api/projections", tags=["API"])
 logger = logging.getLogger("routes")
 
 projection_service = ProjectionService()
-premier_league_service = PremierLeagueProjectionsService()
 euro_comp_service = EuroCompProjectionService()
 projection_all_teams_service = ProjectionAllTeams()
 
@@ -195,11 +193,6 @@ async def players(request: LeagueRequest):
 @router.post("/player-props")
 async def player_props(request: LeagueRequest):
     return await projection_service.player_props(request.league)
-
-
-@router.post("/premier-projections")
-async def premier_projections():
-    return await premier_league_service.projections()
 
 
 @router.post("/all-leagues")
