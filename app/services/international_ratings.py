@@ -1,21 +1,32 @@
 """
 International team ratings (nations).
 
-Adapted from get_ratings() in statz_functions.py for the international setting:
-  - Pools fixtures from ALL international competitions for each nation
-  - Per-fixture competition importance multiplier (WC most, Friendlies least)
-  - Per-week recency decay 0.995 (slower than domestic 0.97)
-  - Opponent-strength lookup by team_id (avoids name ambiguity:
-    "Korea" / "South Korea" / "Republic of Korea" etc)
-  - Honours team_ratings.inverse: 'Yes' rows (FIFA-points baseline) use
-    multiply semantics; 'No' rows (our computed snapshots, goals/game)
-    use divide. Identical to the existing domestic path.
+Computes per-nation Attack + Defense from international fixtures, on a
+weighted-goals-per-game scale (same shape as domestic get_ratings()):
+  Attack  = Σ(adj_g  × game_weight) / Σ(game_weight)   # e.g. 2.4
+  Defense = Σ(adj_ga × game_weight) / Σ(game_weight)   # e.g. 0.7
 
-Snapshots written to team_ratings with competition_id=732 (World Cup as
-the canonical home for international ratings) and Date=quarter-end.
+Key differences from the domestic get_ratings():
+  - Pool of 17 international competitions (WC, Euros, Copa, AFCON, Asian Cup,
+    Nations League, friendlies, all six WC qualifying confederations, three
+    continental tournament qualifiers).
+  - Per-fixture competition importance multiplier (WC=1.6 ... Friendly=0.5).
+  - Per-week recency decay 0.995 (slower than domestic 0.97 since nations
+    play far fewer games per calendar week).
+  - Opponent strength is ALWAYS sourced from FIFA baselines stored in
+    team_ratings with inverse='Yes'. The lookup is time-aware: each
+    fixture uses the FIFA snapshot closest before its kickoff date.
+  - Goal dampening: per-team per-fixture goal counts (both raw G and xG)
+    are soft-capped via piecewise-linear above 4 (decay 0.3) and hard-cap
+    at 8. Blunts the rating distortion from 7-0 / 10-0 blowouts that are
+    far more common in internationals than domestic football.
+  - Below MIN_GAMES_FOR_STATZ (10) total int'l games in our DB, a team
+    gets a "FIFA carry-forward" row (inverse='Yes', FIFA values copied
+    from the most recent FIFA snapshot ≤ target_date) instead of a
+    computed Statz rating. Keeps low-sample teams stable.
 
-Test-first design: compute_quarterly_snapshot() returns a DataFrame for
-review. Caller passes commit=True to actually write rows.
+This function does NOT write to the DB. Caller passes commit=False (default)
+and inspects the returned DataFrame.
 """
 import logging
 from datetime import date
@@ -48,7 +59,7 @@ INTERNATIONAL_COMP_IDS = [
     1082,  # Friendly International
 ]
 
-# Per-competition importance multiplier on each match's contribution to ratings.
+# Per-competition importance multiplier on each match's contribution.
 COMP_IMPORTANCE = {
     732:  1.6,   # World Cup
     720:  1.5,   # WC Qual Europe
@@ -69,17 +80,8 @@ COMP_IMPORTANCE = {
     1082: 0.5,   # Friendly International
 }
 
-# Per-week recency decay. Half-life ~138 weeks (~2.7 years) — slower than
-# domestic 0.97 because nations play far fewer games per calendar week.
+# Per-week recency decay. Half-life ~138 weeks (~2.7 years).
 DECAY_WEIGHT = 0.995
-
-# Per-game blend decay for fading the prior rating out as more matches
-# are played within the window. Slower fade than the domestic
-# promoted-teams logic (0.85) — nations play fewer games and the FIFA
-# baseline is strong prior info, so we want it to hold longer:
-#   weight_prior = 0.9 ** matches_played
-# After 10 games: 35% prior + 65% new. After 20: 12% + 88%. After 30: 4% + 96%.
-BLEND_DECAY = 0.9
 
 # All international snapshots stored under World Cup comp_id.
 RATINGS_COMP_ID = 732
@@ -90,39 +92,56 @@ XG_STAT_TYPE_ID = 5304
 # state_id=5 = Full Time (the only state we count for ratings).
 STATE_FT = 5
 
+# Goal dampening for blowouts.
+# Below DAMPEN_THRESHOLD → unchanged.
+# Between THRESHOLD and CAP → threshold + (g - threshold) * DECAY.
+# Above the implied cap → hard-cap at DAMPEN_CAP.
+# Applied to both raw G and xG per fixture per side.
+DAMPEN_THRESHOLD = 4
+DAMPEN_DECAY = 0.3
+DAMPEN_CAP = 8
 
-async def _load_baseline(conn, prior_date: date) -> Tuple[pd.DataFrame, date]:
-    """Load the most recent rating snapshot ≤ prior_date for opponent lookup.
+# Minimum total international fixtures (across our DB) required for a
+# nation to receive a Statz Rating. Below this, the row is a FIFA
+# carry-forward (inverse='Yes', most recent FIFA snapshot copied).
+MIN_GAMES_FOR_STATZ = 10
 
-    Returns (baseline_df, baseline_date). baseline_df has columns:
-      team_id, attack, defense, inverse, date
+
+def dampen_goals(g: float) -> float:
+    """Soft-cap goal counts to mute blowout distortion."""
+    if pd.isna(g):
+        return g
+    if g <= DAMPEN_THRESHOLD:
+        return g
+    damped = DAMPEN_THRESHOLD + (g - DAMPEN_THRESHOLD) * DAMPEN_DECAY
+    return min(damped, DAMPEN_CAP)
+
+
+async def _load_all_fifa_baselines(conn) -> pd.DataFrame:
+    """Load every FIFA baseline snapshot ever stored (inverse='Yes').
+
+    Returns columns: team_id, attack, defense, date.
     """
     async with conn.cursor() as cur:
         await cur.execute(
-            "SELECT MAX(date) FROM team_ratings WHERE competition_id = %s AND date <= %s",
-            (RATINGS_COMP_ID, prior_date),
-        )
-        row = await cur.fetchone()
-        max_date = row[0] if row else None
-        if max_date is None:
-            raise ValueError(f"No team_ratings rows found for comp={RATINGS_COMP_ID} ≤ {prior_date}")
-        await cur.execute(
             """
-            SELECT team_id, attack, defense, inverse, date
+            SELECT team_id, attack, defense, date
             FROM team_ratings
-            WHERE competition_id = %s AND date = %s
+            WHERE competition_id = %s AND inverse = 'Yes'
+            ORDER BY team_id, date
             """,
-            (RATINGS_COMP_ID, max_date),
+            (RATINGS_COMP_ID,),
         )
         rows = await cur.fetchall()
-    df = pd.DataFrame(rows, columns=['team_id', 'attack', 'defense', 'inverse', 'date'])
+    df = pd.DataFrame(rows, columns=['team_id', 'attack', 'defense', 'date'])
     df['attack'] = df['attack'].astype(float)
     df['defense'] = df['defense'].astype(float)
-    return df, max_date
+    df['date'] = pd.to_datetime(df['date'])
+    return df
 
 
-async def _load_int_fixtures(conn, date_from: date, date_to: date) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Load all int'l fixtures and their xG rows in [date_from, date_to]."""
+async def _load_int_fixtures(conn, date_to: date) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Load every int'l fixture in DB (FT only) up to date_to + their xG rows."""
     placeholders = ",".join(["%s"] * len(INTERNATIONAL_COMP_IDS))
     async with conn.cursor() as cur:
         await cur.execute(
@@ -132,11 +151,10 @@ async def _load_int_fixtures(conn, date_from: date, date_to: date) -> Tuple[pd.D
                    f.home_team_goals AS home_score, f.away_team_goals AS away_score
             FROM fixtures f
             WHERE f.competition_id IN ({placeholders})
-              AND f.kickoff_datetime >= %s
               AND f.kickoff_datetime <= %s
               AND f.state_id = %s
             """,
-            tuple(INTERNATIONAL_COMP_IDS) + (date_from, date_to, STATE_FT),
+            tuple(INTERNATIONAL_COMP_IDS) + (date_to, STATE_FT),
         )
         rows = await cur.fetchall()
     fixtures = pd.DataFrame(rows, columns=[
@@ -147,7 +165,6 @@ async def _load_int_fixtures(conn, date_from: date, date_to: date) -> Tuple[pd.D
         return fixtures, pd.DataFrame(columns=['fixture_id', 'team_id', 'xg'])
 
     fids = fixtures['fixture_id'].tolist()
-    # MySQL placeholder list — chunk if many fixtures (max ~30k packet)
     placeholders_f = ",".join(["%s"] * len(fids))
     async with conn.cursor() as cur:
         await cur.execute(
@@ -166,30 +183,44 @@ async def _load_int_fixtures(conn, date_from: date, date_to: date) -> Tuple[pd.D
     return fixtures, xg
 
 
-def _adjust_for_opponent(row, baseline_lookup) -> Tuple[float, float]:
-    """Apply opponent-strength adjustment.
+class FifaLookup:
+    """Time-aware opponent strength lookup against FIFA snapshots.
 
-    Matches the existing get_ratings() logic exactly:
-      - Adj Goals Against /= opp.attack/100  (always; Attack semantics consistent)
-      - If opp.inverse == 'Yes': Adj Goals *= opp.defense/100
-      - else:                    Adj Goals /= opp.defense/100
+    Returns the FIFA Attack + Defense for a given (team_id, game_date),
+    using the most recent FIFA snapshot strictly before game_date.
+
+    FIFA Defense is on the 'inverse' scale (high = strong defense). Caller
+    uses the inverse-path formula (multiply by Defense/100) for opponent
+    goal adjustment.
     """
-    opp = baseline_lookup.get(row['opponent_id'])
-    if opp is None:
-        return row['adj_g'], row['adj_ga']
-    att = opp['attack']
-    deff = opp['defense']
-    inv = opp['inverse']
-    if att == 0 or deff == 0:
-        return row['adj_g'], row['adj_ga']
-    adj_g = row['adj_g'] * (deff / 100) if inv == 'Yes' else row['adj_g'] / (deff / 100)
-    adj_ga = row['adj_ga'] / (att / 100)
-    return adj_g, adj_ga
+
+    def __init__(self, fifa_df: pd.DataFrame):
+        # Pre-group by team_id, sorted ascending by date, for binary-search lookups.
+        self._by_team = {
+            tid: g.sort_values('date').reset_index(drop=True)
+            for tid, g in fifa_df.groupby('team_id')
+        }
+
+    def get(self, team_id: int, game_date) -> Optional[dict]:
+        team_df = self._by_team.get(int(team_id))
+        if team_df is None:
+            return None
+        gd = pd.to_datetime(game_date)
+        valid = team_df[team_df['date'] < gd]
+        if valid.empty:
+            return None
+        row = valid.iloc[-1]
+        return {'attack': float(row['attack']), 'defense': float(row['defense'])}
 
 
-def _compute_one_team(team_id: int, all_fixtures: pd.DataFrame, xg: pd.DataFrame,
-                      baseline_lookup: dict, target_date: date) -> Optional[dict]:
-    """Compute raw weighted Attack + Defense for one team."""
+def _compute_one_team(
+    team_id: int,
+    all_fixtures: pd.DataFrame,
+    xg: pd.DataFrame,
+    fifa_lookup: FifaLookup,
+    target_date: date,
+) -> Optional[dict]:
+    """Compute weighted-avg Attack + Defense for one team. None if no fixtures."""
     mask = (all_fixtures['home_team_id'] == team_id) | (all_fixtures['away_team_id'] == team_id)
     fx = all_fixtures[mask].copy()
     if fx.empty:
@@ -202,36 +233,48 @@ def _compute_one_team(team_id: int, all_fixtures: pd.DataFrame, xg: pd.DataFrame
     fx['g']  = pd.to_numeric(fx['g'],  errors='coerce')
     fx['ga'] = pd.to_numeric(fx['ga'], errors='coerce')
     fx = fx.dropna(subset=['g', 'ga'])
+    if fx.empty:
+        return None
 
-    # xG: join on (fixture_id, team_id=this team) and (fixture_id, team_id=opponent)
+    # xG join: (fixture_id, this team) → xg_for; (fixture_id, opp) → xg_against
     xg_for = xg[xg['team_id'] == team_id][['fixture_id', 'xg']].rename(columns={'xg': 'xg_for'})
     fx = fx.merge(xg_for, on='fixture_id', how='left')
     xg_against = xg.rename(columns={'team_id': 'opponent_id', 'xg': 'xg_against'})
     fx = fx.merge(xg_against, on=['fixture_id', 'opponent_id'], how='left')
-    # Coerce to float (xg comes through as object dtype if any nulls came back),
-    # then fall back to G/GA where xG is missing.
     fx['xg_for']     = pd.to_numeric(fx['xg_for'],     errors='coerce').fillna(fx['g'])
     fx['xg_against'] = pd.to_numeric(fx['xg_against'], errors='coerce').fillna(fx['ga'])
 
-    # Adjusted goals: 0.3*G + 0.7*xG (matches domestic get_ratings)
-    fx['adj_g']  = 0.3 * fx['g']  + 0.7 * fx['xg_for']
-    fx['adj_ga'] = 0.3 * fx['ga'] + 0.7 * fx['xg_against']
+    # Dampen both G and xG before the 0.3*G + 0.7*xG blend
+    fx['g_d']          = fx['g'].apply(dampen_goals)
+    fx['ga_d']         = fx['ga'].apply(dampen_goals)
+    fx['xg_for_d']     = fx['xg_for'].apply(dampen_goals)
+    fx['xg_against_d'] = fx['xg_against'].apply(dampen_goals)
 
-    # Opponent adjustment
-    adj = fx.apply(lambda r: _adjust_for_opponent(r, baseline_lookup), axis=1)
-    fx['adj_g']  = adj.apply(lambda t: t[0])
-    fx['adj_ga'] = adj.apply(lambda t: t[1])
+    fx['adj_g']  = 0.3 * fx['g_d']  + 0.7 * fx['xg_for_d']
+    fx['adj_ga'] = 0.3 * fx['ga_d'] + 0.7 * fx['xg_against_d']
 
-    # Competition importance multiplier
+    # Time-aware opponent adjustment using FIFA snapshots.
+    # FIFA is inverse='Yes': adj_g *= opp.Defense/100, adj_ga /= opp.Attack/100.
+    def _apply_opp_adj(row):
+        opp = fifa_lookup.get(int(row['opponent_id']), row['kickoff_datetime'])
+        if opp is None or opp['attack'] == 0 or opp['defense'] == 0:
+            return row['adj_g'], row['adj_ga']
+        adj_g  = row['adj_g']  * (opp['defense'] / 100)
+        adj_ga = row['adj_ga'] / (opp['attack']  / 100)
+        return adj_g, adj_ga
+
+    adj = fx.apply(_apply_opp_adj, axis=1, result_type='expand')
+    fx['adj_g']  = adj[0]
+    fx['adj_ga'] = adj[1]
+
+    # Importance + decay → game weight
     fx['importance'] = fx['competition_id'].map(COMP_IMPORTANCE).fillna(1.0)
-
-    # Recency decay: 0.995 ^ (weeks_since_kickoff - 3), cap at 1 for ≤4w
     target_dt = pd.to_datetime(target_date)
     fx['kickoff_datetime'] = pd.to_datetime(fx['kickoff_datetime'])
     fx['weeks_since'] = ((target_dt - fx['kickoff_datetime']).dt.days // 7).clip(lower=0)
     fx['decay'] = DECAY_WEIGHT ** (fx['weeks_since'] - 3).clip(lower=0)
-
     fx['game_weight'] = fx['importance'] * fx['decay']
+
     total_weight = fx['game_weight'].sum()
     if total_weight == 0:
         return None
@@ -240,133 +283,141 @@ def _compute_one_team(team_id: int, all_fixtures: pd.DataFrame, xg: pd.DataFrame
     defense = (fx['adj_ga'] * fx['game_weight']).sum() / total_weight
 
     return {
-        'team_id': team_id,
-        'attack_raw': attack,
-        'defense_raw': defense,
-        'n_games': len(fx),
+        'team_id': int(team_id),
+        'attack': float(attack),
+        'defense': float(defense),
+        'n_games': int(len(fx)),
     }
 
 
 async def compute_quarterly_snapshot(
     target_date: date,
-    prior_date: Optional[date] = None,
     team_ids: Optional[List[int]] = None,
     commit: bool = False,
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Compute one international ratings snapshot at target_date.
 
-    Args:
-        target_date: snapshot date (typically quarter-end)
-        prior_date: pull most recent rating snapshot ≤ this date for opponent
-                    lookup. Defaults to target_date - 7d.
-        team_ids: which teams to compute. None = all teams with fixtures
-                  in the window.
-        commit: if True, write rows to team_ratings table. Default False
-                so the caller can review.
+    Pulls every int'l fixture in our DB up to target_date. Recency decay
+    naturally diminishes the influence of older games.
 
-    Returns DataFrame with columns:
-        team_id, team_name, attack, defense, attack_raw, defense_raw, n_games
+    Returns (statz_df, fifa_carry_df):
+      statz_df has columns:
+        team_id, team_name, attack, defense, n_games, inverse='No', date
+      fifa_carry_df has the same columns + inverse='Yes' for low-sample
+        teams (n_games < MIN_GAMES_FOR_STATZ or no fixtures at all). attack/
+        defense are copied from the most recent FIFA snapshot ≤ target_date.
+
+    Set commit=True to actually write rows to team_ratings (otherwise the
+    function returns the data for review without DB writes).
     """
-    if prior_date is None:
-        prior_date = pd.Timestamp(target_date) - pd.Timedelta(days=7)
-        prior_date = prior_date.date()
-
     conn = await get_source_connection()
     try:
-        baseline, baseline_date = await _load_baseline(conn, prior_date)
-        logger.info(f"Loaded baseline {baseline_date} ({len(baseline)} teams)")
-
-        # Load fixtures in [baseline_date, target_date]
-        fixtures, xg = await _load_int_fixtures(conn, baseline_date, target_date)
+        fifa_df = await _load_all_fifa_baselines(conn)
+        if fifa_df.empty:
+            raise ValueError("No FIFA baselines found in team_ratings")
         logger.info(
-            f"Loaded {len(fixtures)} fixtures + {len(xg)} xG rows in "
-            f"[{baseline_date} → {target_date}]"
+            f"Loaded {len(fifa_df)} FIFA baseline rows across "
+            f"{fifa_df['date'].nunique()} dates "
+            f"({fifa_df['date'].min().date()} → {fifa_df['date'].max().date()})"
         )
 
-        if team_ids is None:
-            team_ids = sorted(set(
-                fixtures['home_team_id'].tolist() + fixtures['away_team_id'].tolist()
-            ))
+        fixtures, xg = await _load_int_fixtures(conn, target_date)
+        logger.info(
+            f"Loaded {len(fixtures)} fixtures + {len(xg)} xG rows up to {target_date}"
+        )
 
+        # Default team set = every nation that has any FIFA baseline
+        if team_ids is None:
+            team_ids = sorted(fifa_df['team_id'].unique().tolist())
+
+        # Name map for display
         async with conn.cursor() as cur:
             ph = ",".join(["%s"] * len(team_ids))
             await cur.execute(f"SELECT id, name FROM teams WHERE id IN ({ph})", tuple(team_ids))
             name_map = dict(await cur.fetchall())
+
+        # Most recent FIFA snapshot ≤ target_date per team (for carry-forward)
+        target_dt = pd.to_datetime(target_date)
+        latest_fifa_per_team = (
+            fifa_df[fifa_df['date'] <= target_dt]
+            .sort_values('date')
+            .groupby('team_id')
+            .tail(1)
+            .set_index('team_id')
+        )
     finally:
         release_source_connection(conn)
 
-    baseline_lookup = baseline.set_index('team_id').to_dict('index')
+    fifa_lookup = FifaLookup(fifa_df)
 
-    results = []
+    statz_rows = []
+    carry_rows = []
     for tid in team_ids:
-        r = _compute_one_team(tid, fixtures, xg, baseline_lookup, target_date)
-        if r is None:
-            continue
-        r['team_name'] = name_map.get(tid, f'Team {tid}')
-        results.append(r)
+        r = _compute_one_team(tid, fixtures, xg, fifa_lookup, target_date)
+        n = (r or {}).get('n_games', 0)
+        name = name_map.get(tid, f'Team {tid}')
 
-    if not results:
-        return pd.DataFrame()
+        if r is not None and n >= MIN_GAMES_FOR_STATZ:
+            statz_rows.append({
+                'team_id': tid,
+                'team_name': name,
+                'attack': round(r['attack'], 3),
+                'defense': round(r['defense'], 3),
+                'n_games': n,
+                'inverse': 'No',
+                'date': target_date,
+            })
+        else:
+            # FIFA carry-forward
+            if tid not in latest_fifa_per_team.index:
+                continue  # no FIFA prior anywhere — skip
+            prior = latest_fifa_per_team.loc[tid]
+            carry_rows.append({
+                'team_id': tid,
+                'team_name': name,
+                'attack': float(prior['attack']),
+                'defense': float(prior['defense']),
+                'n_games': n,
+                'inverse': 'Yes',
+                'date': target_date,
+                'fifa_source_date': prior['date'].date(),
+            })
 
-    df = pd.DataFrame(results)
+    statz_df = pd.DataFrame(statz_rows)
+    carry_df = pd.DataFrame(carry_rows)
 
-    # Normalize raw computed values to mean=100 so they're on the same scale
-    # as the FIFA baseline before blending. FIFA Attack mean is 100 by
-    # construction; FIFA Defense (inverse=Yes) is also mean=100 but on a
-    # "higher=stronger" scale — we invert it (100²/D) below so high D = weak,
-    # matching the computed operational meaning.
-    df['attack_norm']  = df['attack_raw']  / df['attack_raw'].mean()  * 100
-    df['defense_norm'] = df['defense_raw'] / df['defense_raw'].mean() * 100
-
-    # Blend with prior FIFA baseline. weight_prior = 0.9 ** n_games; teams
-    # with 0 games get 100% prior. Mirrors the domestic promoted-teams logic.
-    def _blend_row(row):
-        prior = baseline_lookup.get(int(row['team_id']))
-        if prior is None:
-            # No prior available — use computed only.
-            return row['attack_norm'], row['defense_norm']
-        prior_att = float(prior['attack'])
-        prior_def = float(prior['defense'])
-        # Invert FIFA Defense (inverse=Yes) to operational scale via 100²/D so
-        # both inputs to the blend mean "low Defense = strong defense".
-        if prior.get('inverse') == 'Yes':
-            prior_def = (100 * 100) / prior_def if prior_def != 0 else 100
-        w_prior = BLEND_DECAY ** int(row['n_games'])
-        w_new = 1 - w_prior
-        return (
-            w_prior * prior_att + w_new * row['attack_norm'],
-            w_prior * prior_def + w_new * row['defense_norm'],
-        )
-
-    blended = df.apply(_blend_row, axis=1, result_type='expand')
-    df['attack']      = blended[0].round(2)
-    df['defense']     = blended[1].round(2)
-    df['attack_norm'] = df['attack_norm'].round(2)
-    df['defense_norm'] = df['defense_norm'].round(2)
-    df['attack_raw']  = df['attack_raw'].round(3)
-    df['defense_raw'] = df['defense_raw'].round(3)
-    df['weight_prior'] = (BLEND_DECAY ** df['n_games']).round(3)
-    df['date'] = target_date
+    logger.info(
+        f"Snapshot {target_date}: {len(statz_df)} Statz Ratings, "
+        f"{len(carry_df)} FIFA carry-forwards"
+    )
 
     if commit:
-        await _write_snapshot(df, target_date)
-        logger.info(f"Committed {len(df)} rows to team_ratings ({target_date})")
+        await _write_snapshot(statz_df, carry_df, target_date)
+        logger.info(f"Committed {len(statz_df) + len(carry_df)} rows to team_ratings")
     else:
-        logger.info(f"Computed {len(df)} ratings (NOT committed — pass commit=True to write)")
+        logger.info("NOT committed — pass commit=True to write to team_ratings")
 
-    return df
+    return statz_df, carry_df
 
 
-async def _write_snapshot(df: pd.DataFrame, target_date: date) -> None:
-    """Upsert snapshot rows into team_ratings."""
+async def _write_snapshot(statz_df: pd.DataFrame, carry_df: pd.DataFrame, target_date: date) -> None:
+    """Upsert all rows into team_ratings. statz rows inverse='No', carry inverse='Yes'."""
     from app.repository.db_utils import execute_chunked
-    rows = [
-        (RATINGS_COMP_ID, int(r['team_id']), target_date,
-         float(r['attack']), float(r['defense']),
-         float(r['attack']) - float(r['defense']),
-         'No')
-        for _, r in df.iterrows()
-    ]
+    rows = []
+    for _, r in statz_df.iterrows():
+        rows.append((
+            RATINGS_COMP_ID, int(r['team_id']), target_date,
+            float(r['attack']), float(r['defense']),
+            float(r['attack']) - float(r['defense']),
+            'No',
+        ))
+    for _, r in carry_df.iterrows():
+        rows.append((
+            RATINGS_COMP_ID, int(r['team_id']), target_date,
+            float(r['attack']), float(r['defense']),
+            float(r['attack']) - float(r['defense']),
+            'Yes',
+        ))
     sql = """
         INSERT INTO team_ratings
           (competition_id, team_id, date, attack, defense, overall, inverse, created_at, updated_at)
