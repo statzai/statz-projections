@@ -28,15 +28,3 @@ class Config:
 
     MIN_POOL_SIZE = int(os.getenv("MIN_POOL_SIZE", 1))
     MAX_POOL_SIZE = int(os.getenv("MAX_POOL_SIZE", 10))
-
-    # Direct DB Query Migration feature flag.
-    #   on     → LeagueDataLoader is the source of truth (DEFAULT, Phase 6 cutover 2026-04-28)
-    #   off    → CSV+DataCache only (legacy fallback, requires fresh CSVs via fetch-data)
-    #   shadow → DataCache primary + LeagueDataLoader alongside, snapshots to /tmp for diffing
-    # Cutover proven on 24-league Run All Leagues at 01:03–01:49 BST 2026-04-28
-    # (46 min total, zero failures, no OOMs) following an earlier ~3.5hr migration
-    # session that exercised every code path. To roll back temporarily set
-    # USE_DB_LOADER=off in .env and restart, but note: the 4GB DataCache will
-    # OOM the worker under any host memory pressure (the original problem the
-    # migration solved).
-    USE_DB_LOADER = os.getenv("USE_DB_LOADER", "on").lower()

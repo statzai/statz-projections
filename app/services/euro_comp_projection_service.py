@@ -8,8 +8,6 @@ from app.repository.fixtures_repo import insert_fixtures_async
 from app.repository.team_repo import insert_teams_async
 from app.repository.player_stat_repo import insert_players_stats_async
 from app.repository.player_repo import insert_player_async, get_players_from_league
-from app.services.data_cache import DataCache
-from app.config import Config
 from app.data_loader import LeagueDataLoader
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -43,10 +41,6 @@ class EuroCompProjectionService:
         'Liga Portugal': 'Portugal',
         'Scottish Premiership': 'Scotland',
     }
-
-    # Shared data cache - same instance as ProjectionService
-    from app.services.projection_service import ProjectionService
-    _cache = ProjectionService._cache
 
     @staticmethod
     def _read_df(path_no_ext: str) -> pd.DataFrame:

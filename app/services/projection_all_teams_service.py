@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from app.repository.projection_run_repo import touch_all_running, upsert_run_complete
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
-from app.config import Config
 from app.data_loader import LeagueDataLoader
 from app.models.requests.league_request import LeagueRequest
 from scipy.stats import poisson

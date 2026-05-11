@@ -13,8 +13,6 @@ from app.repository.opta_repo import insert_opta_projections_async
 from app.repository.fanteam_repo import insert_fanteam_projections_async
 from app.repository.draftkings_repo import insert_draftkings_projections_async
 from app.repository.dream11_repo import insert_dream11_projections_async
-from app.services.data_cache import DataCache
-from app.config import Config
 from app.data_loader import LeagueDataLoader
 from app.source_database import get_source_connection, release_source_connection
 
@@ -38,12 +36,9 @@ class ProjectionService:
     SAVE_FILE_PATH = APP_DIR / "projection-outputs"
     DAYS = int(os.getenv("PROJECTION_DAYS", 5))
 
-    # Shared data cache - loaded once, reused across all league projections
-    _cache = DataCache()
-
-    # Per-league data source for the current run. Set in _setup_league.
-    # Either the singleton DataCache (CSV mode) or a fresh LeagueDataLoader
-    # (DB-direct mode). Read by _prepare_league for auxiliary tables that
+    # Per-league data source for the current run. Set in _setup_league to
+    # the fresh LeagueDataLoader. Read elsewhere (transfermarkt mappings,
+    # promoted ratings, FPL player mappings) for auxiliary tables that
     # don't already flow through ctx. Safe because projections are serialised
     # by the cross-worker file lock — only one runs at a time.
     _current_source = None
