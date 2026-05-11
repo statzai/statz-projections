@@ -32,10 +32,16 @@ INTERNATIONAL_COMP_IDS = [
     732,   # World Cup
     720,   # WC Qualification Europe
     711,   # CAF World Cup Qualifiers
+    714,   # WC Qualification Asia
+    717,   # WC Qualification Concacaf
+    723,   # WC Qualification Oceania
+    726,   # WC Qualification South America
+    729,   # WC Qualification Intercontinental Playoffs
     1325,  # Euro Qualification
     1326,  # European Championship
     1114,  # Copa America
     1117,  # Africa Cup of Nations
+    1118,  # Africa Cup of Nations Qualifications
     1105,  # AFC Asian Cup
     1106,  # Asian Cup Qualification
     1538,  # UEFA Nations League
@@ -47,11 +53,17 @@ COMP_IMPORTANCE = {
     732:  1.6,   # World Cup
     720:  1.5,   # WC Qual Europe
     711:  1.5,   # WC Qual CAF
+    714:  1.5,   # WC Qual Asia
+    717:  1.5,   # WC Qual Concacaf
+    723:  1.5,   # WC Qual Oceania
+    726:  1.5,   # WC Qual South America
+    729:  1.5,   # WC Qual Intercontinental Playoffs
     1326: 1.4,   # European Championship
     1114: 1.4,   # Copa America
     1117: 1.4,   # Africa Cup of Nations
     1105: 1.4,   # AFC Asian Cup
     1325: 1.3,   # Euro Qualification
+    1118: 1.3,   # Africa Cup of Nations Qualifications
     1106: 1.3,   # Asian Cup Qualification
     1538: 0.75,  # UEFA Nations League
     1082: 0.5,   # Friendly International
