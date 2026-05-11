@@ -73,6 +73,14 @@ COMP_IMPORTANCE = {
 # domestic 0.97 because nations play far fewer games per calendar week.
 DECAY_WEIGHT = 0.995
 
+# Per-game blend decay for fading the prior rating out as more matches
+# are played within the window. Slower fade than the domestic
+# promoted-teams logic (0.85) — nations play fewer games and the FIFA
+# baseline is strong prior info, so we want it to hold longer:
+#   weight_prior = 0.9 ** matches_played
+# After 10 games: 35% prior + 65% new. After 20: 12% + 88%. After 30: 4% + 96%.
+BLEND_DECAY = 0.9
+
 # All international snapshots stored under World Cup comp_id.
 RATINGS_COMP_ID = 732
 
@@ -200,8 +208,10 @@ def _compute_one_team(team_id: int, all_fixtures: pd.DataFrame, xg: pd.DataFrame
     fx = fx.merge(xg_for, on='fixture_id', how='left')
     xg_against = xg.rename(columns={'team_id': 'opponent_id', 'xg': 'xg_against'})
     fx = fx.merge(xg_against, on=['fixture_id', 'opponent_id'], how='left')
-    fx['xg_for']     = fx['xg_for'].fillna(fx['g'])
-    fx['xg_against'] = fx['xg_against'].fillna(fx['ga'])
+    # Coerce to float (xg comes through as object dtype if any nulls came back),
+    # then fall back to G/GA where xG is missing.
+    fx['xg_for']     = pd.to_numeric(fx['xg_for'],     errors='coerce').fillna(fx['g'])
+    fx['xg_against'] = pd.to_numeric(fx['xg_against'], errors='coerce').fillna(fx['ga'])
 
     # Adjusted goals: 0.3*G + 0.7*xG (matches domestic get_ratings)
     fx['adj_g']  = 0.3 * fx['g']  + 0.7 * fx['xg_for']
@@ -299,13 +309,43 @@ async def compute_quarterly_snapshot(
         return pd.DataFrame()
 
     df = pd.DataFrame(results)
-    # Normalize raw values to mean=100 (matches domestic projection_service.py:754)
-    df['attack']  = df['attack_raw']  / df['attack_raw'].mean()  * 100
-    df['defense'] = df['defense_raw'] / df['defense_raw'].mean() * 100
-    df['attack']  = df['attack'].round(2)
-    df['defense'] = df['defense'].round(2)
+
+    # Normalize raw computed values to mean=100 so they're on the same scale
+    # as the FIFA baseline before blending. FIFA Attack mean is 100 by
+    # construction; FIFA Defense (inverse=Yes) is also mean=100 but on a
+    # "higher=stronger" scale — we invert it (100²/D) below so high D = weak,
+    # matching the computed operational meaning.
+    df['attack_norm']  = df['attack_raw']  / df['attack_raw'].mean()  * 100
+    df['defense_norm'] = df['defense_raw'] / df['defense_raw'].mean() * 100
+
+    # Blend with prior FIFA baseline. weight_prior = 0.9 ** n_games; teams
+    # with 0 games get 100% prior. Mirrors the domestic promoted-teams logic.
+    def _blend_row(row):
+        prior = baseline_lookup.get(int(row['team_id']))
+        if prior is None:
+            # No prior available — use computed only.
+            return row['attack_norm'], row['defense_norm']
+        prior_att = float(prior['attack'])
+        prior_def = float(prior['defense'])
+        # Invert FIFA Defense (inverse=Yes) to operational scale via 100²/D so
+        # both inputs to the blend mean "low Defense = strong defense".
+        if prior.get('inverse') == 'Yes':
+            prior_def = (100 * 100) / prior_def if prior_def != 0 else 100
+        w_prior = BLEND_DECAY ** int(row['n_games'])
+        w_new = 1 - w_prior
+        return (
+            w_prior * prior_att + w_new * row['attack_norm'],
+            w_prior * prior_def + w_new * row['defense_norm'],
+        )
+
+    blended = df.apply(_blend_row, axis=1, result_type='expand')
+    df['attack']      = blended[0].round(2)
+    df['defense']     = blended[1].round(2)
+    df['attack_norm'] = df['attack_norm'].round(2)
+    df['defense_norm'] = df['defense_norm'].round(2)
     df['attack_raw']  = df['attack_raw'].round(3)
     df['defense_raw'] = df['defense_raw'].round(3)
+    df['weight_prior'] = (BLEND_DECAY ** df['n_games']).round(3)
     df['date'] = target_date
 
     if commit:
