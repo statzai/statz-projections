@@ -534,11 +534,9 @@ class ProjectionService:
 
             # Za league
             file_path_league = os.path.join(data_folder_path, f"{league} Projection Accuracy.csv")
-            accuracy_df_league.to_csv(file_path_league, index=False)
 
             # Za sve lige
             file_path_all = os.path.join(data_folder_path, "All Leagues Projection Accuracy.csv")
-            accuracy_df_all.to_csv(file_path_all, index=False)
 
             logger.info(f"[{league}] Step: projection accuracy saved")
             ## THIS IS ALL NEW - ADD ABSOLUTE ERROR COLUMNS TO ACCURACY DATASET
@@ -578,7 +576,6 @@ class ProjectionService:
                               comp_teams=comp_teams, teams_df=teams, fixtures_df=fixtures_df, team_stats=team_stats,
                               stats_types=stats_types, weight=0.96, games=30, weightings=weightings,
                               league_above_id=league_above_id, league_below_id=league_below_id)
-        ratings.to_csv(f"{save_file_path}/{league} Get Ratings.csv", index=False)
         # In[12]:
 
         # Team-name mapping: all mappings live in transfermarkt_team_mappings DB table.
@@ -807,7 +804,6 @@ class ProjectionService:
         logger.info(f"[{league}] Step: team ratings calculated + saved to DB")
         
 
-        all_team_ratings[all_team_ratings['League'] == league].to_csv(f"{save_file_path}/{league} Team Ratings.csv", index=False)
 
         return ratings
 
@@ -924,13 +920,11 @@ class ProjectionService:
         _t = time.time()
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
         logger.info(f"[{league}] Fixtures predicted ({time.time()-_t:.1f}s)")
-        score_preds.to_csv(f"{save_file_path}/{league} Score preds.csv")
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
         boost = 1.1  # NEW - Set draw boost to fixed value
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
-        next_fix.to_csv(f"{save_file_path}/{league} Next Fix.csv", index=False)
 
         home_win = []
         draw = []
@@ -1000,7 +994,6 @@ class ProjectionService:
                          inplace=True)  # NEW - Drop odds from main predictions dataframe
 
         # score_preds.to_csv(rf"{save_file_path}\{league} Fixtures.csv", index=False)
-        score_preds.to_csv(f"{save_file_path}/{league} Fixtures.csv", index=False)
 
         logger.info(f"[{league}] Inserting fixtures into DB...")
         _t = time.time()
@@ -1159,7 +1152,6 @@ class ProjectionService:
             avg_table_with_probs_and_point_limits = get_avg_table_with_probs_and_point_limits(avg_table_with_probs,
                                                                                               all_tables)
             # avg_table_with_probs_and_point_limits.to_csv(rf"{save_file_path}\{league} Predicted Table.csv", index=False)
-            avg_table_with_probs_and_point_limits.to_csv(f"{save_file_path}/{league} Predicted Table.csv", index=False)
             await insert_predicted_table_async(avg_table_with_probs_and_point_limits, teams, comps, league)
 
         # # **Team Projections**
@@ -1193,7 +1185,6 @@ class ProjectionService:
                                                                  previous_season_id_above, previous_season_id_below],
                                                       games=50,
                                                       comp_teams=comp_teams[comp_teams['competition_id'] == league_id])
-        team_projections.to_csv(f"{save_file_path}/{league} team projections.csv")
         # In[ ]:
 
         ## NEW - Add historical stats to the model dataset and drop them from team projections afterwards
@@ -1413,7 +1404,6 @@ class ProjectionService:
         team_projections_save = team_projections_save.round(2)
 
         # team_projections_save.to_csv(rf"{save_file_path}\{league} Team.csv", index=False)
-        team_projections_save.to_csv(f"{save_file_path}/{league} Team.csv", index=False)
         await insert_teams_async(team_projections_save, teams=teams, competition_id=league_id, comp_teams=comp_teams)
 
         team_projections_save.rename(columns={'Accurate Passes': 'Successful Passes'},
@@ -1556,7 +1546,6 @@ class ProjectionService:
         pl_projections.reset_index(drop=True, inplace=True)
         pl_projections = pl_projections.round(2)
         # pl_projections.to_csv(rf"{save_file_path}\{league} Player.csv", index=False)
-        pl_projections.to_csv(f"{save_file_path}/{league} Player.csv", index=False)
         logger.info(f"[{league}] Inserting player projections into DB ({len(pl_projections)} rows)...")
         _t = time.time()
         await insert_player_async(pl_projections, teams=teams, competition_id=league_id, comp_teams=comp_teams)
@@ -1895,7 +1884,6 @@ class ProjectionService:
         logger.info(f"[{league}] Player stat probabilities done ({time.time()-_t:.1f}s)")
         player_stat_probs = player_stat_probs.round(2)
         # player_stat_probs.to_csv(rf"{save_file_path}\{league} Player Stat Probabilities.csv", index=False)
-        player_stat_probs.to_csv(f"{save_file_path}/{league} Player Stat Probabilities.csv", index=False)
         # await insert_players_stats_async(pl_projections)
         logger.info(f"[{league}] Inserting player stat probabilities into DB...")
         _t = time.time()
@@ -2013,13 +2001,11 @@ class ProjectionService:
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
         # debug prints removed
 
-        score_preds.to_csv(f"{save_file_path}/{league} Score preds.csv")
         # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
         boost = 1.1  # NEW - Set draw boost to fixed value
         score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
         score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
         score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
-        next_fix.to_csv(f"{save_file_path}/{league} Next Fix.csv", index=False)
 
         home_win = []
         draw = []
@@ -2091,7 +2077,6 @@ class ProjectionService:
         # score_preds.to_csv(rf"{save_file_path}\{league} Fixtures.csv", index=False)
         # debug print removed
         # debug print removed
-        score_preds.to_csv(f"{save_file_path}/{league} Fixtures.csv", index=False)
         await insert_fixtures_async(score_preds, teams=teams, competition_id=league_id, comp_teams=comp_teams)
 
     async def predicted_table(self, league_request):
@@ -2425,7 +2410,6 @@ class ProjectionService:
             avg_table_with_probs_and_point_limits = get_avg_table_with_probs_and_point_limits(avg_table_with_probs,
                                                                                               all_tables)
             # avg_table_with_probs_and_point_limits.to_csv(rf"{save_file_path}\{league} Predicted Table.csv", index=False)
-            avg_table_with_probs_and_point_limits.to_csv(f"{ProjectionService.SAVE_FILE_PATH}/{league} Predicted Table.csv", index=False)
             await insert_predicted_table_async(avg_table_with_probs_and_point_limits, teams, comps, league)
 
     async def teams(self, league_request):
@@ -2932,7 +2916,6 @@ class ProjectionService:
 
         team_projections_save = team_projections_save.round(2)
 
-        team_projections_save.to_csv(f"{ProjectionService.SAVE_FILE_PATH}/{league} Team.csv", index=False)
         await insert_teams_async(team_projections_save, teams=teams, competition_id=league_id, comp_teams=comp_teams)
 
 
@@ -3632,7 +3615,6 @@ class ProjectionService:
         pl_projections.reset_index(drop=True, inplace=True)
         pl_projections = pl_projections.round(2)
         # pl_projections.to_csv(rf"{save_file_path}\{league} Player.csv", index=False)
-        pl_projections.to_csv(f"{ProjectionService.SAVE_FILE_PATH}/{league} Player.csv", index=False)
         await insert_player_async(pl_projections, teams=teams, competition_id=league_id, comp_teams=comp_teams)
 
     async def player_props(self, league_request):
@@ -4327,5 +4309,4 @@ class ProjectionService:
             yellow_probs = get_poisson_probs(pl_projections, ['Yellow Cards'], [1])
             player_stat_probs = pd.concat([player_stat_probs, yellow_probs], ignore_index=True)
         player_stat_probs = player_stat_probs.round(2)
-        player_stat_probs.to_csv(f"{ProjectionService.SAVE_FILE_PATH}/{league} Player Stat Probabilities.csv", index=False)
         await insert_players_stats_async(player_stat_probs, teams=teams, competition_id=league_id, comp_teams=comp_teams)

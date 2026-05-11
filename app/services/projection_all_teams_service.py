@@ -544,11 +544,9 @@ class ProjectionAllTeams:
 
                 # Za league
                 file_path_league = os.path.join(data_folder_path, f"{league} Projection Accuracy.csv")
-                accuracy_df_league.to_csv(file_path_league, index=False)
 
                 # Za sve lige
                 file_path_all = os.path.join(data_folder_path, "All Leagues Projection Accuracy.csv")
-                accuracy_df_all.to_csv(file_path_all, index=False)
 
                 # In[ ]:
                 logger.info(f"[{league}] Step: projection accuracy saved")
@@ -593,7 +591,6 @@ class ProjectionAllTeams:
                                       comp_teams=comp_teams, teams_df=teams, fixtures_df=fixtures_df, team_stats=team_stats,
                                       stats_types=stats_types, weight=0.96, games=30, weightings=weightings,
                                       league_above_id=league_above_id, league_below_id=league_below_id)
-                ratings.to_csv(f"{save_file_path}/{league} Get Ratings.csv", index=False)
                 logger.info(f"[{league}] Step: team ratings calculated ({time.time()-_t:.1f}s)")
                 # In[12]:
 
@@ -876,7 +873,6 @@ class ProjectionAllTeams:
                 logger.info(f"[{league}] Step: team ratings saved to DB")
 
 
-                all_team_ratings[all_team_ratings['League'] == league].to_csv(f"{save_file_path}/{league} Team Ratings.csv", index=False)
 
                 # ## **Make Predictions for Next Fixture Round**
                 #
@@ -904,13 +900,11 @@ class ProjectionAllTeams:
             
 
                 score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
-                score_preds.to_csv(f"{save_file_path}/{league} Score preds.csv")
                 # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
                 boost = 1.1  # NEW - Set draw boost to fixed value
                 score_preds['Home Odds %'] = ((1 / next_fix['bet365_home_odds_decimal']) * 100)
                 score_preds['Draw Odds %'] = ((1 / next_fix['bet365_draw_odds_decimal']) * 100)
                 score_preds['Away Odds %'] = ((1 / next_fix['bet365_away_odds_decimal']) * 100)
-                next_fix.to_csv(f"{save_file_path}/{league} Next Fix.csv", index=False)
 
                 home_win = []
                 draw = []
@@ -980,7 +974,6 @@ class ProjectionAllTeams:
                                  inplace=True)  # NEW - Drop odds from main predictions dataframe
 
                 # score_preds.to_csv(rf"{save_file_path}\{league} Fixtures.csv", index=False)
-                score_preds.to_csv(f"{save_file_path}/{league} Fixtures.csv", index=False)
 
                 logger.info(f"[{league}] Inserting fixtures into DB ({len(score_preds)} rows)...")
                 _t = time.time()
@@ -1144,7 +1137,6 @@ class ProjectionAllTeams:
                     avg_table_with_probs_and_point_limits = get_avg_table_with_probs_and_point_limits(avg_table_with_probs,
                                                                                                       all_tables)
                     # avg_table_with_probs_and_point_limits.to_csv(rf"{save_file_path}\{league} Predicted Table.csv", index=False)
-                    avg_table_with_probs_and_point_limits.to_csv(f"{save_file_path}/{league} Predicted Table.csv", index=False)
                     logger.info(f"[{league}] Inserting predicted table into DB ({len(avg_table_with_probs_and_point_limits)} rows)...")
                     _t = time.time()
                     await insert_predicted_table_async(avg_table_with_probs_and_point_limits, teams, comps, league)
@@ -1182,7 +1174,6 @@ class ProjectionAllTeams:
                                                                          previous_season_id_above, previous_season_id_below],
                                                               games=50,
                                                               comp_teams=comp_teams[comp_teams['competition_id'] == league_id])
-                team_projections.to_csv(f"{save_file_path}/{league} team projections.csv")
                 # In[ ]:
 
                 ## NEW - Add historical stats to the model dataset and drop them from team projections afterwards
@@ -1347,7 +1338,6 @@ class ProjectionAllTeams:
                 team_projections_save = team_projections_save.round(2)
 
                 # team_projections_save.to_csv(rf"{save_file_path}\{league} Team.csv", index=False)
-                team_projections_save.to_csv(f"{save_file_path}/{league} Team.csv", index=False)
                 logger.info(f"[{league}] Inserting team projections into DB ({len(team_projections_save)} rows)...")
                 _t = time.time()
                 await insert_teams_async(team_projections_save, teams=teams, competition_id=league_id, comp_teams=comp_teams)
@@ -1476,7 +1466,6 @@ class ProjectionAllTeams:
                 pl_projections.reset_index(drop=True, inplace=True)
                 pl_projections = pl_projections.round(2)
                 # pl_projections.to_csv(rf"{save_file_path}\{league} Player.csv", index=False)
-                pl_projections.to_csv(f"{save_file_path}/{league} Player.csv", index=False)
                 logger.info(f"[{league}] Inserting player projections into DB ({len(pl_projections)} rows)...")
                 _t = time.time()
                 await insert_player_async(pl_projections, teams=teams, competition_id=league_id, comp_teams=comp_teams)
@@ -1749,7 +1738,6 @@ class ProjectionAllTeams:
                     player_stat_probs = pd.concat([player_stat_probs, yellow_probs], ignore_index=True)
                 player_stat_probs = player_stat_probs.round(2)
                 # player_stat_probs.to_csv(rf"{save_file_path}\{league} Player Stat Probabilities.csv", index=False)
-                player_stat_probs.to_csv(f"{save_file_path}/{league} Player Stat Probabilities.csv", index=False)
                 # await insert_players_stats_async(pl_projections)
                 logger.info(f"[{league}] Inserting player stat probabilities into DB...")
                 _t = time.time()
