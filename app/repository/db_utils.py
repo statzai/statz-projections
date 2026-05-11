@@ -8,9 +8,17 @@ from app.database import get_connection
 
 logger = logging.getLogger("db_utils")
 
-CHUNK_SIZE = 50
+CHUNK_SIZE = 500
 MAX_RETRIES = 3
 QUERY_TIMEOUT = 120  # seconds per chunk before giving up and retrying
+
+# Chunk size sizing notes:
+# - max_allowed_packet on prod = 64 MB.
+# - Widest table is model_dataset (~80 cols × ~50 chars = ~4 KB/row).
+#   500 rows = ~2 MB per INSERT statement. ~32x packet-size headroom.
+# - Bumped 50 → 500 on 2026-05-11 to claw back the +20s/league insert overhead
+#   added by the player-prop expansion (8 markets vs 3 = 22 props vs 9 → 30k
+#   rows for PL). Saves ~9 min off a full 23-league sweep.
 
 
 def resolve_team_id(team_name, teams, competition_id=None, comp_teams=None):
