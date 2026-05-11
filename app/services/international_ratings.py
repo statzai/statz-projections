@@ -108,7 +108,8 @@ async def _load_int_fixtures(conn, date_from: date, date_to: date) -> Tuple[pd.D
         await cur.execute(
             f"""
             SELECT f.id, f.competition_id, f.kickoff_datetime,
-                   f.home_team_id, f.away_team_id, f.home_score, f.away_score
+                   f.home_team_id, f.away_team_id,
+                   f.home_team_goals AS home_score, f.away_team_goals AS away_score
             FROM fixtures f
             WHERE f.competition_id IN ({placeholders})
               AND f.kickoff_datetime >= %s
