@@ -101,10 +101,19 @@ DAMPEN_THRESHOLD = 4
 DAMPEN_DECAY = 0.3
 DAMPEN_CAP = 8
 
-# Minimum total international fixtures (across our DB) required for a
-# nation to receive a Statz Rating. Below this, the row is a FIFA
-# carry-forward (inverse='Yes', most recent FIFA snapshot copied).
+# Per-fixture clamps on adj_g and adj_ga AFTER opp adjustment.
+# Floor prevents clean-sheet-vs-minnow distortion.
+# Cap prevents blowout-vs-strong-opp inflation.
+# Tighter range on friendlies (less reliable signal).
+CLAMP_FRIENDLY_ADJ_G  = (0.5, 2.0)
+CLAMP_FRIENDLY_ADJ_GA = (0.5, 2.0)
+CLAMP_COMP_ADJ_G      = (0.30, 4.0)
+CLAMP_COMP_ADJ_GA     = (0.30, 4.0)
+FRIENDLY_COMP_ID = 1082
+
+# Eligibility for Statz Rating (below either threshold → FIFA carry-forward).
 MIN_GAMES_FOR_STATZ = 10
+MIN_XG_GAMES_FOR_STATZ = 3
 
 
 def dampen_goals(g: float) -> float:
@@ -241,6 +250,9 @@ def _compute_one_team(
     fx = fx.merge(xg_for, on='fixture_id', how='left')
     xg_against = xg.rename(columns={'team_id': 'opponent_id', 'xg': 'xg_against'})
     fx = fx.merge(xg_against, on=['fixture_id', 'opponent_id'], how='left')
+    # Count of fixtures with real xG (before fallback) — used for Statz Rating eligibility.
+    fx['xg_for_present'] = pd.to_numeric(fx['xg_for'], errors='coerce').notna()
+    n_xg_games = int(fx['xg_for_present'].sum())
     fx['xg_for']     = pd.to_numeric(fx['xg_for'],     errors='coerce').fillna(fx['g'])
     fx['xg_against'] = pd.to_numeric(fx['xg_against'], errors='coerce').fillna(fx['ga'])
 
@@ -267,6 +279,26 @@ def _compute_one_team(
     fx['adj_g']  = adj[0]
     fx['adj_ga'] = adj[1]
 
+    # Per-fixture clamp on adj_g / adj_ga. Tighter range for friendlies
+    # (less reliable signal). Floor prevents clean-sheets-vs-weak from
+    # zeroing the defense pool; cap prevents blowouts from runaway-ing
+    # the attack pool.
+    def _clamp_pair(row):
+        if row['competition_id'] == FRIENDLY_COMP_ID:
+            lo_g, hi_g   = CLAMP_FRIENDLY_ADJ_G
+            lo_ga, hi_ga = CLAMP_FRIENDLY_ADJ_GA
+        else:
+            lo_g, hi_g   = CLAMP_COMP_ADJ_G
+            lo_ga, hi_ga = CLAMP_COMP_ADJ_GA
+        return (
+            min(max(row['adj_g'],  lo_g),  hi_g),
+            min(max(row['adj_ga'], lo_ga), hi_ga),
+        )
+
+    clamped = fx.apply(_clamp_pair, axis=1, result_type='expand')
+    fx['adj_g']  = clamped[0]
+    fx['adj_ga'] = clamped[1]
+
     # Importance + decay → game weight
     fx['importance'] = fx['competition_id'].map(COMP_IMPORTANCE).fillna(1.0)
     target_dt = pd.to_datetime(target_date)
@@ -287,6 +319,7 @@ def _compute_one_team(
         'attack': float(attack),
         'defense': float(defense),
         'n_games': int(len(fx)),
+        'n_xg_games': n_xg_games,
     }
 
 
@@ -355,15 +388,23 @@ async def compute_quarterly_snapshot(
     for tid in team_ids:
         r = _compute_one_team(tid, fixtures, xg, fifa_lookup, target_date)
         n = (r or {}).get('n_games', 0)
+        n_xg = (r or {}).get('n_xg_games', 0)
         name = name_map.get(tid, f'Team {tid}')
 
-        if r is not None and n >= MIN_GAMES_FOR_STATZ:
+        is_eligible = (
+            r is not None
+            and n >= MIN_GAMES_FOR_STATZ
+            and n_xg >= MIN_XG_GAMES_FOR_STATZ
+        )
+
+        if is_eligible:
             statz_rows.append({
                 'team_id': tid,
                 'team_name': name,
                 'attack': round(r['attack'], 3),
                 'defense': round(r['defense'], 3),
                 'n_games': n,
+                'n_xg_games': n_xg,
                 'inverse': 'No',
                 'date': target_date,
             })
@@ -378,6 +419,7 @@ async def compute_quarterly_snapshot(
                 'attack': float(prior['attack']),
                 'defense': float(prior['defense']),
                 'n_games': n,
+                'n_xg_games': n_xg,
                 'inverse': 'Yes',
                 'date': target_date,
                 'fifa_source_date': prior['date'].date(),
