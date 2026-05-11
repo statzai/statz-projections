@@ -243,8 +243,9 @@ class ProjectionService:
         ctx.comps = _maybe_copy(source.comps)
         ctx.comp_teams = _maybe_copy(source.comp_teams)
         ctx.teams = _maybe_copy(source.teams)
-        ctx.players = pd.read_csv(os.path.join(ctx.data_folder_path, "players.csv"))
-        ctx.players['display_name'] = ctx.players['display_name'].str.strip()
+        # Players from LeagueDataLoader (DB-direct, scoped to teams in this
+        # run's current squads). display_name already stripped upstream.
+        ctx.players = source.players
         ctx.fixtures_df = _maybe_copy(source.fixtures_df)
         ctx.b365_odds = _maybe_copy(source.b365_odds)
         ctx.stats_types = _maybe_copy(source.stats_types)

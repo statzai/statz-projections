@@ -123,6 +123,13 @@ class LeagueDataLoader:
         self.team_ratings: Optional[pd.DataFrame] = None
         self.fpl_player_mappings: Optional[pd.DataFrame] = None
 
+        # Players scoped to teams in this run (current squad). Columns:
+        # id, display_name, current_team_id, position. Replaces the legacy
+        # pd.read_csv("players.csv") path which loaded ALL ~150k+ players
+        # globally — projection code only ever uses team-scoped subsets so
+        # this is functionally equivalent and avoids stale-CSV risk.
+        self.players: Optional[pd.DataFrame] = None
+
         self._loaded = False
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -240,19 +247,27 @@ class LeagueDataLoader:
                 self.league_id,
             )
             self.player_ids = []
+            self.players = pd.DataFrame(columns=['id', 'display_name', 'current_team_id', 'position'])
             return
 
-        # Resolve player_ids via current squad membership.
+        # Resolve players via current squad membership.
+        # Loads id + display_name + current_team_id + position (the only
+        # columns downstream projection code consumes). display_name is
+        # stripped here once so service code doesn't need to re-strip.
         async with conn.cursor() as cur:
             placeholders = ",".join(["%s"] * len(self.team_ids))
             await cur.execute(
                 f"""
-                SELECT id FROM players
+                SELECT id, display_name, current_team_id, position
+                FROM players
                 WHERE current_team_id IN ({placeholders})
                 """,
                 tuple(self.team_ids),
             )
-            self.player_ids = sorted({int(r[0]) for r in await cur.fetchall()})
+            rows = await cur.fetchall()
+        self.players = pd.DataFrame(rows, columns=['id', 'display_name', 'current_team_id', 'position'])
+        self.players['display_name'] = self.players['display_name'].astype(str).str.strip()
+        self.player_ids = sorted({int(x) for x in self.players['id'].tolist()})
 
     def _all_scope_comp_ids(self) -> set:
         ids = {self.league_id}

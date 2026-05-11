@@ -103,11 +103,10 @@ class EuroCompProjectionService:
         fixtures_df = _maybe_copy(source.fixtures_df)
         stats_types = source.stats_types
 
-        # Load players from CSV (was previously 8 separate DB queries which kept hanging)
-        logger.info(f"[{league}] Loading players from CSV...")
-        players = pd.read_csv(os.path.join(data_folder_path, "players.csv"))
-        players['display_name'] = players['display_name'].str.strip()
-        logger.info(f"[{league}] Loaded {len(players)} players")
+        # Players from LeagueDataLoader (DB-direct, scoped to comp + 8 domestic
+        # comps). display_name already stripped upstream.
+        players = source.players
+        logger.info(f"[{league}] Loaded {len(players)} players from DB-loader")
 
         # Ratings Dataset — DB-sourced (cache or per-league loader).
         all_team_ratings = _maybe_copy(source.team_ratings)

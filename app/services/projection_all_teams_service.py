@@ -290,8 +290,9 @@ class ProjectionAllTeams:
                 comps = source.comps
                 comp_teams = source.comp_teams
                 teams = source.teams
-                players = pd.read_csv(os.path.join(data_folder_path, "players.csv"))
-                players['display_name'] = players['display_name'].str.strip()
+                # Players from LeagueDataLoader (DB-direct, scoped to this
+                # league's current squads). display_name already stripped.
+                players = source.players
                 fixtures_df = _maybe_copy(source.fixtures_df)
                 b365_odds = source.b365_odds
                 stats_types = source.stats_types
