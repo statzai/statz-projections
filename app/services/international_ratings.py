@@ -89,8 +89,12 @@ RATINGS_COMP_ID = 732
 # Sportmonks stats_type_id for Expected Goals (xG) on fixture_team_stats.
 XG_STAT_TYPE_ID = 5304
 
-# state_id=5 = Full Time (the only state we count for ratings).
-STATE_FT = 5
+# Finished-match states: 5 = Full Time, 7 = After Extra Time,
+# 8 = After Penalty Shootout. Knockout games that go to ET/pens are
+# recorded as 7/8 (e.g. Euro 2024, AFCON, Copa knockouts) — must be
+# included or all those high-importance games get silently dropped.
+# (WC 2022 is inconsistently recorded as 5 even for ET games.)
+STATE_FINISHED = (5, 7, 8)
 
 # Goal dampening for blowouts.
 # Below DAMPEN_THRESHOLD → unchanged.
@@ -150,8 +154,9 @@ async def _load_all_fifa_baselines(conn) -> pd.DataFrame:
 
 
 async def _load_int_fixtures(conn, date_to: date) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Load every int'l fixture in DB (FT only) up to date_to + their xG rows."""
+    """Load every finished int'l fixture in DB up to date_to + their xG rows."""
     placeholders = ",".join(["%s"] * len(INTERNATIONAL_COMP_IDS))
+    state_ph = ",".join(["%s"] * len(STATE_FINISHED))
     async with conn.cursor() as cur:
         await cur.execute(
             f"""
@@ -161,9 +166,9 @@ async def _load_int_fixtures(conn, date_to: date) -> Tuple[pd.DataFrame, pd.Data
             FROM fixtures f
             WHERE f.competition_id IN ({placeholders})
               AND f.kickoff_datetime <= %s
-              AND f.state_id = %s
+              AND f.state_id IN ({state_ph})
             """,
-            tuple(INTERNATIONAL_COMP_IDS) + (date_to, STATE_FT),
+            tuple(INTERNATIONAL_COMP_IDS) + (date_to,) + STATE_FINISHED,
         )
         rows = await cur.fetchall()
     fixtures = pd.DataFrame(rows, columns=[
