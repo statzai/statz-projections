@@ -1,38 +1,46 @@
 """
 International team ratings (nations).
 
-Computes per-nation Attack + Defense from international fixtures, on a
-weighted-goals-per-game scale (same shape as domestic get_ratings()):
-  Attack  = Σ(adj_g  × game_weight) / Σ(game_weight)   # e.g. 2.4
-  Defense = Σ(adj_ga × game_weight) / Σ(game_weight)   # e.g. 0.7
+Computes per-nation Attack + Defense from international fixtures and writes
+them on a mean=100 rescaled scale (Attack/Defense each have mean 100 across
+all qualifying teams), with raw weighted-xG pre-rescale also stored.
 
-Key differences from the domestic get_ratings():
-  - Pool of 17 international competitions (WC, Euros, Copa, AFCON, Asian Cup,
-    Nations League, friendlies, all six WC qualifying confederations, three
-    continental tournament qualifiers).
-  - Per-fixture competition importance multiplier (WC=1.6 ... Friendly=0.5).
-  - Per-week recency decay 0.995 (slower than domestic 0.97 since nations
-    play far fewer games per calendar week).
-  - Opponent strength is ALWAYS sourced from FIFA baselines stored in
-    team_ratings with inverse='Yes'. The lookup is time-aware: each
-    fixture uses the FIFA snapshot closest before its kickoff date.
-  - Goal dampening: per-team per-fixture goal counts (both raw G and xG)
-    are soft-capped via piecewise-linear above 4 (decay 0.3) and hard-cap
-    at 8. Blunts the rating distortion from 7-0 / 10-0 blowouts that are
-    far more common in internationals than domestic football.
-  - Below MIN_GAMES_FOR_STATZ (10) total int'l games in our DB, a team
-    gets a "FIFA carry-forward" row (inverse='Yes', FIFA values copied
-    from the most recent FIFA snapshot ≤ target_date) instead of a
-    computed Statz rating. Keeps low-sample teams stable.
+Pipeline (settled 2026-05-14):
+  1. xG blend per fixture: 0.3 * goals + 0.7 * xG (both sides)
+  2. Opp adjustment, branched on team_ratings.inverse flag:
+       FIFA (inverse='Yes'): adj_g  = blend_g  * (opp.overall / 100)
+                             adj_ga = blend_ga / (opp.overall / 100)
+       Statz (inverse='No'): adj_g  = blend_g  / (clip(opp.defense, 40, 250) / 100)
+                             adj_ga = blend_ga / (clip(opp.attack,  40, 250) / 100)
+     Symmetric caps [40, 250] mirror the Top End Buff v5 FIFA curve range
+     so both paths give the same [0.40, 2.50] multiplier ranges.
+  3. Soft cap on adj_g / adj_ga: T=3, M=5, scale=2 exponential dampen.
+  4. Weighted mean per team across fixtures, with importance × decay weights:
+       Attack_xg  = Σ(adj_g  * weight) / Σ(weight)
+       Defense_xg = Σ(adj_ga * weight) / Σ(weight)
+  5. MV v8 nudge — Transfermarkt market value pulls atk_xg / def_xg toward
+     a per-team target proportional to log10(MV). β=0.20. Cap=3.25.
+  6. Rescale to cross-team mean=100 separately for Attack and Defense.
 
-This function does NOT write to the DB. Caller passes commit=False (default)
-and inspects the returned DataFrame.
+Eligibility:
+  - ≥ MIN_GAMES (10) total fixtures with xG data
+  - ≥ MIN_COMPETITIVE_GAMES (3) non-friendly fixtures
+  - Below either → FIFA carry-forward row (inverse='Yes', attack/defense
+    copied from the most recent FIFA snapshot ≤ target_date).
+
+Opp lookup is time-aware: each fixture uses the most recent ratings row
+(FIFA or Statz) strictly before its kickoff date.
 """
+import json
 import logging
+import math
+import os
 from datetime import date
 from typing import List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
+from scipy.interpolate import PchipInterpolator
 
 from app.source_database import get_source_connection, release_source_connection
 
@@ -59,29 +67,69 @@ INTERNATIONAL_COMP_IDS = [
     1082,  # Friendly International
 ]
 
-# Per-competition importance multiplier on each match's contribution.
+# Per-competition importance multiplier (v4 settled 2026-05-14).
 COMP_IMPORTANCE = {
-    732:  1.6,   # World Cup
-    720:  1.5,   # WC Qual Europe
-    711:  1.5,   # WC Qual CAF
-    714:  1.5,   # WC Qual Asia
-    717:  1.5,   # WC Qual Concacaf
-    723:  1.5,   # WC Qual Oceania
-    726:  1.5,   # WC Qual South America
-    729:  1.5,   # WC Qual Intercontinental Playoffs
-    1326: 1.4,   # European Championship
-    1114: 1.4,   # Copa America
-    1117: 1.4,   # Africa Cup of Nations
-    1105: 1.4,   # AFC Asian Cup
-    1325: 1.3,   # Euro Qualification
-    1118: 1.3,   # Africa Cup of Nations Qualifications
-    1106: 1.3,   # Asian Cup Qualification
-    1538: 0.75,  # UEFA Nations League
+    732:  2.25,  # World Cup
+    1326: 2.0,   # European Championship
+    1114: 2.0,   # Copa America
+    1117: 2.0,   # Africa Cup of Nations
+    1105: 2.0,   # AFC Asian Cup
+    720:  1.75,  # WC Qual Europe
+    711:  1.75,  # WC Qual CAF
+    714:  1.75,  # WC Qual Asia
+    717:  1.75,  # WC Qual Concacaf
+    723:  1.75,  # WC Qual Oceania
+    726:  1.75,  # WC Qual South America
+    729:  1.75,  # WC Qual Intercontinental Playoffs
+    1325: 1.5,   # Euro Qualification
+    1118: 1.5,   # Africa Cup of Nations Qualifications
+    1106: 1.5,   # Asian Cup Qualification
+    1538: 1.25,  # UEFA Nations League
     1082: 0.5,   # Friendly International
 }
 
+FRIENDLY_COMP_ID = 1082
+
 # Per-week recency decay. Half-life ~138 weeks (~2.7 years).
 DECAY_WEIGHT = 0.995
+
+# Soft cap on adj_g / adj_ga: leave ≤ T alone, asymptote to M.
+# T=3 means goal-rates up to 3 pass through; above 3 dampens toward 5.
+SOFT_CAP_T = 3.0
+SOFT_CAP_M = 5.0
+SOFT_CAP_SCALE = 2.0
+
+# Symmetric caps on Statz opp.attack / opp.defense lookups (mirrors TEB v5 FIFA range).
+# Multiplier range: 40/100 → 250/100 = 0.40 to 2.50 (same on both paths).
+STATZ_OPP_LO = 40.0
+STATZ_OPP_HI = 250.0
+
+# MV v8 anchors — log10(avg market value in millions €) → mv_idx multiplier
+# (1.0 = neutral, France caps at 3.25, minnows floor at 0.25).
+MV_LOG_PTS = [-2.50, -2.00, -1.50, -1.00, -0.50, -0.22,  0.00,  0.50,  1.00,  1.30,  1.50,  1.65,  1.74]
+MV_IDX     = [ 0.25,  0.30,  0.35,  0.55,  0.80,  1.00,  1.10,  1.25,  1.75,  2.00,  2.50,  3.00,  3.25]
+INTL_MV_BETA = 0.20
+_MV_PCHIP = PchipInterpolator(MV_LOG_PTS, MV_IDX, extrapolate=False)
+
+# Cached Transfermarkt scrape — seed by running mv_iter.py or curve_to_wc_projection.py.
+TM_MV_CACHE = '/tmp/tm_mv_cache.json'
+
+# Transfermarkt team name → Statz teams.name aliases (kept in sync with mv_iter.py).
+TM_TO_STATZ = {
+    'Turkiye':'Turkey','Türkiye':'Turkey','Czechia':'Czech Republic',
+    'South Korea':'Korea Republic','North Korea':'Korea DPR',
+    'Cape Verde':'Cape Verde Islands','Cabo Verde':'Cape Verde Islands',
+    'IR Iran':'Iran','Curaçao':'Curacao','Macau':'Macao',
+    'Timor-Leste':'East Timor','Ivory Coast':"Côte d'Ivoire",
+    'Hong Kong, China':'Hong Kong',
+    'Saint Kitts and Nevis':'St. Kitts and Nevis','Saint Lucia':'St. Lucia',
+    'Saint Vincent and the Grenadines':'St. Vincent and the Grenadines',
+    'Bosnia-Herzegovina':'Bosnia and Herzegovina',
+    'Saudi-Arabia':'Saudi Arabia','New-Zealand':'New Zealand',
+    'Democratic Republic of the Congo':'Congo DR','DR Congo':'Congo DR',
+    'The Gambia':'Gambia','China':'China PR',
+    'Kyrgyzstan':'Kyrgyz Republic','Republic of the Congo':'Congo',
+}
 
 # All international snapshots stored under World Cup comp_id.
 RATINGS_COMP_ID = 732
@@ -93,62 +141,81 @@ XG_STAT_TYPE_ID = 5304
 # 8 = After Penalty Shootout. Knockout games that go to ET/pens are
 # recorded as 7/8 (e.g. Euro 2024, AFCON, Copa knockouts) — must be
 # included or all those high-importance games get silently dropped.
-# (WC 2022 is inconsistently recorded as 5 even for ET games.)
+#
+# DELIBERATELY EXCLUDED — do not add these to STATE_FINISHED:
+#   state_id 10 = postponed / cancelled
+#   state_id 17 = awarded / walkover (administrative result, on-pitch
+#     performance is competitively void — worse than no data point)
 STATE_FINISHED = (5, 7, 8)
-
-# Goal dampening for blowouts.
-# Below DAMPEN_THRESHOLD → unchanged.
-# Between THRESHOLD and CAP → threshold + (g - threshold) * DECAY.
-# Above the implied cap → hard-cap at DAMPEN_CAP.
-# Applied to both raw G and xG per fixture per side.
-DAMPEN_THRESHOLD = 4
-DAMPEN_DECAY = 0.3
-DAMPEN_CAP = 8
-
-# Per-fixture clamps on adj_g and adj_ga AFTER opp adjustment.
-# Floor prevents clean-sheet-vs-minnow distortion.
-# Cap prevents blowout-vs-strong-opp inflation.
-# Tighter range on friendlies (less reliable signal).
-CLAMP_FRIENDLY_ADJ_G  = (0.5, 2.0)
-CLAMP_FRIENDLY_ADJ_GA = (0.5, 2.0)
-CLAMP_COMP_ADJ_G      = (0.30, 4.0)
-CLAMP_COMP_ADJ_GA     = (0.30, 4.0)
-FRIENDLY_COMP_ID = 1082
 
 # Eligibility for Statz Rating (below either threshold → FIFA carry-forward).
 MIN_GAMES_FOR_STATZ = 10
-MIN_XG_GAMES_FOR_STATZ = 3
+MIN_COMPETITIVE_GAMES = 3
 
 
-def dampen_goals(g: float) -> float:
-    """Soft-cap goal counts to mute blowout distortion."""
-    if pd.isna(g):
-        return g
-    if g <= DAMPEN_THRESHOLD:
-        return g
-    damped = DAMPEN_THRESHOLD + (g - DAMPEN_THRESHOLD) * DAMPEN_DECAY
-    return min(damped, DAMPEN_CAP)
+def soft_cap(x: float) -> float:
+    """Smooth dampen above SOFT_CAP_T, asymptoting toward SOFT_CAP_M."""
+    if pd.isna(x):
+        return x
+    if x <= SOFT_CAP_T:
+        return x
+    return SOFT_CAP_T + (SOFT_CAP_M - SOFT_CAP_T) * (1 - math.exp(-(x - SOFT_CAP_T) / SOFT_CAP_SCALE))
 
 
-async def _load_all_fifa_baselines(conn) -> pd.DataFrame:
-    """Load every FIFA baseline snapshot ever stored (inverse='Yes').
+def mv_curve(log_mv_m: float) -> float:
+    """Map log10(market_value_in_millions_€) → mv_idx multiplier via MV v8 PCHIP curve."""
+    if log_mv_m <= MV_LOG_PTS[0]:
+        return float(MV_IDX[0])
+    if log_mv_m >= MV_LOG_PTS[-1]:
+        return float(MV_IDX[-1])
+    return float(_MV_PCHIP(log_mv_m))
 
-    Returns columns: team_id, attack, defense, date.
+
+def load_mv_values() -> Optional[pd.DataFrame]:
+    """Load Transfermarkt MV values from local cache, mapped to Statz team names.
+
+    Returns DataFrame with columns: statz_name, avg_mv_m, mv_idx. None if
+    cache missing — caller skips the MV nudge step and logs a warning.
+    """
+    if not os.path.exists(TM_MV_CACHE):
+        logger.warning(
+            f"TM MV cache missing at {TM_MV_CACHE} — skipping MV nudge step. "
+            f"Seed the cache by running mv_iter.py or curve_to_wc_projection.py."
+        )
+        return None
+    with open(TM_MV_CACHE) as f:
+        rows = json.load(f)
+    mv_df = pd.DataFrame([r for r in rows if r.get('avg_mv', 0) > 0])
+    if mv_df.empty:
+        logger.warning(f"TM MV cache at {TM_MV_CACHE} is empty — skipping MV nudge.")
+        return None
+    mv_df['avg_mv_m'] = mv_df['avg_mv'] / 1e6
+    mv_df['log_mv'] = np.log10(mv_df['avg_mv_m'].clip(lower=1e-4))
+    mv_df['mv_idx'] = mv_df['log_mv'].apply(mv_curve)
+    mv_df['statz_name'] = mv_df['team'].map(TM_TO_STATZ).fillna(mv_df['team'])
+    return mv_df[['statz_name', 'avg_mv_m', 'mv_idx']]
+
+
+async def _load_opp_rows(conn) -> pd.DataFrame:
+    """Load every team_ratings row for comp 732 (both FIFA inverse='Yes' and
+    Statz inverse='No') for time-aware opp lookups.
+
+    Returns columns: team_id, attack, defense, overall, date, inverse.
     """
     async with conn.cursor() as cur:
         await cur.execute(
             """
-            SELECT team_id, attack, defense, date
+            SELECT team_id, attack, defense, overall, date, inverse
             FROM team_ratings
-            WHERE competition_id = %s AND inverse = 'Yes'
+            WHERE competition_id = %s
             ORDER BY team_id, date
             """,
             (RATINGS_COMP_ID,),
         )
         rows = await cur.fetchall()
-    df = pd.DataFrame(rows, columns=['team_id', 'attack', 'defense', 'date'])
-    df['attack'] = df['attack'].astype(float)
-    df['defense'] = df['defense'].astype(float)
+    df = pd.DataFrame(rows, columns=['team_id', 'attack', 'defense', 'overall', 'date', 'inverse'])
+    for c in ('attack', 'defense', 'overall'):
+        df[c] = df[c].astype(float)
     df['date'] = pd.to_datetime(df['date'])
     return df
 
@@ -158,6 +225,9 @@ async def _load_int_fixtures(conn, date_to: date) -> Tuple[pd.DataFrame, pd.Data
     placeholders = ",".join(["%s"] * len(INTERNATIONAL_COMP_IDS))
     state_ph = ",".join(["%s"] * len(STATE_FINISHED))
     async with conn.cursor() as cur:
+        # A fixture counts as played if it's in a finished state, OR it has a
+        # final score and isn't cancelled (~150 AFCON-Qual-2024 rows have
+        # state_id = NULL despite having results — Sportmonks import gap).
         await cur.execute(
             f"""
             SELECT f.id, f.competition_id, f.kickoff_datetime,
@@ -166,7 +236,8 @@ async def _load_int_fixtures(conn, date_to: date) -> Tuple[pd.DataFrame, pd.Data
             FROM fixtures f
             WHERE f.competition_id IN ({placeholders})
               AND f.kickoff_datetime <= %s
-              AND f.state_id IN ({state_ph})
+              AND ( f.state_id IN ({state_ph})
+                    OR (f.state_id IS NULL AND f.home_team_goals IS NOT NULL) )
             """,
             tuple(INTERNATIONAL_COMP_IDS) + (date_to,) + STATE_FINISHED,
         )
@@ -197,22 +268,18 @@ async def _load_int_fixtures(conn, date_to: date) -> Tuple[pd.DataFrame, pd.Data
     return fixtures, xg
 
 
-class FifaLookup:
-    """Time-aware opponent strength lookup against FIFA snapshots.
+class OppLookup:
+    """Time-aware opponent strength lookup against team_ratings.
 
-    Returns the FIFA Attack + Defense for a given (team_id, game_date),
-    using the most recent FIFA snapshot strictly before game_date.
-
-    FIFA Defense is on the 'inverse' scale (high = strong defense). Caller
-    uses the inverse-path formula (multiply by Defense/100) for opponent
-    goal adjustment.
+    Handles BOTH FIFA (inverse='Yes') and Statz (inverse='No') rows. Returns
+    the most recent row strictly before game_date. Caller branches the
+    adjustment formula on the inverse flag.
     """
 
-    def __init__(self, fifa_df: pd.DataFrame):
-        # Pre-group by team_id, sorted ascending by date, for binary-search lookups.
+    def __init__(self, opp_df: pd.DataFrame):
         self._by_team = {
             tid: g.sort_values('date').reset_index(drop=True)
-            for tid, g in fifa_df.groupby('team_id')
+            for tid, g in opp_df.groupby('team_id')
         }
 
     def get(self, team_id: int, game_date) -> Optional[dict]:
@@ -224,17 +291,26 @@ class FifaLookup:
         if valid.empty:
             return None
         row = valid.iloc[-1]
-        return {'attack': float(row['attack']), 'defense': float(row['defense'])}
+        return {
+            'attack': float(row['attack']),
+            'defense': float(row['defense']),
+            'overall': float(row['overall']),
+            'inverse': row['inverse'],
+        }
 
 
 def _compute_one_team(
     team_id: int,
     all_fixtures: pd.DataFrame,
     xg: pd.DataFrame,
-    fifa_lookup: FifaLookup,
+    opp_lookup: OppLookup,
     target_date: date,
 ) -> Optional[dict]:
-    """Compute weighted-avg Attack + Defense for one team. None if no fixtures."""
+    """Compute weighted-avg atk_xg + def_xg for one team. None if no fixtures.
+
+    Returns raw pre-MV-nudge, pre-rescale values. Caller applies MV nudge
+    and mean=100 rescale across the team set.
+    """
     mask = (all_fixtures['home_team_id'] == team_id) | (all_fixtures['away_team_id'] == team_id)
     fx = all_fixtures[mask].copy()
     if fx.empty:
@@ -255,56 +331,45 @@ def _compute_one_team(
     fx = fx.merge(xg_for, on='fixture_id', how='left')
     xg_against = xg.rename(columns={'team_id': 'opponent_id', 'xg': 'xg_against'})
     fx = fx.merge(xg_against, on=['fixture_id', 'opponent_id'], how='left')
-    # Count of fixtures with real xG (before fallback) — used for Statz Rating eligibility.
-    fx['xg_for_present'] = pd.to_numeric(fx['xg_for'], errors='coerce').notna()
-    n_xg_games = int(fx['xg_for_present'].sum())
-    fx['xg_for']     = pd.to_numeric(fx['xg_for'],     errors='coerce').fillna(fx['g'])
-    fx['xg_against'] = pd.to_numeric(fx['xg_against'], errors='coerce').fillna(fx['ga'])
+    fx['xg_for'] = pd.to_numeric(fx['xg_for'], errors='coerce')
+    fx['xg_against'] = pd.to_numeric(fx['xg_against'], errors='coerce')
+    # Drop fixtures without xG — rate calculation requires real xG.
+    fx = fx.dropna(subset=['xg_for', 'xg_against'])
+    if fx.empty:
+        return None
 
-    # Dampen both G and xG before the 0.3*G + 0.7*xG blend
-    fx['g_d']          = fx['g'].apply(dampen_goals)
-    fx['ga_d']         = fx['ga'].apply(dampen_goals)
-    fx['xg_for_d']     = fx['xg_for'].apply(dampen_goals)
-    fx['xg_against_d'] = fx['xg_against'].apply(dampen_goals)
+    # Blend: 0.3 * raw goals + 0.7 * xG
+    fx['blend_g']  = 0.3 * fx['g']  + 0.7 * fx['xg_for']
+    fx['blend_ga'] = 0.3 * fx['ga'] + 0.7 * fx['xg_against']
 
-    fx['adj_g']  = 0.3 * fx['g_d']  + 0.7 * fx['xg_for_d']
-    fx['adj_ga'] = 0.3 * fx['ga_d'] + 0.7 * fx['xg_against_d']
-
-    # Time-aware opponent adjustment using FIFA snapshots.
-    # FIFA is inverse='Yes': adj_g *= opp.Defense/100, adj_ga /= opp.Attack/100.
+    # Time-aware opp adjustment, branched on opp row's inverse flag.
     def _apply_opp_adj(row):
-        opp = fifa_lookup.get(int(row['opponent_id']), row['kickoff_datetime'])
-        if opp is None or opp['attack'] == 0 or opp['defense'] == 0:
-            return row['adj_g'], row['adj_ga']
-        adj_g  = row['adj_g']  * (opp['defense'] / 100)
-        adj_ga = row['adj_ga'] / (opp['attack']  / 100)
+        opp = opp_lookup.get(int(row['opponent_id']), row['kickoff_datetime'])
+        if opp is None:
+            return row['blend_g'], row['blend_ga']
+        if opp['inverse'] == 'Yes':
+            # FIFA path: multiply by opp.overall (attack=defense=overall in FIFA rows).
+            v = opp['overall']
+            if v == 0:
+                return row['blend_g'], row['blend_ga']
+            adj_g  = row['blend_g']  * (v / 100.0)
+            adj_ga = row['blend_ga'] / (v / 100.0)
+        else:
+            # Statz path: divide by opp.defense (for adj_g) and opp.attack (for adj_ga),
+            # both capped to [40, 250] to mirror FIFA-path multiplier range.
+            opp_def = min(max(opp['defense'], STATZ_OPP_LO), STATZ_OPP_HI)
+            opp_atk = min(max(opp['attack'],  STATZ_OPP_LO), STATZ_OPP_HI)
+            adj_g  = row['blend_g']  / (opp_def / 100.0)
+            adj_ga = row['blend_ga'] / (opp_atk / 100.0)
         return adj_g, adj_ga
 
     adj = fx.apply(_apply_opp_adj, axis=1, result_type='expand')
-    fx['adj_g']  = adj[0]
-    fx['adj_ga'] = adj[1]
+    fx['adj_g_raw']  = adj[0]
+    fx['adj_ga_raw'] = adj[1]
+    fx['adj_g']  = fx['adj_g_raw'].apply(soft_cap)
+    fx['adj_ga'] = fx['adj_ga_raw'].apply(soft_cap)
 
-    # Per-fixture clamp on adj_g / adj_ga. Tighter range for friendlies
-    # (less reliable signal). Floor prevents clean-sheets-vs-weak from
-    # zeroing the defense pool; cap prevents blowouts from runaway-ing
-    # the attack pool.
-    def _clamp_pair(row):
-        if row['competition_id'] == FRIENDLY_COMP_ID:
-            lo_g, hi_g   = CLAMP_FRIENDLY_ADJ_G
-            lo_ga, hi_ga = CLAMP_FRIENDLY_ADJ_GA
-        else:
-            lo_g, hi_g   = CLAMP_COMP_ADJ_G
-            lo_ga, hi_ga = CLAMP_COMP_ADJ_GA
-        return (
-            min(max(row['adj_g'],  lo_g),  hi_g),
-            min(max(row['adj_ga'], lo_ga), hi_ga),
-        )
-
-    clamped = fx.apply(_clamp_pair, axis=1, result_type='expand')
-    fx['adj_g']  = clamped[0]
-    fx['adj_ga'] = clamped[1]
-
-    # Importance + decay → game weight
+    # Importance × weekly decay → game weight (decay starts after 3-week grace)
     fx['importance'] = fx['competition_id'].map(COMP_IMPORTANCE).fillna(1.0)
     target_dt = pd.to_datetime(target_date)
     fx['kickoff_datetime'] = pd.to_datetime(fx['kickoff_datetime'])
@@ -316,15 +381,16 @@ def _compute_one_team(
     if total_weight == 0:
         return None
 
-    attack  = (fx['adj_g']  * fx['game_weight']).sum() / total_weight
-    defense = (fx['adj_ga'] * fx['game_weight']).sum() / total_weight
+    atk_xg = (fx['adj_g']  * fx['game_weight']).sum() / total_weight
+    def_xg = (fx['adj_ga'] * fx['game_weight']).sum() / total_weight
+    n_competitive = int((fx['competition_id'] != FRIENDLY_COMP_ID).sum())
 
     return {
         'team_id': int(team_id),
-        'attack': float(attack),
-        'defense': float(defense),
+        'atk_xg': float(atk_xg),
+        'def_xg': float(def_xg),
         'n_games': int(len(fx)),
-        'n_xg_games': n_xg_games,
+        'n_competitive': n_competitive,
     }
 
 
@@ -335,28 +401,32 @@ async def compute_quarterly_snapshot(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Compute one international ratings snapshot at target_date.
 
-    Pulls every int'l fixture in our DB up to target_date. Recency decay
-    naturally diminishes the influence of older games.
-
     Returns (statz_df, fifa_carry_df):
-      statz_df has columns:
-        team_id, team_name, attack, defense, n_games, inverse='No', date
-      fifa_carry_df has the same columns + inverse='Yes' for low-sample
-        teams (n_games < MIN_GAMES_FOR_STATZ or no fixtures at all). attack/
-        defense are copied from the most recent FIFA snapshot ≤ target_date.
+      statz_df columns:
+        team_id, team_name, attack, defense, overall, attack_xg, defense_xg,
+        overall_xg, n_games, inverse='No', date
+        (attack/defense rescaled to mean=100 across qualifying teams;
+         *_xg = raw pre-rescale weighted xG values after MV nudge)
+      carry_df columns:
+        team_id, team_name, attack, defense, overall, inverse='Yes', date
+        (low-sample teams; attack/defense copied from most recent FIFA
+         snapshot ≤ target_date)
 
-    Set commit=True to actually write rows to team_ratings (otherwise the
-    function returns the data for review without DB writes).
+    Set commit=True to write to team_ratings (DELETE existing date-rows
+    for comp 732 then INSERT). Default commit=False returns DataFrames
+    for inspection without writing.
     """
     conn = await get_source_connection()
     try:
-        fifa_df = await _load_all_fifa_baselines(conn)
-        if fifa_df.empty:
-            raise ValueError("No FIFA baselines found in team_ratings")
+        opp_df = await _load_opp_rows(conn)
+        if opp_df.empty:
+            raise ValueError("No team_ratings rows found for comp 732 — backfill FIFA snapshots first.")
+        n_fifa = int((opp_df['inverse'] == 'Yes').sum())
+        n_statz = int((opp_df['inverse'] == 'No').sum())
         logger.info(
-            f"Loaded {len(fifa_df)} FIFA baseline rows across "
-            f"{fifa_df['date'].nunique()} dates "
-            f"({fifa_df['date'].min().date()} → {fifa_df['date'].max().date()})"
+            f"Loaded {len(opp_df)} opp rows ({n_fifa} FIFA + {n_statz} Statz) across "
+            f"{opp_df['date'].nunique()} dates "
+            f"({opp_df['date'].min().date()} → {opp_df['date'].max().date()})"
         )
 
         fixtures, xg = await _load_int_fixtures(conn, target_date)
@@ -365,8 +435,9 @@ async def compute_quarterly_snapshot(
         )
 
         # Default team set = every nation that has any FIFA baseline
+        fifa_team_ids = sorted(opp_df[opp_df['inverse'] == 'Yes']['team_id'].unique().tolist())
         if team_ids is None:
-            team_ids = sorted(fifa_df['team_id'].unique().tolist())
+            team_ids = fifa_team_ids
 
         # Name map for display
         async with conn.cursor() as cur:
@@ -376,8 +447,9 @@ async def compute_quarterly_snapshot(
 
         # Most recent FIFA snapshot ≤ target_date per team (for carry-forward)
         target_dt = pd.to_datetime(target_date)
+        fifa_only = opp_df[(opp_df['inverse'] == 'Yes') & (opp_df['date'] <= target_dt)]
         latest_fifa_per_team = (
-            fifa_df[fifa_df['date'] <= target_dt]
+            fifa_only
             .sort_values('date')
             .groupby('team_id')
             .tail(1)
@@ -386,51 +458,80 @@ async def compute_quarterly_snapshot(
     finally:
         release_source_connection(conn)
 
-    fifa_lookup = FifaLookup(fifa_df)
+    opp_lookup = OppLookup(opp_df)
+    mv_df = load_mv_values()
 
-    statz_rows = []
-    carry_rows = []
+    raw_rows = []     # eligible teams, pre-MV, pre-rescale
+    carry_rows = []   # FIFA carry-forwards
     for tid in team_ids:
-        r = _compute_one_team(tid, fixtures, xg, fifa_lookup, target_date)
+        r = _compute_one_team(tid, fixtures, xg, opp_lookup, target_date)
         n = (r or {}).get('n_games', 0)
-        n_xg = (r or {}).get('n_xg_games', 0)
+        n_comp = (r or {}).get('n_competitive', 0)
         name = name_map.get(tid, f'Team {tid}')
 
         is_eligible = (
             r is not None
             and n >= MIN_GAMES_FOR_STATZ
-            and n_xg >= MIN_XG_GAMES_FOR_STATZ
+            and n_comp >= MIN_COMPETITIVE_GAMES
         )
-
         if is_eligible:
-            statz_rows.append({
+            raw_rows.append({
                 'team_id': tid,
                 'team_name': name,
-                'attack': round(r['attack'], 3),
-                'defense': round(r['defense'], 3),
+                'atk_xg': r['atk_xg'],
+                'def_xg': r['def_xg'],
                 'n_games': n,
-                'n_xg_games': n_xg,
-                'inverse': 'No',
-                'date': target_date,
             })
         else:
-            # FIFA carry-forward
             if tid not in latest_fifa_per_team.index:
-                continue  # no FIFA prior anywhere — skip
+                continue  # no FIFA prior — skip
             prior = latest_fifa_per_team.loc[tid]
             carry_rows.append({
                 'team_id': tid,
                 'team_name': name,
                 'attack': float(prior['attack']),
                 'defense': float(prior['defense']),
-                'n_games': n,
-                'n_xg_games': n_xg,
+                'overall': float(prior['overall']),
                 'inverse': 'Yes',
                 'date': target_date,
                 'fifa_source_date': prior['date'].date(),
             })
 
-    statz_df = pd.DataFrame(statz_rows)
+    statz_df = pd.DataFrame(raw_rows)
+
+    # MV v8 nudge (if cache available) — pulls atk_xg/def_xg toward MV target.
+    if not statz_df.empty and mv_df is not None:
+        statz_df = statz_df.merge(mv_df, left_on='team_name', right_on='statz_name', how='left')
+        n_unmapped = int(statz_df['mv_idx'].isna().sum())
+        statz_df['mv_idx_filled'] = statz_df['mv_idx'].fillna(1.0)
+        mean_mv = statz_df['mv_idx_filled'].mean()
+        statz_df['mv_rev'] = mean_mv / statz_df['mv_idx_filled']
+        statz_df['mv_rev'] = statz_df['mv_rev'] / statz_df['mv_rev'].mean()
+
+        atk_mean = statz_df['atk_xg'].mean()
+        def_mean = statz_df['def_xg'].mean()
+        statz_df['atk_xg'] = statz_df['atk_xg'] * (
+            1 + ((statz_df['mv_idx_filled'] - statz_df['atk_xg']/atk_mean) * INTL_MV_BETA) / statz_df['atk_xg']
+        )
+        statz_df['def_xg'] = statz_df['def_xg'] * (
+            1 + ((statz_df['mv_rev'] - statz_df['def_xg']/def_mean) * INTL_MV_BETA) / statz_df['def_xg']
+        )
+        logger.info(f"MV v8 nudge applied: {len(statz_df) - n_unmapped}/{len(statz_df)} teams mapped, β={INTL_MV_BETA}")
+
+    # Rescale to mean=100 separately for Attack and Defense.
+    if not statz_df.empty:
+        raw_ma = statz_df['atk_xg'].mean()
+        raw_md = statz_df['def_xg'].mean()
+        statz_df['attack']     = (statz_df['atk_xg'] / raw_ma * 100).round(2)
+        statz_df['defense']    = (statz_df['def_xg'] / raw_md * 100).round(2)
+        statz_df['overall']    = (statz_df['attack'] - statz_df['defense']).round(2)
+        statz_df['attack_xg']  = statz_df['atk_xg'].round(4)
+        statz_df['defense_xg'] = statz_df['def_xg'].round(4)
+        statz_df['overall_xg'] = (statz_df['atk_xg'] - statz_df['def_xg']).round(4)
+        statz_df['inverse']    = 'No'
+        statz_df['date']       = target_date
+        logger.info(f"Rescaled to mean=100: raw_ma={raw_ma:.3f}, raw_md={raw_md:.3f}, n={len(statz_df)}")
+
     carry_df = pd.DataFrame(carry_rows)
 
     logger.info(
@@ -448,32 +549,38 @@ async def compute_quarterly_snapshot(
 
 
 async def _write_snapshot(statz_df: pd.DataFrame, carry_df: pd.DataFrame, target_date: date) -> None:
-    """Upsert all rows into team_ratings. statz rows inverse='No', carry inverse='Yes'."""
-    from app.repository.db_utils import execute_chunked
-    rows = []
-    for _, r in statz_df.iterrows():
-        rows.append((
-            RATINGS_COMP_ID, int(r['team_id']), target_date,
-            float(r['attack']), float(r['defense']),
-            float(r['attack']) - float(r['defense']),
-            'No',
-        ))
-    for _, r in carry_df.iterrows():
-        rows.append((
-            RATINGS_COMP_ID, int(r['team_id']), target_date,
-            float(r['attack']), float(r['defense']),
-            float(r['attack']) - float(r['defense']),
-            'Yes',
-        ))
-    sql = """
-        INSERT INTO team_ratings
-          (competition_id, team_id, date, attack, defense, overall, inverse, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-        ON DUPLICATE KEY UPDATE
-          attack = VALUES(attack),
-          defense = VALUES(defense),
-          overall = VALUES(overall),
-          inverse = VALUES(inverse),
-          updated_at = NOW()
-    """
-    await execute_chunked(sql, rows, label='[team_ratings int_snapshot]')
+    """Replace all comp-732 rows for target_date. statz inverse='No' (rescaled +
+    raw xg), carry inverse='Yes' (FIFA values copied)."""
+    conn = await get_source_connection()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM team_ratings WHERE competition_id=%s AND date=%s",
+                (RATINGS_COMP_ID, target_date),
+            )
+            statz_rows = [(
+                RATINGS_COMP_ID, int(r['team_id']), target_date,
+                float(r['attack']), float(r['defense']), float(r['overall']),
+                float(r['attack_xg']), float(r['defense_xg']), float(r['overall_xg']),
+                'No',
+            ) for _, r in statz_df.iterrows()]
+            carry_rows = [(
+                RATINGS_COMP_ID, int(r['team_id']), target_date,
+                float(r['attack']), float(r['defense']), float(r['overall']),
+                None, None, None,
+                'Yes',
+            ) for _, r in carry_df.iterrows()]
+            all_rows = statz_rows + carry_rows
+            for i in range(0, len(all_rows), 100):
+                await cur.executemany(
+                    """INSERT INTO team_ratings
+                       (competition_id, team_id, date,
+                        attack, defense, overall,
+                        attack_xg, defense_xg, overall_xg,
+                        inverse, created_at, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())""",
+                    all_rows[i:i+100],
+                )
+        await conn.commit()
+    finally:
+        release_source_connection(conn)
