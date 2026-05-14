@@ -97,7 +97,13 @@ def _solve_lambdas_for_probs(target_h: float, target_a: float,
 class WcProjectionService:
     """Stateless — instance method only for parity with EuroCompProjectionService."""
 
-    async def projections(self, commit: bool = True) -> dict:
+    WC_COMPS = ['World Cup']
+
+    @staticmethod
+    def is_wc_comp(league: str) -> bool:
+        return league in WcProjectionService.WC_COMPS
+
+    async def projections(self, league_request=None, commit: bool = True) -> dict:
         """Compute + (optionally) write WC fixture projections.
 
         Self-contained: refreshes Statz ratings inline (committing to
