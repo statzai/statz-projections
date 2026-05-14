@@ -4,20 +4,24 @@ World Cup 2026 fixture projections.
 Self-contained — ratings AND projections are both refreshed every run,
 mirroring the domestic projection pattern.
 
+Score prediction is the **same code path as domestic** (calls the shared
+get_result_probs + find_inputs_for_probs helpers in statz_functions).
+The only differences are the ratings source (international_ratings rather
+than the domestic get_ratings pipeline) and the per-fixture lambda
+construction (single AVG_GOALS + host bonus, no league-specific weightings).
+
 Pipeline:
-1. Compute fresh Statz ratings (TEB v5 + MV v8 + symmetric caps) for
-   today's date via international_ratings.compute_quarterly_snapshot,
-   committing to team_ratings (comp 732, inverse='No', date=today).
+1. Compute fresh Statz international ratings (TEB v5 FIFA opp + MV v8
+   nudge + symmetric caps) for today's date, committing to team_ratings.
 2. Cross-Poisson per fixture from those ratings: λ_h = (h.atk/100) ×
    (a.def/100) × AVG_GOALS, λ_a similarly. 1.10× host bonus for
    USA/Canada/Mexico at home.
-3. Compute model 1X2 + downstream markets (BTTS, O1.5, O2.5, CS) from
-   the Poisson grid (max 8 goals each side).
-4. If bet365 1X2 odds exist on the fixture: de-vig + linear blend at
-   β=0.3 → blended 1X2 → scipy.fsolve for new (λ_h, λ_a) that match
-   blended 1X2 → recompute downstream markets from the new λs.
-   Mirrors domestic projection_service.py:947-965.
-5. Write to fixture_projections (idempotent — DELETE comp=732 + INSERT).
+3. Model 1X2 from get_result_probs(home_goals, away_goals, boost).
+4. If bet365 1X2 odds exist: de-vig (divide by overround) + linear
+   blend at ODDS_BETA → adjusted 1X2 → find_inputs_for_probs to re-solve
+   λs that produce the adjusted 1X2.
+5. Downstream markets (CS, O1.5, O2.5, BTTS) from the final Poisson grid.
+6. Write to fixture_projections (idempotent — DELETE comp=732 + INSERT).
 
 Skipped: fixtures with unknown team rating (knockout bracket placeholders
 like "1st Group A vs 3rd Group C/E/F/H/I").
@@ -27,14 +31,13 @@ squad announcements (~late May 2026). Service writes only fixture-level
 markets.
 """
 import logging
-import math
 from datetime import date, datetime
-from typing import Tuple
 
 import numpy as np
-from scipy.optimize import fsolve
+from scipy.stats import poisson
 
 from app.services.international_ratings import compute_international_ratings
+from app.services.statz_functions import get_result_probs, find_inputs_for_probs
 from app.source_database import get_source_connection, release_source_connection
 
 logger = logging.getLogger("wc_projection")
@@ -43,55 +46,12 @@ WC_COMP_ID = 732
 AVG_GOALS = 1.3
 HOST_BONUS = 1.10
 HOSTS = {'United States', 'Mexico', 'Canada'}
-ODDS_BETA = 0.3       # bet365 1X2 blend weight (domestic default)
-MAX_GOALS = 8         # Poisson grid cap
 
-
-def _poisson_pmf(lam: float) -> list:
-    return [math.exp(-lam) * lam**k / math.factorial(k) for k in range(MAX_GOALS + 1)]
-
-
-def _poisson_markets(lam_h: float, lam_a: float) -> dict:
-    """Compute all 1X2 + BTTS + OU + CS probabilities from Poisson grid."""
-    p_h = _poisson_pmf(lam_h)
-    p_a = _poisson_pmf(lam_a)
-    home_win = draw = away_win = 0.0
-    over_15 = over_25 = btts = 0.0
-    home_cs = away_cs = 0.0
-    for h in range(MAX_GOALS + 1):
-        for a in range(MAX_GOALS + 1):
-            p = p_h[h] * p_a[a]
-            if h > a: home_win += p
-            elif h == a: draw += p
-            else: away_win += p
-            if h + a >= 2: over_15 += p
-            if h + a >= 3: over_25 += p
-            if h >= 1 and a >= 1: btts += p
-            if a == 0: home_cs += p
-            if h == 0: away_cs += p
-    return {
-        'home_win': home_win, 'draw': draw, 'away_win': away_win,
-        'over_15': over_15, 'over_25': over_25, 'btts': btts,
-        'home_cs': home_cs, 'away_cs': away_cs,
-    }
-
-
-def _solve_lambdas_for_probs(target_h: float, target_a: float,
-                              lam_h0: float, lam_a0: float) -> Tuple[float, float]:
-    """Find (λ_h, λ_a) producing target P(home), P(away). Returns starting
-    guess if numerical solver fails to converge."""
-    def f(params):
-        lh = max(0.01, params[0])
-        la = max(0.01, params[1])
-        m = _poisson_markets(lh, la)
-        return [m['home_win'] - target_h, m['away_win'] - target_a]
-    try:
-        sol, info, ier, msg = fsolve(f, [lam_h0, lam_a0], full_output=True)
-        if ier != 1:
-            return lam_h0, lam_a0
-        return max(0.01, float(sol[0])), max(0.01, float(sol[1]))
-    except Exception:
-        return lam_h0, lam_a0
+# Match domestic projection_service.py defaults. odds_beta=0.3 = bet365 1X2
+# blend weight; boost=1.0 = no draw inflation (international games don't
+# need the draw nudge that league football gets per-comp via projection_config).
+ODDS_BETA = 0.3
+BOOST = 1.0
 
 
 class WcProjectionService:
@@ -106,21 +66,20 @@ class WcProjectionService:
     async def projections(self, league_request=None, commit: bool = True) -> dict:
         """Compute + (optionally) write WC fixture projections.
 
-        Self-contained: refreshes Statz ratings inline (committing to
-        team_ratings) before computing fixture projections.
+        Self-contained: refreshes Statz international ratings inline
+        (committing to team_ratings) before computing fixture projections.
+        Score prediction uses the same shared helpers as domestic
+        (get_result_probs + find_inputs_for_probs).
 
         Returns a stats dict:
           {n_total, n_projected, n_blended, n_skipped_unknown_team,
-           n_ratings, ratings_snapshot_date}
+           n_ratings, ratings_snapshot_date, committed}
         """
-        logger.info(f"WC projection start — commit={commit}, β={ODDS_BETA}")
+        logger.info(f"WC projection start — commit={commit}, odds_beta={ODDS_BETA}, boost={BOOST}")
 
-        # Step 1: refresh Statz ratings inline (always commit to team_ratings
-        # so the snapshot is persisted for later inspection / accuracy
-        # comparisons / future-fixture opp lookups). Mirrors the domestic
-        # projection pattern where ratings are computed every run.
+        # Step 1: refresh Statz ratings inline.
         ratings_date = date.today()
-        statz_df, _ = await compute_international_ratings(ratings_date, commit=True)
+        statz_df, _ = await compute_international_ratings(ratings_date, commit=commit)
         ratings = {
             row['team_name']: (float(row['attack']), float(row['defense']))
             for _, row in statz_df.iterrows()
@@ -130,7 +89,6 @@ class WcProjectionService:
         conn = await get_source_connection()
         try:
             async with conn.cursor() as cur:
-
                 # Upcoming WC fixtures + bet365 1X2 odds (LEFT JOIN, null-safe)
                 await cur.execute(
                     """
@@ -156,48 +114,69 @@ class WcProjectionService:
             inserts = []
             for fid, h_tid, a_tid, ko, home, away, oh, od, oa in fixtures:
                 if home not in ratings or away not in ratings:
-                    # Knockout bracket placeholders ("1st Group A" etc) or
-                    # genuine unknowns — skip rather than write garbage.
                     n_skipped_unknown_team += 1
                     continue
 
+                # λ from cross-Poisson rating product + host bonus
                 h_atk, h_def = ratings[home]
                 a_atk, a_def = ratings[away]
-                lam_h = (h_atk / 100) * (a_def / 100) * AVG_GOALS
-                lam_a = (a_atk / 100) * (h_def / 100) * AVG_GOALS
+                home_goals = (h_atk / 100) * (a_def / 100) * AVG_GOALS
+                away_goals = (a_atk / 100) * (h_def / 100) * AVG_GOALS
                 if home in HOSTS:
-                    lam_h *= HOST_BONUS
+                    home_goals *= HOST_BONUS
                 elif away in HOSTS:
-                    lam_a *= HOST_BONUS
+                    away_goals *= HOST_BONUS
 
-                m = _poisson_markets(lam_h, lam_a)
-
-                # bet365 1X2 blend (null-safe)
+                # === Score prediction — same code path as projection_service.py:947-980 ===
                 if oh and od and oa:
-                    ih = 1.0 / float(oh); id_ = 1.0 / float(od); ia = 1.0 / float(oa)
-                    margin = ih + id_ + ia
-                    mh_imp = ih / margin
-                    ma_imp = ia / margin
-                    blend_h = m['home_win'] + (mh_imp - m['home_win']) * ODDS_BETA
-                    blend_a = m['away_win'] + (ma_imp - m['away_win']) * ODDS_BETA
-                    new_lh, new_la = _solve_lambdas_for_probs(blend_h, blend_a, lam_h, lam_a)
-                    m_new = _poisson_markets(new_lh, new_la)
-                    if abs(m_new['home_win'] - blend_h) < 0.005 and abs(m_new['away_win'] - blend_a) < 0.005:
-                        lam_h, lam_a = new_lh, new_la
-                        m = m_new
-                        n_blended += 1
+                    # Implied % (with vig), de-vig by dividing by overround
+                    home_odds_pct = (1.0 / float(oh)) * 100
+                    draw_odds_pct = (1.0 / float(od)) * 100
+                    away_odds_pct = (1.0 / float(oa)) * 100
+                    bookie_margin = 1 + (home_odds_pct + draw_odds_pct + away_odds_pct - 100) / 100
+                    home_odds_pct /= bookie_margin
+                    draw_odds_pct /= bookie_margin
+                    away_odds_pct /= bookie_margin
+
+                    home_win_prob, draw_prob, away_win_prob = get_result_probs(home_goals, away_goals, BOOST)
+                    adjusted_home_win_prob = home_win_prob + ((home_odds_pct - home_win_prob) * ODDS_BETA)
+                    adjusted_draw_prob = draw_prob + ((draw_odds_pct - draw_prob) * ODDS_BETA)
+                    adjusted_away_win_prob = away_win_prob + ((away_odds_pct - away_win_prob) * ODDS_BETA)
+                    new_home_goals, new_away_goals = find_inputs_for_probs(
+                        home_goals, away_goals,
+                        adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob,
+                        BOOST,
+                    )
+                    n_blended += 1
+                else:
+                    new_home_goals = home_goals
+                    new_away_goals = away_goals
+                    adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = get_result_probs(
+                        home_goals, away_goals, BOOST
+                    )
+
+                home_clean_sheet = poisson.pmf(0, new_away_goals)
+                away_clean_sheet = poisson.pmf(0, new_home_goals)
+                x = np.arange(0, 9)
+                y = np.arange(0, 9)
+                X, Y = np.meshgrid(x, y)
+                Z = poisson.pmf(X, new_home_goals) * poisson.pmf(Y, new_away_goals)
+                over_1_goals = (1 - Z[0, 0] - Z[1, 0] - Z[0, 1]) * 100
+                over_2_goals = (1 - Z[0, 0] - Z[1, 0] - Z[0, 1] - Z[2, 0] - Z[0, 2] - Z[1, 1]) * 100
+                both_teams_score_prob = (1 - Z[0, :].sum() - Z[:, 0].sum() + Z[0, 0]) * 100
+                # === End shared score-prediction block ===
 
                 inserts.append((
                     fid, h_tid, a_tid,
-                    str(round(lam_h, 2)), str(round(lam_a, 2)),
-                    round(m['home_win'] * 100, 2),
-                    round(m['away_win'] * 100, 2),
-                    round(m['draw'] * 100, 2),
-                    round(m['home_cs'] * 100, 2),
-                    round(m['away_cs'] * 100, 2),
-                    round(m['over_15'] * 100, 2),
-                    round(m['over_25'] * 100, 2),
-                    round(m['btts'] * 100, 2),
+                    str(round(new_home_goals, 2)), str(round(new_away_goals, 2)),
+                    round(adjusted_home_win_prob, 2),
+                    round(adjusted_away_win_prob, 2),
+                    round(adjusted_draw_prob, 2),
+                    round(home_clean_sheet * 100, 2),
+                    round(away_clean_sheet * 100, 2),
+                    round(over_1_goals, 2),
+                    round(over_2_goals, 2),
+                    round(both_teams_score_prob, 2),
                     ko,
                 ))
 
