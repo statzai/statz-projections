@@ -897,8 +897,9 @@ class ProjectionAllTeams:
                 avg_away_goals = get_away_goal_avg(league_id, team_stats, fixtures, stats_types)
 
                 logger.info(f"[{league}] avg_home_goals={avg_home_goals:.3f}, avg_away_goals={avg_away_goals:.3f}")
-            
 
+
+                next_fix = drop_placeholder_fixtures(next_fix, league)
                 score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
                 # boost = get_draw_boost(ratings, avg_home_goals, avg_away_goals, get_draw_perc(league_id, fixtures))
                 boost = 1.1  # NEW - Set draw boost to fixed value
@@ -1103,6 +1104,7 @@ class ProjectionAllTeams:
                     season_fixtures.loc[:, 'away_team'] = season_fixtures['away_team_id'].map(teams.set_index('id')['name'])
                     season_fixtures.sort_values(by='kickoff_datetime', inplace=True)
                     season_fixtures.reset_index(drop=True, inplace=True)
+                    season_fixtures = drop_placeholder_fixtures(season_fixtures, league)
 
                     season_score_preds = make_round_goal_prediction(season_fixtures, ratings, avg_home_goals, avg_away_goals)
 
