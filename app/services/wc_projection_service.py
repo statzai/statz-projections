@@ -1,16 +1,21 @@
 """
 World Cup 2026 fixture projections.
 
+Self-contained — ratings AND projections are both refreshed every run,
+mirroring the domestic projection pattern.
+
 Pipeline:
-1. Read LIVE Statz ratings (team_ratings comp 732, inverse='No', most recent
-   snapshot ≤ today) for cross-Poisson lambdas.
-2. Cross-Poisson per fixture: λ_h = (h.atk/100) × (a.def/100) × AVG_GOALS,
-   λ_a similarly. Apply 1.10× host bonus to USA/Canada/Mexico at home.
+1. Compute fresh Statz ratings (TEB v5 + MV v8 + symmetric caps) for
+   today's date via international_ratings.compute_quarterly_snapshot,
+   committing to team_ratings (comp 732, inverse='No', date=today).
+2. Cross-Poisson per fixture from those ratings: λ_h = (h.atk/100) ×
+   (a.def/100) × AVG_GOALS, λ_a similarly. 1.10× host bonus for
+   USA/Canada/Mexico at home.
 3. Compute model 1X2 + downstream markets (BTTS, O1.5, O2.5, CS) from
    the Poisson grid (max 8 goals each side).
 4. If bet365 1X2 odds exist on the fixture: de-vig + linear blend at
    β=0.3 → blended 1X2 → scipy.fsolve for new (λ_h, λ_a) that match
-   blended 1X2 → recompute all downstream markets from the new λs.
+   blended 1X2 → recompute downstream markets from the new λs.
    Mirrors domestic projection_service.py:947-965.
 5. Write to fixture_projections (idempotent — DELETE comp=732 + INSERT).
 
@@ -23,12 +28,13 @@ markets.
 """
 import logging
 import math
-from datetime import datetime
+from datetime import date, datetime
 from typing import Tuple
 
 import numpy as np
 from scipy.optimize import fsolve
 
+from app.services.international_ratings import compute_international_ratings
 from app.source_database import get_source_connection, release_source_connection
 
 logger = logging.getLogger("wc_projection")
@@ -94,29 +100,30 @@ class WcProjectionService:
     async def projections(self, commit: bool = True) -> dict:
         """Compute + (optionally) write WC fixture projections.
 
+        Self-contained: refreshes Statz ratings inline (committing to
+        team_ratings) before computing fixture projections.
+
         Returns a stats dict:
-          {n_total, n_projected, n_blended, n_skipped_unknown_team, n_skipped_unknown_rating}
+          {n_total, n_projected, n_blended, n_skipped_unknown_team,
+           n_ratings, ratings_snapshot_date}
         """
         logger.info(f"WC projection start — commit={commit}, β={ODDS_BETA}")
+
+        # Step 1: refresh Statz ratings inline (always commit to team_ratings
+        # so the snapshot is persisted for later inspection / accuracy
+        # comparisons / future-fixture opp lookups). Mirrors the domestic
+        # projection pattern where ratings are computed every run.
+        ratings_date = date.today()
+        statz_df, _ = await compute_international_ratings(ratings_date, commit=True)
+        ratings = {
+            row['team_name']: (float(row['attack']), float(row['defense']))
+            for _, row in statz_df.iterrows()
+        } if not statz_df.empty else {}
+        logger.info(f"Refreshed {len(ratings)} Statz ratings for {ratings_date}")
 
         conn = await get_source_connection()
         try:
             async with conn.cursor() as cur:
-                # Most-recent Statz snapshot ≤ today
-                await cur.execute(
-                    """
-                    SELECT t.name, tr.attack, tr.defense
-                    FROM team_ratings tr JOIN teams t ON t.id = tr.team_id
-                    WHERE tr.competition_id = %s AND tr.inverse = 'No'
-                      AND tr.date = (
-                        SELECT MAX(date) FROM team_ratings
-                        WHERE competition_id = %s AND inverse = 'No' AND date <= CURDATE()
-                      )
-                    """,
-                    (WC_COMP_ID, WC_COMP_ID),
-                )
-                ratings = {r[0]: (float(r[1]), float(r[2])) for r in await cur.fetchall()}
-                logger.info(f"Loaded {len(ratings)} Statz ratings")
 
                 # Upcoming WC fixtures + bet365 1X2 odds (LEFT JOIN, null-safe)
                 await cur.execute(
@@ -231,6 +238,8 @@ class WcProjectionService:
                 'n_projected': len(inserts),
                 'n_blended': n_blended,
                 'n_skipped_unknown_team': n_skipped_unknown_team,
+                'n_ratings': len(ratings),
+                'ratings_snapshot_date': str(ratings_date),
                 'committed': commit,
             }
         finally:

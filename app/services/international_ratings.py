@@ -394,12 +394,12 @@ def _compute_one_team(
     }
 
 
-async def compute_quarterly_snapshot(
+async def compute_international_ratings(
     target_date: date,
     team_ids: Optional[List[int]] = None,
     commit: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Compute one international ratings snapshot at target_date.
+    """Compute international team ratings as of target_date.
 
     Returns (statz_df, fifa_carry_df):
       statz_df columns:
