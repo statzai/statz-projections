@@ -35,6 +35,7 @@ class RetrainRequest(BaseModel):
 
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
+from app.services.wc_projection_service import WcProjectionService
 from app.models.requests.league_request import LeagueRequest
 from app.services.projection_all_teams_service import ProjectionAllTeams
 
@@ -43,6 +44,7 @@ logger = logging.getLogger("routes")
 
 projection_service = ProjectionService()
 euro_comp_service = EuroCompProjectionService()
+wc_projection_service = WcProjectionService()
 projection_all_teams_service = ProjectionAllTeams()
 
 # Two-tier lock: an OS file-lock for cross-worker serialisation + an
@@ -161,6 +163,25 @@ async def _run_single_league(request):
         logger.info("Projection lock released.")
 
 
+async def _run_world_cup():
+    competition_id = "world-cup"
+    started_at = datetime.now(timezone.utc).isoformat()
+    try:
+        result = await wc_projection_service.projections(commit=True)
+        finished_at = datetime.now(timezone.utc).isoformat()
+        summary = (f"total={result['n_total']} projected={result['n_projected']} "
+                   f"blended={result['n_blended']} "
+                   f"skipped_unknown_team={result['n_skipped_unknown_team']}")
+        await _report_status(competition_id, "success", started_at, finished_at, exit_code=0, stdout=summary)
+    except Exception as e:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        logger.error(f"World Cup projection FAILED: {e}", exc_info=True)
+        await _report_status(competition_id, "failed", started_at, finished_at, exit_code=1, stderr=str(e)[:500])
+    finally:
+        _release_lock()
+        logger.info("Projection lock released.")
+
+
 @router.post("")
 async def projections(request: LeagueRequest, background_tasks: BackgroundTasks):
     """Start league projection in background - returns immediately, no timeout."""
@@ -193,6 +214,16 @@ async def players(request: LeagueRequest):
 @router.post("/player-props")
 async def player_props(request: LeagueRequest):
     return await projection_service.player_props(request.league)
+
+
+@router.post("/world-cup")
+async def world_cup(background_tasks: BackgroundTasks):
+    """Refresh WC fixture projections — Statz ratings + cross-Poisson + bet365 1X2 blend.
+    Idempotent (DELETE comp=732 + INSERT). No team / player level — fixture markets only."""
+    if not _try_acquire_lock():
+        return {"status": "busy", "message": "A projection is already running. Wait for it to finish."}
+    background_tasks.add_task(_run_world_cup)
+    return {"status": "started", "competition": "world-cup"}
 
 
 @router.post("/all-leagues")
