@@ -378,6 +378,7 @@ class EuroCompProjectionService:
         next_fix['home_team'] = next_fix['home_team_id'].apply(lambda x: get_team(x, teams))
         next_fix['away_team'] = next_fix['away_team_id'].apply(lambda x: get_team(x, teams))
         next_fix = next_fix.drop(columns=['home_team_id', 'away_team_id'])
+        next_fix = drop_placeholder_fixtures(next_fix, league)
         next_fix.sort_values(by=['kickoff_datetime', 'home_team'], inplace=True)
         next_fix.reset_index(drop=True, inplace=True)
 

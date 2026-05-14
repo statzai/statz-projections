@@ -1,6 +1,55 @@
+import logging
 import os
 import pickle
+import re
 from typing import Any
+
+_PROJ_LOGGER = logging.getLogger("projection")
+
+# Sportmonks pre-creates knockout-final fixture rows with placeholder team
+# names like 'TBC', 'Winner Semi-final 1', 'Winner Match 73' (see e.g. EFL
+# playoff finals before semis resolve, or WC/Euros brackets pre-draw — also
+# covered in sportmonks_tournament_placeholders.md). These rows have real
+# teams.id values but no rating / no league-table presence, so projecting
+# them produces junk numbers and noisy 'Team missing/NaN in ratings' warnings.
+_PLACEHOLDER_TEAM_RE = re.compile(
+    r"^(TBC|To\s*[Bb]e\s*[Cc]onfirmed|"
+    r"(Winner|Loser|Runner[\s\-]up)\b.*|"
+    r"Group\s+[A-Z]\s+(Winner|Runner[\s\-]up).*)$",
+    re.IGNORECASE,
+)
+
+
+def is_placeholder_team_name(name) -> bool:
+    """True if a team name looks like a tournament-bracket placeholder."""
+    if name is None:
+        return False
+    return bool(_PLACEHOLDER_TEAM_RE.match(str(name).strip()))
+
+
+def drop_placeholder_fixtures(next_fix, league: str):
+    """Filter out fixtures whose home_team or away_team is a bracket placeholder.
+
+    Logs one info line per dropped fixture so the skip is visible without
+    spamming WARNING/ERROR (which would page the freshness digest).
+    """
+    if next_fix is None or len(next_fix) == 0:
+        return next_fix
+    if 'home_team' not in next_fix.columns or 'away_team' not in next_fix.columns:
+        return next_fix
+    mask = (
+        next_fix['home_team'].astype(str).map(is_placeholder_team_name)
+        | next_fix['away_team'].astype(str).map(is_placeholder_team_name)
+    )
+    if mask.any():
+        for _, row in next_fix[mask].iterrows():
+            _PROJ_LOGGER.info(
+                f"[{league}] Skipping placeholder fixture (bracket not resolved): "
+                f"{row.get('home_team', '?')} v {row.get('away_team', '?')} "
+                f"(kickoff {row.get('kickoff_datetime', '?')})"
+            )
+        next_fix = next_fix[~mask].reset_index(drop=True)
+    return next_fix
 
 
 def get_league_id(league_name, comps):

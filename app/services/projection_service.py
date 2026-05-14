@@ -905,6 +905,7 @@ class ProjectionService:
         next_fix['home_team'] = next_fix['home_team_id'].apply(lambda x: get_team(x, teams))
         next_fix['away_team'] = next_fix['away_team_id'].apply(lambda x: get_team(x, teams))
         next_fix = next_fix.drop(columns=['home_team_id', 'away_team_id'])
+        next_fix = drop_placeholder_fixtures(next_fix, league)
         next_fix.sort_values(by=['kickoff_datetime', 'home_team'], inplace=True)
         next_fix.reset_index(drop=True, inplace=True)
 
@@ -1123,6 +1124,7 @@ class ProjectionService:
             season_fixtures.loc[:, 'away_team'] = season_fixtures['away_team_id'].map(teams.set_index('id')['name'])
             season_fixtures.sort_values(by='kickoff_datetime', inplace=True)
             season_fixtures.reset_index(drop=True, inplace=True)
+            season_fixtures = drop_placeholder_fixtures(season_fixtures, league)
 
             season_score_preds = make_round_goal_prediction(season_fixtures, ratings, avg_home_goals, avg_away_goals)
 
@@ -1987,6 +1989,7 @@ class ProjectionService:
         next_fix['home_team'] = next_fix['home_team_id'].apply(lambda x: get_team(x, teams))
         next_fix['away_team'] = next_fix['away_team_id'].apply(lambda x: get_team(x, teams))
         next_fix = next_fix.drop(columns=['home_team_id', 'away_team_id'])
+        next_fix = drop_placeholder_fixtures(next_fix, league)
         next_fix.sort_values(by=['kickoff_datetime', 'home_team'], inplace=True)
         next_fix.reset_index(drop=True, inplace=True)
 
@@ -2174,6 +2177,7 @@ class ProjectionService:
         next_fix['home_team'] = next_fix['home_team_id'].apply(lambda x: get_team(x, teams))
         next_fix['away_team'] = next_fix['away_team_id'].apply(lambda x: get_team(x, teams))
         next_fix = next_fix.drop(columns=['home_team_id', 'away_team_id'])
+        next_fix = drop_placeholder_fixtures(next_fix, league)
         next_fix.sort_values(by=['kickoff_datetime', 'home_team'], inplace=True)
         next_fix.reset_index(drop=True, inplace=True)
         # In[ ]:
@@ -2381,6 +2385,7 @@ class ProjectionService:
             season_fixtures.loc[:, 'away_team'] = season_fixtures['away_team_id'].map(teams.set_index('id')['name'])
             season_fixtures.sort_values(by='kickoff_datetime', inplace=True)
             season_fixtures.reset_index(drop=True, inplace=True)
+            season_fixtures = drop_placeholder_fixtures(season_fixtures, league)
 
             season_score_preds = make_round_goal_prediction(season_fixtures, ratings, avg_home_goals, avg_away_goals)
 
@@ -2507,6 +2512,7 @@ class ProjectionService:
         next_fix['home_team'] = next_fix['home_team_id'].apply(lambda x: get_team(x, teams))
         next_fix['away_team'] = next_fix['away_team_id'].apply(lambda x: get_team(x, teams))
         next_fix = next_fix.drop(columns=['home_team_id', 'away_team_id'])
+        next_fix = drop_placeholder_fixtures(next_fix, league)
         next_fix.sort_values(by=['kickoff_datetime', 'home_team'], inplace=True)
         next_fix.reset_index(drop=True, inplace=True)
 
@@ -3014,6 +3020,7 @@ class ProjectionService:
         next_fix['home_team'] = next_fix['home_team_id'].apply(lambda x: get_team(x, teams))
         next_fix['away_team'] = next_fix['away_team_id'].apply(lambda x: get_team(x, teams))
         next_fix = next_fix.drop(columns=['home_team_id', 'away_team_id'])
+        next_fix = drop_placeholder_fixtures(next_fix, league)
         next_fix.sort_values(by=['kickoff_datetime', 'home_team'], inplace=True)
         next_fix.reset_index(drop=True, inplace=True)
 
@@ -3218,6 +3225,7 @@ class ProjectionService:
             season_fixtures.loc[:, 'away_team'] = season_fixtures['away_team_id'].map(teams.set_index('id')['name'])
             season_fixtures.sort_values(by='kickoff_datetime', inplace=True)
             season_fixtures.reset_index(drop=True, inplace=True)
+            season_fixtures = drop_placeholder_fixtures(season_fixtures, league)
 
             season_score_preds = make_round_goal_prediction(season_fixtures, ratings, avg_home_goals, avg_away_goals)
 
@@ -3712,6 +3720,7 @@ class ProjectionService:
         next_fix['home_team'] = next_fix['home_team_id'].apply(lambda x: get_team(x, teams))
         next_fix['away_team'] = next_fix['away_team_id'].apply(lambda x: get_team(x, teams))
         next_fix = next_fix.drop(columns=['home_team_id', 'away_team_id'])
+        next_fix = drop_placeholder_fixtures(next_fix, league)
         next_fix.sort_values(by=['kickoff_datetime', 'home_team'], inplace=True)
         next_fix.reset_index(drop=True, inplace=True)
 
@@ -3916,6 +3925,7 @@ class ProjectionService:
             season_fixtures.loc[:, 'away_team'] = season_fixtures['away_team_id'].map(teams.set_index('id')['name'])
             season_fixtures.sort_values(by='kickoff_datetime', inplace=True)
             season_fixtures.reset_index(drop=True, inplace=True)
+            season_fixtures = drop_placeholder_fixtures(season_fixtures, league)
 
             season_score_preds = make_round_goal_prediction(season_fixtures, ratings, avg_home_goals, avg_away_goals)
 
