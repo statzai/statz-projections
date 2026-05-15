@@ -40,6 +40,7 @@ from app.services.international_ratings import compute_international_ratings
 from app.services.statz_functions import get_result_probs, find_inputs_for_probs
 from app.services.tournament_configs import WC_2026
 from app.services.tournament_simulation_service import TournamentSimulator
+from app.services.wc_team_stat_service import WcTeamStatService
 from app.source_database import get_source_connection, release_source_connection
 
 logger = logging.getLogger("wc_projection")
@@ -230,6 +231,18 @@ class WcProjectionService:
             sim_result = await TournamentSimulator().run(WC_2026, num_sims=10_000)
             logger.info(f"WC tournament simulation: {sim_result}")
 
+        # Step 4: Per-team stat projections (shots, corners, fouls, cards, etc.)
+        # Reads fixture_projections.home_goals/away_goals from step 2 to anchor
+        # Shots/SoT via adjust_shots_projection.
+        team_stat_result = None
+        if commit:
+            try:
+                team_stat_result = await WcTeamStatService().project(commit=commit)
+                logger.info(f"WC team-stat projection: {team_stat_result}")
+            except Exception as e:
+                logger.exception(f"WC team-stat projection failed: {e}")
+                team_stat_result = {'error': str(e)}
+
         return {
             'n_total': len(fixtures),
             'n_projected': len(inserts),
@@ -239,4 +252,5 @@ class WcProjectionService:
             'ratings_snapshot_date': str(ratings_date),
             'committed': commit,
             'tournament_simulation': sim_result,
+            'team_stat_projection': team_stat_result,
         }
