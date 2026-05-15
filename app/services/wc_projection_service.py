@@ -38,6 +38,8 @@ from scipy.stats import poisson
 
 from app.services.international_ratings import compute_international_ratings
 from app.services.statz_functions import get_result_probs, find_inputs_for_probs
+from app.services.tournament_configs import WC_2026
+from app.services.tournament_simulation_service import TournamentSimulator
 from app.source_database import get_source_connection, release_source_connection
 
 logger = logging.getLogger("wc_projection")
@@ -217,15 +219,24 @@ class WcProjectionService:
                         )
                 await conn.commit()
                 logger.info(f"WROTE: deleted={deleted}, inserted={len(rows)}")
-
-            return {
-                'n_total': len(fixtures),
-                'n_projected': len(inserts),
-                'n_blended': n_blended,
-                'n_skipped_unknown_team': n_skipped_unknown_team,
-                'n_ratings': len(ratings),
-                'ratings_snapshot_date': str(ratings_date),
-                'committed': commit,
-            }
         finally:
             release_source_connection(conn)
+
+        # Step 3: Run the Monte Carlo tournament simulator. Reads the
+        # fixture-projection lambdas we just wrote, walks the bracket,
+        # outputs per-team probabilities to tournament_projections.
+        sim_result = None
+        if commit:
+            sim_result = await TournamentSimulator().run(WC_2026, num_sims=10_000)
+            logger.info(f"WC tournament simulation: {sim_result}")
+
+        return {
+            'n_total': len(fixtures),
+            'n_projected': len(inserts),
+            'n_blended': n_blended,
+            'n_skipped_unknown_team': n_skipped_unknown_team,
+            'n_ratings': len(ratings),
+            'ratings_snapshot_date': str(ratings_date),
+            'committed': commit,
+            'tournament_simulation': sim_result,
+        }
