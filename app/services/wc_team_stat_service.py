@@ -84,6 +84,15 @@ STATZ_OPP_HI = 250.0
 # Goal-anchor post-process weight (same as domestic).
 SHOTS_GOAL_ANCHOR_WEIGHT = 0.5
 
+# Host nations get domestic-style venue effect on team stats; their opp gets
+# the inverse effect. Non-host fixtures get no venue effect (neutral).
+HOSTS = {'United States', 'Mexico', 'Canada'}
+
+# Main tournaments are at neutral venues (except for the host nation, whose
+# group games are at home). Exclude these from a team's H/A venue split.
+# Tournament-qualifying comps remain real H/A.
+NEUTRAL_TOURNAMENT_COMPS = {732, 1326, 1114, 1117, 1105}
+
 # All Leagues trained model path on the container.
 MODEL_DIR = '/app/app/model-builds'
 
@@ -192,6 +201,69 @@ def _within_fixture_factor(opp_rating: Optional[dict], side: str) -> float:
 
 def _clip_opp(val: float) -> float:
     return max(STATZ_OPP_LO, min(STATZ_OPP_HI, val))
+
+
+def _venue_fallback(side: str, venue: str) -> float:
+    """1.10/0.90 fallback when a team has <5 fixtures to compute a real ratio.
+    Mirrors statz_functions.calculate_team_venue_effect / calculate_opp_venue_effect.
+    Opp-concession side is inverted: at HOME, opps tend to concede LESS."""
+    if side == 'team':
+        return 1.10 if venue == 'H' else 0.90
+    else:  # opp_concession
+        return 0.90 if venue == 'H' else 1.10
+
+
+def _calculate_venue_effect(
+    team_id: int, stat: str, side: str, venue: str,
+    fixtures_df: pd.DataFrame, stats_df: pd.DataFrame,
+) -> float:
+    """Team's multiplicative venue effect for this stat, computed from intl
+    fixtures that had a real home/away venue (i.e. excluding the main
+    tournaments where games are at neutral venues per NEUTRAL_TOURNAMENT_COMPS).
+
+    side='team'           → team's own production of stat at H vs A
+    side='opp_concession' → team's concession (opp production) at H vs A
+    venue='H' or 'A'      → which slot in the upcoming fixture
+
+    Returns (mean_at_venue / mean_overall). Fallback if <5 fixtures: see
+    _venue_fallback (1.10 / 0.90 with the right sign per side).
+    """
+    stat_type_id = STAT_TYPE_IDS[stat]
+    lo, hi = STAT_QUALITY_BOUNDS.get(stat, (None, None))
+
+    fx = fixtures_df[
+        ((fixtures_df['home_team_id'] == team_id) | (fixtures_df['away_team_id'] == team_id))
+        & (~fixtures_df['competition_id'].astype(int).isin(NEUTRAL_TOURNAMENT_COMPS))
+    ].copy()
+    if fx.empty:
+        return _venue_fallback(side, venue)
+    fx['team_venue'] = np.where(fx['home_team_id'] == team_id, 'H', 'A')
+
+    s = stats_df[
+        (stats_df['fixture_id'].isin(fx['fixture_id'])) & (stats_df['stats_type_id'] == stat_type_id)
+    ]
+    if side == 'team':
+        s = s[s['team_id'] == team_id]
+    else:
+        s = s[s['team_id'] != team_id]
+    s = s.merge(fx[['fixture_id', 'team_venue']], on='fixture_id', how='left')
+    if lo is not None:
+        s = s[(s['value'] >= lo) & (s['value'] <= hi)]
+    if len(s) < 5:
+        return _venue_fallback(side, venue)
+
+    s = s.copy()
+    s['value'] = s['value'].astype(float)
+    overall_mean = float(s['value'].mean())
+    if overall_mean == 0:
+        return 1.0
+    h_subset = s[s['team_venue'] == 'H']['value']
+    a_subset = s[s['team_venue'] == 'A']['value']
+    if len(h_subset) == 0 or len(a_subset) == 0:
+        return _venue_fallback(side, venue)
+    h_mean = float(h_subset.mean())
+    a_mean = float(a_subset.mean())
+    return h_mean / overall_mean if venue == 'H' else a_mean / overall_mean
 
 
 def _load_all_leagues_models() -> Dict[str, object]:
@@ -507,6 +579,7 @@ class WcTeamStatService:
 
             output_rows = []
             n_skipped_placeholder = 0
+            n_host_fixtures = 0
             for wc in data['wc_fixtures']:
                 # Skip bracket-placeholder fixtures (no rated team).
                 if wc['home_team_id'] not in rated_team_ids or wc['away_team_id'] not in rated_team_ids:
@@ -517,12 +590,31 @@ class WcTeamStatService:
                 home_id = wc['home_team_id']
                 away_id = wc['away_team_id']
 
+                # Host-involved fixture? Determines whether venue effect applies.
+                home_is_host = wc['home_team_name'] in HOSTS
+                away_is_host = wc['away_team_name'] in HOSTS
+                host_fixture = home_is_host or away_is_host
+                if host_fixture:
+                    n_host_fixtures += 1
+
                 for team_id, opp_id, venue, goals_val in (
                     (home_id, away_id, 'H', wc['home_goals']),
                     (away_id, home_id, 'A', wc['away_goals']),
                 ):
                     team_name = (wc['home_team_name'] if team_id == home_id else wc['away_team_name'])
                     opp_name = (wc['away_team_name'] if team_id == home_id else wc['home_team_name'])
+
+                    # Determine effective H/A for host-involved fixtures:
+                    #   - the host plays at H
+                    #   - the host's opponent plays at A
+                    # Non-host fixtures get no venue effect (treated as neutral).
+                    if host_fixture:
+                        team_is_host = team_name in HOSTS
+                        team_v = 'H' if team_is_host else 'A'
+                        opp_v = 'A' if team_is_host else 'H'
+                    else:
+                        team_v = None
+                        opp_v = None
 
                     row = {
                         'fixture_id': wc['fixture_id'],
@@ -552,6 +644,21 @@ class WcTeamStatService:
                         if team_history is None or opp_history is None:
                             row[stat] = 0.0
                             continue
+
+                        # Host-fixture venue effect (domestic-style team-specific
+                        # H/A ratios, from non-neutral comps only).
+                        if host_fixture:
+                            team_eff = _calculate_venue_effect(
+                                team_id, stat, 'team', team_v,
+                                data['fixtures_df'], data['stats_df'],
+                            )
+                            opp_eff = _calculate_venue_effect(
+                                opp_id, stat, 'opp_concession', opp_v,
+                                data['fixtures_df'], data['stats_df'],
+                            )
+                            team_history *= team_eff
+                            opp_history *= opp_eff
+
                         model = models.get(stat)
                         if model is None:
                             row[stat] = (team_history + opp_history) / 2.0
@@ -582,7 +689,8 @@ class WcTeamStatService:
 
             logger.info(
                 f"WC team-stat projection ready: {len(output_rows)} team-fixture rows, "
-                f"skipped {n_skipped_placeholder} placeholder fixtures"
+                f"skipped {n_skipped_placeholder} placeholder fixtures, "
+                f"{n_host_fixtures} host-involved fixtures (venue-effect applied)"
             )
 
             if commit and output_rows:
