@@ -75,11 +75,10 @@ async def _load_data(conn, config: TournamentConfig) -> dict:
             """
             SELECT f.id, f.group_id, f.home_team_id, f.away_team_id,
                    fp.home_goals, fp.away_goals,
-                   COALESCE(fhs.home_score, 0), COALESCE(fhs.away_score, 0),
+                   COALESCE(f.home_team_goals, 0), COALESCE(f.away_team_goals, 0),
                    f.state_id
             FROM fixtures f
             LEFT JOIN fixture_projections fp ON fp.fixture_id = f.id
-            LEFT JOIN fixtures fhs ON fhs.id = f.id
             WHERE f.competition_id = %s
               AND f.group_id IS NOT NULL
               AND f.home_team_id IS NOT NULL
