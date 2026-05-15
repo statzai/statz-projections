@@ -7,22 +7,24 @@ after the existing fixture-projection + tournament-simulation steps):
 
   For each team in the fixture:
     For each stat in STAT_LIST (12 stats):
-      1. team_history = weighted avg of team's last 30 international fixtures,
-         where each fixture's stat value is:
-           - opp-adjusted (half-strength, by past opp's defense rating) for
-             Tier 1 production-volume stats
-           - left raw for Tier 3 stats (cards, fouls, tackles, ints, offsides)
-         Weighting = importance (v4 weights) × decay (0.995^(weeks-3))
-      2. opp_history = weighted avg of opponent's concession of this stat in
-         their last 30 intl fixtures, same opp adjustment applied
-         symmetrically using the attacker's attack rating.
-      3. Regression: model.predict([[team_history, opp_history]]) using the
-         "All Leagues" fallback model loaded from disk.
+      1. team_history = weighted avg of team's intl fixtures (no game cap),
+         weighting = importance (v4 weights) × decay (0.995^(weeks-3)).
+         RAW — no per-fixture opp adjustment. Matches what the All Leagues
+         model was trained on (see projection_service.get_team_weighted_average).
+      2. opp_history = weighted avg of opponent's concession of this stat
+         in their intl history, same weighting scheme. Also raw. The model
+         learns the team×opp interaction from these two inputs.
+      3. Regression: model.predict([[team_history, opp_history]]) using
+         the "All Leagues" fallback model loaded from disk.
 
   Post-process:
+    - Tier 1 production-volume stats (Shots / SoT / Corners / Crosses /
+      Passes / Successful Passes): apply half-strength opp-strength
+      multiplier using the current opp Statz/FIFA rating. Mirrors the
+      euro_comp_projection_service pattern (which adjusts the OUTPUT of
+      the model, not the inputs).
     - Shots Total / Shots On Target → adjust_shots_projection() w=0.5 to
-      anchor with the projected goals value (consistency correction; stacks
-      with the opp-adjustment that already happened in the rolling avg).
+      anchor with the projected goals value (final consistency correction).
     - Goals: overwritten with fixture_projections.home_goals (already
       cross-Poisson + bet365 blended upstream — no regression for Goals).
 
@@ -69,7 +71,9 @@ COMP_IMPORTANCE = {
 }
 DECAY_WEIGHT = 0.995          # weekly decay base, same as int'l ratings
 DECAY_GRACE_WEEKS = 3         # first 3 weeks at full weight (matches ratings)
-LOOKBACK_GAMES = 30           # last N intl fixtures per team
+# No game-count cap — matches international_ratings.py. Decay + importance
+# weighting handle the recency, so e.g. a 5-year-old friendly contributes
+# ~0.07× weight relative to a recent WCQ.
 
 # Half-strength opp adjustment — blends the raw factor toward 1.0
 # (no adjustment). Set 0 to disable, 1.0 to use full strength.
@@ -154,16 +158,13 @@ STORED_STATS = [
 # ---------------------------------------------------------------------------
 
 def _opp_adj_factor_def(opp_def: float) -> float:
-    """Half-strength inverse-defense factor.
-    full = 100 / opp_def; blended toward 1.0 by OPP_ADJ_STRENGTH."""
+    """Half-strength inverse-defense factor. Applied to MODEL OUTPUT (not
+    history inputs) for Tier 1 production-volume stats.
+
+    full = 100 / opp_def; blended toward 1.0 by OPP_ADJ_STRENGTH.
+    Statz convention: higher defense = MORE xGA conceded (weaker defense),
+    so factor > 1 vs weak defense and factor < 1 vs strong defense."""
     full = 100.0 / max(opp_def, 1.0)
-    return 1.0 + (full - 1.0) * OPP_ADJ_STRENGTH
-
-
-def _opp_adj_factor_atk(opp_atk: float) -> float:
-    """Symmetric factor for the opp_history side (concession-rate adjustment
-    by the attacker's attack rating)."""
-    full = 100.0 / max(opp_atk, 1.0)
     return 1.0 + (full - 1.0) * OPP_ADJ_STRENGTH
 
 
@@ -369,41 +370,25 @@ def _compute_history(
         # For concession side, the row's team_id IS the attacker; team_id of THIS side is opp
         s['opp_id'] = s['team_id']  # the past attacker
 
-    # Most recent LOOKBACK_GAMES fixtures by kickoff
-    s = s.sort_values('kickoff_datetime').tail(LOOKBACK_GAMES).reset_index(drop=True)
+    # Use ALL qualifying fixtures (no game cap — matches international_ratings.py).
+    # Decay × importance handles recency.
+    s = s.sort_values('kickoff_datetime').reset_index(drop=True)
     if s.empty:
         return None, 0
 
-    # Build per-row weight + adjusted value
+    # Build per-row weight (importance × decay). No opp adjustment here —
+    # matches what the All Leagues regression model was trained on (domestic
+    # get_team_weighted_average is also a raw weighted avg, no opp adj).
     target_dt_norm = pd.to_datetime(target_dt)
-    weighted_sum = 0.0
-    weight_sum = 0.0
-    for _, row in s.iterrows():
-        raw = float(row['value'])
-
-        # Opp adjustment (Tier 1 only)
-        adj_factor = 1.0
-        if stat in TIER_1_OPP_ADJ:
-            opp = _lookup_opp_rating(int(row['opp_id']), pd.to_datetime(row['kickoff_datetime']), ratings_df)
-            if opp is not None:
-                if side == 'team':
-                    adj_factor = _opp_adj_factor_def(opp['defense'])
-                else:
-                    adj_factor = _opp_adj_factor_atk(opp['attack'])
-        adj_value = raw * adj_factor
-
-        # Importance × decay
-        importance = COMP_IMPORTANCE.get(int(row['competition_id']), 1.0)
-        weeks_since = max(0, (target_dt_norm - pd.to_datetime(row['kickoff_datetime'])).days // 7)
-        decay = DECAY_WEIGHT ** max(0, weeks_since - DECAY_GRACE_WEEKS)
-        weight = importance * decay
-
-        weighted_sum += adj_value * weight
-        weight_sum += weight
-
+    s['importance'] = s['competition_id'].astype(int).map(COMP_IMPORTANCE).fillna(1.0)
+    s['weeks_since'] = ((target_dt_norm - pd.to_datetime(s['kickoff_datetime'])).dt.days // 7).clip(lower=0)
+    s['decay'] = DECAY_WEIGHT ** (s['weeks_since'] - DECAY_GRACE_WEEKS).clip(lower=0)
+    s['weight'] = s['importance'] * s['decay']
+    weight_sum = float(s['weight'].sum())
     if weight_sum <= 0:
         return None, 0
-    return weighted_sum / weight_sum, len(s)
+    weighted_avg = float((s['value'].astype(float) * s['weight']).sum() / weight_sum)
+    return weighted_avg, len(s)
 
 
 def _compute_avg_shots_per_goal(fixtures_df: pd.DataFrame, stats_df: pd.DataFrame) -> Tuple[float, float]:
@@ -444,7 +429,7 @@ class WcTeamStatService:
     async def project(self, commit: bool = True) -> dict:
         logger.info(
             f"WC team-stat projection start — commit={commit}, "
-            f"opp_adj_strength={OPP_ADJ_STRENGTH}, lookback={LOOKBACK_GAMES}"
+            f"opp_adj_strength={OPP_ADJ_STRENGTH} (no game cap)"
         )
 
         models = _load_all_leagues_models()
@@ -501,6 +486,10 @@ class WcTeamStatService:
                     team_name = (wc['home_team_name'] if team_id == home_id else wc['away_team_name'])
                     opp_name = (wc['away_team_name'] if team_id == home_id else wc['home_team_name'])
 
+                    # Current opp rating — used for Tier 1 post-process multiplier
+                    # (applied to the MODEL OUTPUT, not the history inputs).
+                    opp_rating_now = _lookup_opp_rating(opp_id, target_dt, data['ratings_df'])
+
                     row = {
                         'fixture_id': wc['fixture_id'],
                         'kickoff_datetime': target_dt,
@@ -531,10 +520,16 @@ class WcTeamStatService:
                             continue
                         model = models.get(stat)
                         if model is None:
-                            row[stat] = round((team_history + opp_history) / 2.0, 2)
-                            continue
-                        pred = model.predict([[team_history, opp_history]])[0]
-                        row[stat] = float(pred)
+                            pred = (team_history + opp_history) / 2.0
+                        else:
+                            pred = float(model.predict([[team_history, opp_history]])[0])
+
+                        # Tier 1 post-process: half-strength opp-strength multiplier
+                        # using current opp rating. Stat output × (1 + (100/opp_def − 1) × 0.5).
+                        if stat in TIER_1_OPP_ADJ and opp_rating_now is not None:
+                            pred *= _opp_adj_factor_def(opp_rating_now['defense'])
+
+                        row[stat] = pred
 
                     output_rows.append(row)
 
