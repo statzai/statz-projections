@@ -158,13 +158,18 @@ STORED_STATS = [
 # ---------------------------------------------------------------------------
 
 def _opp_adj_factor_def(opp_def: float) -> float:
-    """Half-strength inverse-defense factor. Applied to MODEL OUTPUT (not
-    history inputs) for Tier 1 production-volume stats.
+    """Half-strength opp-defense factor for Tier 1 production-volume stats
+    (Shots/SoT/Corners/Crosses/Passes/Successful Passes). Applied to the
+    MODEL OUTPUT, not the history inputs.
 
-    full = 100 / opp_def; blended toward 1.0 by OPP_ADJ_STRENGTH.
-    Statz convention: higher defense = MORE xGA conceded (weaker defense),
-    so factor > 1 vs weak defense and factor < 1 vs strong defense."""
-    full = 100.0 / max(opp_def, 1.0)
+    Statz convention: higher defense rating = MORE xGA conceded (weaker
+    defense). So vs weak defense we want MORE volume, vs strong defense
+    LESS. Factor = opp_def/100 (full strength), blended toward 1.0 by
+    OPP_ADJ_STRENGTH.
+
+    (Note: the ratings pipeline uses the *inverse* form 100/opp_def because
+    it's crediting attack output, not predicting volume — different sign.)"""
+    full = max(opp_def, 1.0) / 100.0
     return 1.0 + (full - 1.0) * OPP_ADJ_STRENGTH
 
 
