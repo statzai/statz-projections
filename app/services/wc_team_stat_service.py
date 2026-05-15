@@ -157,19 +157,31 @@ STORED_STATS = [
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _opp_adj_factor_def(opp_def: float) -> float:
-    """Half-strength opp-defense factor for Tier 1 production-volume stats
-    (Shots/SoT/Corners/Crosses/Passes/Successful Passes). Applied to the
-    MODEL OUTPUT, not the history inputs.
+def _tier1_volume_factor(opp_rating: Optional[dict]) -> float:
+    """Half-strength Tier 1 production-volume multiplier (Shots / SoT /
+    Corners / Crosses / Passes / Successful Passes). Applied to MODEL OUTPUT.
 
-    Statz convention: higher defense rating = MORE xGA conceded (weaker
-    defense). So vs weak defense we want MORE volume, vs strong defense
-    LESS. Factor = opp_def/100 (full strength), blended toward 1.0 by
-    OPP_ADJ_STRENGTH.
+    Sign depends on the opp rating's convention (FIFA vs Statz):
 
-    (Note: the ratings pipeline uses the *inverse* form 100/opp_def because
-    it's crediting attack output, not predicting volume — different sign.)"""
-    full = max(opp_def, 1.0) / 100.0
+    - Statz row (inverse='No'): `defense` is xGA-based — higher = WEAKER
+      defense (concedes more). Volume factor = defense/100. vs def=150
+      (weak) → 1.25× at half-strength.
+
+    - FIFA row (inverse='Yes'): `overall` is team strength — higher =
+      STRONGER team (better defense, harder to create against). Volume
+      factor = 100/overall. vs overall=200 (top team) → 0.75× at half.
+
+    Both arrive at the SAME semantic direction (more vs weak, less vs
+    strong) — only the math differs because the rating scales point
+    opposite ways."""
+    if opp_rating is None:
+        return 1.0
+    if opp_rating.get('is_fifa'):
+        # FIFA: invert (higher = stronger)
+        full = 100.0 / max(opp_rating['overall'], 1.0)
+    else:
+        # Statz: direct (higher = weaker)
+        full = max(opp_rating['defense'], 1.0) / 100.0
     return 1.0 + (full - 1.0) * OPP_ADJ_STRENGTH
 
 
@@ -298,18 +310,22 @@ async def _load_data(conn) -> dict:
 
 
 def _lookup_opp_rating(team_id: int, before_dt, ratings_df: pd.DataFrame) -> Optional[dict]:
-    """Most recent team_ratings row for team_id with date < before_dt."""
+    """Most recent team_ratings row for team_id with date < before_dt.
+
+    Returns a dict with `is_fifa` flag — callers MUST check it, since the
+    rating-direction convention is opposite between FIFA and Statz rows:
+      - FIFA (inverse='Yes'): higher overall = STRONGER team
+      - Statz (inverse='No'): higher defense = WEAKER defense (more xGA)"""
     sub = ratings_df[(ratings_df['team_id'] == team_id) & (ratings_df['date'] < before_dt)]
     if sub.empty:
         return None
     row = sub.iloc[-1]
     if row['inverse'] == 'Yes':
-        # FIFA row: attack = defense = overall (single opp value)
-        v = float(row['overall'])
-        return {'attack': v, 'defense': v}
+        return {'overall': float(row['overall']), 'is_fifa': True}
     return {
         'attack': _clip_opp(float(row['attack'])),
         'defense': _clip_opp(float(row['defense'])),
+        'is_fifa': False,
     }
 
 
@@ -530,9 +546,9 @@ class WcTeamStatService:
                             pred = float(model.predict([[team_history, opp_history]])[0])
 
                         # Tier 1 post-process: half-strength opp-strength multiplier
-                        # using current opp rating. Stat output × (1 + (100/opp_def − 1) × 0.5).
-                        if stat in TIER_1_OPP_ADJ and opp_rating_now is not None:
-                            pred *= _opp_adj_factor_def(opp_rating_now['defense'])
+                        # using current opp rating (FIFA vs Statz handled inside).
+                        if stat in TIER_1_OPP_ADJ:
+                            pred *= _tier1_volume_factor(opp_rating_now)
 
                         row[stat] = pred
 
