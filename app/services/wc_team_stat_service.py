@@ -7,24 +7,22 @@ after the existing fixture-projection + tournament-simulation steps):
 
   For each team in the fixture:
     For each stat in STAT_LIST (12 stats):
-      1. team_history = weighted avg of team's intl fixtures (no game cap),
-         weighting = importance (v4 weights) × decay (0.995^(weeks-3)).
-         RAW — no per-fixture opp adjustment. Matches what the All Leagues
-         model was trained on (see projection_service.get_team_weighted_average).
+      1. team_history = weighted avg of team's intl fixtures (no game cap).
+         Each past fixture's stat value is opp-adjusted at HALF strength
+         using the PAST opp's rating at the time of that fixture
+         (FIFA-vs-Statz convention handled by _within_fixture_factor).
+         Weighting = importance (v4 weights) × decay (0.995^(weeks-3)).
+         Mirrors the per-fixture neutralisation in international_ratings.py.
       2. opp_history = weighted avg of opponent's concession of this stat
-         in their intl history, same weighting scheme. Also raw. The model
-         learns the team×opp interaction from these two inputs.
+         in their intl history, same weighting + same half-strength
+         per-fixture adjustment but neutralised by the PAST ATTACKER's
+         strength (symmetric to side 1).
       3. Regression: model.predict([[team_history, opp_history]]) using
          the "All Leagues" fallback model loaded from disk.
 
   Post-process:
-    - Tier 1 production-volume stats (Shots / SoT / Corners / Crosses /
-      Passes / Successful Passes): apply half-strength opp-strength
-      multiplier using the current opp Statz/FIFA rating. Mirrors the
-      euro_comp_projection_service pattern (which adjusts the OUTPUT of
-      the model, not the inputs).
     - Shots Total / Shots On Target → adjust_shots_projection() w=0.5 to
-      anchor with the projected goals value (final consistency correction).
+      anchor with the projected goals value (consistency correction).
     - Goals: overwritten with fixture_projections.home_goals (already
       cross-Poisson + bet365 blended upstream — no regression for Goals).
 
@@ -157,31 +155,38 @@ STORED_STATS = [
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _tier1_volume_factor(opp_rating: Optional[dict]) -> float:
-    """Half-strength Tier 1 production-volume multiplier (Shots / SoT /
-    Corners / Crosses / Passes / Successful Passes). Applied to MODEL OUTPUT.
+def _within_fixture_factor(opp_rating: Optional[dict], side: str) -> float:
+    """Half-strength per-fixture opp adjustment, applied INSIDE the rolling
+    weighted average (one factor per historical fixture).
 
-    Sign depends on the opp rating's convention (FIFA vs Statz):
+    Sign depends on which side we're computing AND the rating convention:
 
-    - Statz row (inverse='No'): `defense` is xGA-based — higher = WEAKER
-      defense (concedes more). Volume factor = defense/100. vs def=150
-      (weak) → 1.25× at half-strength.
+      side='team' (team's own past output, neutralise by PAST OPP DEFENCE)
+        - vs strong defence → boost raw (more credit)
+        - vs weak defence   → reduce raw
+        - Statz: factor = 100 / opp.defense   (high def = weak → factor<1)
+        - FIFA:  factor = opp.overall / 100    (high overall = strong → factor>1)
 
-    - FIFA row (inverse='Yes'): `overall` is team strength — higher =
-      STRONGER team (better defense, harder to create against). Volume
-      factor = 100/overall. vs overall=200 (top team) → 0.75× at half.
+      side='opp_concession' (opp's past concession, neutralise by PAST ATTACKER)
+        - vs strong attacker → reduce raw (it was hard to keep them quiet)
+        - vs weak attacker   → boost raw  (concession looks worse)
+        - Statz: factor = 100 / past_attacker.attack
+        - FIFA:  factor = 100 / past_attacker.overall
 
-    Both arrive at the SAME semantic direction (more vs weak, less vs
-    strong) — only the math differs because the rating scales point
-    opposite ways."""
+    Final factor is blended toward 1.0 by OPP_ADJ_STRENGTH (0.5)."""
     if opp_rating is None:
         return 1.0
-    if opp_rating.get('is_fifa'):
-        # FIFA: invert (higher = stronger)
-        full = 100.0 / max(opp_rating['overall'], 1.0)
-    else:
-        # Statz: direct (higher = weaker)
-        full = max(opp_rating['defense'], 1.0) / 100.0
+    is_fifa = opp_rating.get('is_fifa')
+    if side == 'team':
+        if is_fifa:
+            full = opp_rating['overall'] / 100.0
+        else:
+            full = 100.0 / max(opp_rating['defense'], 1.0)
+    else:  # opp_concession
+        if is_fifa:
+            full = 100.0 / max(opp_rating['overall'], 1.0)
+        else:
+            full = 100.0 / max(opp_rating['attack'], 1.0)
     return 1.0 + (full - 1.0) * OPP_ADJ_STRENGTH
 
 
@@ -397,10 +402,22 @@ def _compute_history(
     if s.empty:
         return None, 0
 
-    # Build per-row weight (importance × decay). No opp adjustment here —
-    # matches what the All Leagues regression model was trained on (domestic
-    # get_team_weighted_average is also a raw weighted avg, no opp adj).
+    # Per-fixture opp adjustment (half strength) for Tier 1 production-volume
+    # stats only. Mirrors how international_ratings.py neutralises per-fixture
+    # xG by opp strength. Tier 3 stats (fouls, cards, tackles, ints, offsides)
+    # stay raw — opp strength doesn't cleanly predict these.
     target_dt_norm = pd.to_datetime(target_dt)
+    if stat in TIER_1_OPP_ADJ:
+        adj_values = []
+        for _, row in s.iterrows():
+            raw_val = float(row['value'])
+            opp = _lookup_opp_rating(int(row['opp_id']), pd.to_datetime(row['kickoff_datetime']), ratings_df)
+            adj_values.append(raw_val * _within_fixture_factor(opp, side))
+        s['adj_value'] = adj_values
+    else:
+        s['adj_value'] = s['value'].astype(float)
+
+    # Importance × decay weighting
     s['importance'] = s['competition_id'].astype(int).map(COMP_IMPORTANCE).fillna(1.0)
     s['weeks_since'] = ((target_dt_norm - pd.to_datetime(s['kickoff_datetime'])).dt.days // 7).clip(lower=0)
     s['decay'] = DECAY_WEIGHT ** (s['weeks_since'] - DECAY_GRACE_WEEKS).clip(lower=0)
@@ -408,7 +425,7 @@ def _compute_history(
     weight_sum = float(s['weight'].sum())
     if weight_sum <= 0:
         return None, 0
-    weighted_avg = float((s['value'].astype(float) * s['weight']).sum() / weight_sum)
+    weighted_avg = float((s['adj_value'] * s['weight']).sum() / weight_sum)
     return weighted_avg, len(s)
 
 
@@ -507,10 +524,6 @@ class WcTeamStatService:
                     team_name = (wc['home_team_name'] if team_id == home_id else wc['away_team_name'])
                     opp_name = (wc['away_team_name'] if team_id == home_id else wc['home_team_name'])
 
-                    # Current opp rating — used for Tier 1 post-process multiplier
-                    # (applied to the MODEL OUTPUT, not the history inputs).
-                    opp_rating_now = _lookup_opp_rating(opp_id, target_dt, data['ratings_df'])
-
                     row = {
                         'fixture_id': wc['fixture_id'],
                         'kickoff_datetime': target_dt,
@@ -541,16 +554,9 @@ class WcTeamStatService:
                             continue
                         model = models.get(stat)
                         if model is None:
-                            pred = (team_history + opp_history) / 2.0
+                            row[stat] = (team_history + opp_history) / 2.0
                         else:
-                            pred = float(model.predict([[team_history, opp_history]])[0])
-
-                        # Tier 1 post-process: half-strength opp-strength multiplier
-                        # using current opp rating (FIFA vs Statz handled inside).
-                        if stat in TIER_1_OPP_ADJ:
-                            pred *= _tier1_volume_factor(opp_rating_now)
-
-                        row[stat] = pred
+                            row[stat] = float(model.predict([[team_history, opp_history]])[0])
 
                     output_rows.append(row)
 
