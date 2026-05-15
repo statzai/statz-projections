@@ -1,6 +1,15 @@
 """
 Monte Carlo tournament simulator.
 
+Cached FIFA WC 2026 best-thirds allocation table at
+  /app/app/data/wc_2026_best_thirds_table.json
+(495 rows from FIFA Annex C / Wikipedia knockout-stage article, scraped
+2026-05-15). When present the simulator uses FIFA's deterministic slot
+assignment for any qualifying-third combination; when absent it falls
+back to greedy constraint matching.
+
+
+
 Generic engine — drives FIFA WC, Euros, Copa America, AFCON, CL knockout
 phase. Per-tournament structure comes from a TournamentConfig
 (tournament_configs.py); FIFA tiebreaker chain comes from
@@ -30,8 +39,10 @@ Knockout fixture lambdas are computed per-sim from team ratings — bet365
 can't price emergent matchups, so we use the pure cross-Poisson model
 with the standard 1.3 AVG_GOALS.
 """
+import json
 import logging
 import math
+import os
 import random
 import re
 from collections import defaultdict
@@ -43,6 +54,31 @@ import numpy as np
 from app.services.tournament_configs import TournamentConfig
 from app.services.tournament_tiebreakers import resolve_group_order
 from app.source_database import get_source_connection, release_source_connection
+
+WC_BEST_THIRDS_TABLE_PATH = '/app/app/data/wc_2026_best_thirds_table.json'
+
+_BEST_THIRDS_TABLE_CACHE = None
+
+
+def _load_best_thirds_table() -> Optional[dict]:
+    """Cached load of FIFA's WC 2026 Annex C best-thirds allocation table.
+
+    Returns None if the file is missing (caller falls back to greedy
+    constraint matching). The table maps each qualifying-set of 8 group
+    letters (as a sorted concatenated string like 'ABCDEFGH') to a dict
+    of {qualifying_group_letter: slot_label} where slot_label is one of
+    '1A', '1B', '1D', '1E', '1G', '1I', '1K', '1L' — the 8 R32 slots
+    reserved for best-thirds.
+    """
+    global _BEST_THIRDS_TABLE_CACHE
+    if _BEST_THIRDS_TABLE_CACHE is not None:
+        return _BEST_THIRDS_TABLE_CACHE
+    if not os.path.exists(WC_BEST_THIRDS_TABLE_PATH):
+        return None
+    with open(WC_BEST_THIRDS_TABLE_PATH) as f:
+        raw = json.load(f)
+    _BEST_THIRDS_TABLE_CACHE = raw.get('combinations', {})
+    return _BEST_THIRDS_TABLE_CACHE
 
 logger = logging.getLogger("tournament_simulation")
 
@@ -381,39 +417,81 @@ def _fill_r32_slots(
     Returns ordered list of (home_team_id, away_team_id) pairs, one per
     R32 fixture in the order they appear in r32_matches.
 
-    For 'best_third' slots with an allowed-groups list (e.g. C/E/F/H/I),
-    we pick a qualifying-third team whose group is in the allowed list.
-    Greedy: process the most-constrained slots first.
+    Best-third slot allocation: if FIFA's Annex C lookup table is
+    available, use it — for each qualifying-set of 8 group letters the
+    table gives a deterministic slot assignment. Otherwise fall back to
+    greedy constraint matching (process most-constrained slots first).
     """
-    # Index best-third slots that still need filling
-    third_slots = []   # list of (match_idx, side, allowed_groups)
+    third_slots = []   # list of (match_idx, side, allowed_groups, winner_group_letter)
     resolved = [[None, None] for _ in r32_matches]
 
     for i, m in enumerate(r32_matches):
+        # Track the "winner" partner letter on the same fixture so we can
+        # look up FIFA's slot labels like '1A' / '1G' etc.
+        winner_partner_letter = None
+        for side, slot in (('home', m['home_slot']), ('away', m['away_slot'])):
+            if slot and slot[0] == 'winner':
+                winner_partner_letter = slot[1]
+
         for side, slot in (('home', m['home_slot']), ('away', m['away_slot'])):
             if slot is None:
                 continue
+            side_idx = 0 if side == 'home' else 1
             if slot[0] == 'winner':
-                resolved[i][0 if side == 'home' else 1] = winners_by_group.get(slot[1])
+                resolved[i][side_idx] = winners_by_group.get(slot[1])
             elif slot[0] == 'runner_up':
-                resolved[i][0 if side == 'home' else 1] = runners_up_by_group.get(slot[1])
+                resolved[i][side_idx] = runners_up_by_group.get(slot[1])
             elif slot[0] == 'best_third':
-                third_slots.append((i, 0 if side == 'home' else 1, list(slot[1])))
+                third_slots.append((i, side_idx, list(slot[1]), winner_partner_letter))
 
-    # Assign qualifying thirds to slots via greedy constraint matching.
-    # Sort slots by tightness (fewest qualifying-groups in allowed list first)
-    # so highly-constrained slots get their pick before flexible ones.
-    available = set(qualifying_third_groups)
-    third_slots.sort(key=lambda s: len([g for g in s[2] if g in available]))
-    for match_idx, side_idx, allowed in third_slots:
-        candidates = [g for g in allowed if g in available]
-        if not candidates:
-            # Allocation infeasible — fall back to ANY available qualifying group
-            candidates = list(available) or list(allowed)
-        chosen = random.choice(candidates)
-        if chosen in available:
-            available.remove(chosen)
-        resolved[match_idx][side_idx] = best_thirds_by_group.get(chosen)
+    # === Attempt FIFA lookup first ===
+    fifa_table = _load_best_thirds_table()
+    fifa_assigned = False
+    if fifa_table:
+        key = ''.join(sorted(qualifying_third_groups))
+        allocation = fifa_table.get(key)
+        if allocation:
+            # FIFA's table: {qualifying_group_letter: slot_label like '1A'}
+            # Invert to {slot_label: qualifying_group_letter}
+            slot_to_group = {v: k for k, v in allocation.items()}
+            unfilled = []
+            for match_idx, side_idx, allowed, winner_letter in third_slots:
+                if winner_letter is None:
+                    unfilled.append((match_idx, side_idx, allowed, winner_letter))
+                    continue
+                slot_label = '1' + winner_letter
+                qual_letter = slot_to_group.get(slot_label)
+                if qual_letter and qual_letter in qualifying_third_groups:
+                    resolved[match_idx][side_idx] = best_thirds_by_group.get(qual_letter)
+                else:
+                    unfilled.append((match_idx, side_idx, allowed, winner_letter))
+            if not unfilled:
+                fifa_assigned = True
+
+    # === Fall back to greedy if FIFA lookup unavailable or incomplete ===
+    if not fifa_assigned:
+        available = set(qualifying_third_groups)
+        # Re-derive any already-assigned (FIFA partial) — track which thirds
+        # are still unplaced
+        for match_idx, side_idx, _, _ in third_slots:
+            if resolved[match_idx][side_idx] is not None:
+                # Find which group letter this team belongs to and remove from available
+                for g, tid in best_thirds_by_group.items():
+                    if tid == resolved[match_idx][side_idx] and g in available:
+                        available.remove(g)
+                        break
+
+        # Greedy: process tightest slots first
+        unfilled = [s for s in third_slots if resolved[s[0]][s[1]] is None]
+        unfilled.sort(key=lambda s: len([g for g in s[2] if g in available]))
+        for match_idx, side_idx, allowed, _ in unfilled:
+            candidates = [g for g in allowed if g in available]
+            if not candidates:
+                candidates = list(available) or list(allowed)
+            chosen = random.choice(candidates)
+            if chosen in available:
+                available.remove(chosen)
+            resolved[match_idx][side_idx] = best_thirds_by_group.get(chosen)
 
     return [tuple(p) for p in resolved]
 
