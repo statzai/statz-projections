@@ -111,8 +111,12 @@ MV_IDX     = [ 0.25,  0.30,  0.35,  0.55,  0.80,  1.00,  1.10,  1.25,  1.75,  2.
 INTL_MV_BETA = 0.20
 _MV_PCHIP = PchipInterpolator(MV_LOG_PTS, MV_IDX, extrapolate=False)
 
-# Cached Transfermarkt scrape — seed by running mv_iter.py or curve_to_wc_projection.py.
-TM_MV_CACHE = '/tmp/tm_mv_cache.json'
+# Cached Transfermarkt scrape — kept in the volume-mounted data folder so it
+# survives container rebuilds. Previously at /tmp/ which is ephemeral; the
+# 2026-05-14 docker rebuild wiped it and the next WC run silently skipped
+# the MV nudge step. Seed by running mv_iter.py or by running the TM scrape
+# block in curve_to_wc_projection.py.
+TM_MV_CACHE = '/app/app/data/tm_mv_cache.json'
 
 # Transfermarkt team name → Statz teams.name aliases (kept in sync with mv_iter.py).
 TM_TO_STATZ = {
