@@ -48,6 +48,7 @@ logger = logging.getLogger("wc_projection")
 WC_COMP_ID = 732
 AVG_GOALS = 1.3
 HOST_BONUS = 1.10
+HOST_PENALTY = 0.90   # opp playing in a host country: -10% expected goals
 HOSTS = {'United States', 'Mexico', 'Canada'}
 
 # Match domestic projection_service.py defaults. odds_beta=0.3 = bet365 1X2
@@ -127,8 +128,10 @@ class WcProjectionService:
                 away_goals = (a_atk / 100) * (h_def / 100) * AVG_GOALS
                 if home in HOSTS:
                     home_goals *= HOST_BONUS
+                    away_goals *= HOST_PENALTY
                 elif away in HOSTS:
                     away_goals *= HOST_BONUS
+                    home_goals *= HOST_PENALTY
 
                 # === Score prediction — same code path as projection_service.py:947-980 ===
                 if oh and od and oa:
