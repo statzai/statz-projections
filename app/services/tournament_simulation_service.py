@@ -676,7 +676,6 @@ def _simulate_one(
             'group_gf': stats['gf'],
             'qualified': t_id in qualifiers,
             'is_group_winner': position_in_group == 1,
-            'is_group_bottom': position_in_group == config.teams_per_group,
             'is_best_third': t_id in best_thirds,
             'knockout_stage': knockout_stage.get(t_id, None),  # None = eliminated at groups
         }
@@ -717,7 +716,6 @@ def _aggregate(all_sim_outcomes: List[dict], config: TournamentConfig,
             group_points.append(o['group_points'])
             if o['is_group_winner']: ctr['win_group'] += 1
             if o['qualified']: ctr['qualify'] += 1
-            if o['is_group_bottom']: ctr['bottom'] += 1
 
             if o['knockout_stage'] == 'winner':
                 ctr['winner'] += 1
@@ -737,7 +735,6 @@ def _aggregate(all_sim_outcomes: List[dict], config: TournamentConfig,
             'expected_group_points': sum(group_points) / len(group_points),
             'win_group_percent': 100.0 * ctr['win_group'] / num_sims,
             'qualify_percent': 100.0 * ctr['qualify'] / num_sims,
-            'finish_bottom_group_percent': 100.0 * ctr['bottom'] / num_sims,
             'win_tournament_percent': 100.0 * ctr['winner'] / num_sims,
         }
         for round_name in config.knockout_rounds:
@@ -770,7 +767,6 @@ async def _write_to_db(
             round(p['expected_group_points'], 2),
             round(p['win_group_percent'], 2),
             round(p['qualify_percent'], 2),
-            round(p['finish_bottom_group_percent'], 2),
             None if rounds_pct['reach_r32_percent'] is None else round(rounds_pct['reach_r32_percent'], 2),
             None if rounds_pct['reach_r16_percent'] is None else round(rounds_pct['reach_r16_percent'], 2),
             None if rounds_pct['reach_qf_percent'] is None else round(rounds_pct['reach_qf_percent'], 2),
@@ -792,11 +788,11 @@ async def _write_to_db(
                 """INSERT INTO tournament_projections
                    (competition_id, season_id, team_id,
                     group_code, expected_group_position, expected_group_points,
-                    win_group_percent, qualify_percent, finish_bottom_group_percent,
+                    win_group_percent, qualify_percent,
                     reach_r32_percent, reach_r16_percent, reach_qf_percent,
                     reach_sf_percent, reach_final_percent, win_tournament_percent,
                     num_sims, created_at, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 rows[i:i+100],
             )
     await conn.commit()
