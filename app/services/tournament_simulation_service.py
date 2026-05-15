@@ -4,21 +4,27 @@ Monte Carlo tournament simulator.
 Generic engine — drives FIFA WC, Euros, Copa America, AFCON, CL knockout
 phase. Per-tournament structure comes from a TournamentConfig
 (tournament_configs.py); FIFA tiebreaker chain comes from
-tournament_tiebreakers.py.
+tournament_tiebreakers.py; the deterministic FIFA knockout bracket
+structure is parsed directly from fixture placeholder names in the DB.
 
 Pipeline per run(config, num_sims=10000):
   1. Load qualifying teams + group assignments + Statz ratings
   2. Load group-fixture lambdas from fixture_projections (already bet365-
      blended in the daily WC projection step)
-  3. For each of `num_sims` iterations:
+  3. Load the knockout bracket structure: parse placeholder names like
+     "1st Group A" / "3rd Group C/E/F/H/I" / "Winner Match 73" /
+     "Winner Quarter-final 1" to build a slot→fixture graph that
+     mirrors FIFA's published bracket exactly.
+  4. For each of `num_sims` iterations:
        a. Sample each group fixture's score from Poisson(λ_h, λ_a)
        b. Resolve group standings with the FIFA tiebreaker chain
        c. Pick advance_per_group + best_thirds_advance qualifiers
-       d. Seed qualifiers into a standard single-elimination bracket
+       d. Fill knockout slot graph with actual team IDs (handling
+          "3rd from X/Y/Z/A/B" best-third allocation)
        e. Walk the bracket, simulating each match (90' + ET if drawn,
           then coin flip with p_favourite for pens)
-  4. Aggregate per-sim outcomes into per-team probabilities
-  5. Upsert into tournament_projections
+  5. Aggregate per-sim outcomes into per-team probabilities
+  6. Upsert into tournament_projections
 
 Knockout fixture lambdas are computed per-sim from team ratings — bet365
 can't price emergent matchups, so we use the pure cross-Poisson model
@@ -27,9 +33,10 @@ with the standard 1.3 AVG_GOALS.
 import logging
 import math
 import random
+import re
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -124,13 +131,158 @@ async def _load_data(conn, config: TournamentConfig) -> dict:
 
     teams_by_group = {gid: list(team_set) for gid, team_set in groups.items()}
 
+    # Bracket structure from placeholder names (sportmonks convention)
+    bracket = await _load_bracket_structure(conn, config, group_codes)
+
     return {
         'ratings': ratings,
         'team_name_by_id': team_name_by_id,
         'group_fixtures': group_fixtures,
         'teams_by_group': teams_by_group,
         'group_codes': group_codes,
+        'bracket': bracket,
     }
+
+
+# ----------------------------------------------------------------------------
+# Bracket structure parser — replaces the old balanced-seeded approximation
+# with FIFA's actual deterministic bracket as encoded in fixture placeholder
+# names. Mirrors the logic in
+# c:\laragon\www\statz\app\Http\Controllers\CompetitionKnockout.php
+# (`attachParentsPositional`, lines ~653-729).
+# ----------------------------------------------------------------------------
+
+# Slot definitions parsed from fixture placeholder team names.
+#   ('winner', 'A')                        → 1st of Group A
+#   ('runner_up', 'B')                     → 2nd of Group B
+#   ('best_third', ['A','B','C','D','F'])  → one of the qualifying 3rds from these groups
+#   ('parent', round_name, match_idx)      → winner of an earlier knockout match
+SLOT_WINNER_RE = re.compile(r'^1st\s+Group\s+([A-Z])\s*$', re.IGNORECASE)
+SLOT_RUNNER_UP_RE = re.compile(r'^2(?:nd|nd position)\s+Group\s+([A-Z])\s*$', re.IGNORECASE)
+SLOT_BEST_THIRD_RE = re.compile(r'^3rd\s+Group\s+([A-Z](?:[/\s]+[A-Z])+)\s*$', re.IGNORECASE)
+SLOT_MATCH_RE = re.compile(r'^(Winner|Loser)\s+Match\s+(\d+)\s*$', re.IGNORECASE)
+SLOT_QF_RE = re.compile(r'^(Winner|Loser)\s+Quarter-finals?\s+(\d+)\s*$', re.IGNORECASE)
+SLOT_SF_RE = re.compile(r'^(Winner|Loser)\s+Semi-finals?\s+(\d+)\s*$', re.IGNORECASE)
+
+
+def _parse_slot(name: str):
+    """Parse a placeholder team name into a slot tuple. Returns None if unrecognised."""
+    name = (name or '').strip()
+    m = SLOT_WINNER_RE.match(name)
+    if m:
+        return ('winner', m.group(1).upper())
+    m = SLOT_RUNNER_UP_RE.match(name)
+    if m:
+        return ('runner_up', m.group(1).upper())
+    m = SLOT_BEST_THIRD_RE.match(name)
+    if m:
+        letters = sorted(set(re.findall(r'[A-Z]', m.group(1).upper())))
+        return ('best_third', letters)
+    m = SLOT_MATCH_RE.match(name)
+    if m:
+        return ('match_ref', m.group(1).lower(), int(m.group(2)))
+    m = SLOT_QF_RE.match(name)
+    if m:
+        return ('qf_ref', m.group(1).lower(), int(m.group(2)))
+    m = SLOT_SF_RE.match(name)
+    if m:
+        return ('sf_ref', m.group(1).lower(), int(m.group(2)))
+    return None
+
+
+# Maps round_name (config.knockout_rounds entries) to the DB stage_name patterns
+# Sportmonks uses. Adjust here when new tournaments don't follow these labels.
+_STAGE_NAME_PATTERNS = {
+    'r32': ['Round of 32'],
+    'r16': ['Round of 16'],
+    'qf': ['Quarter-finals', 'Quarter-final'],
+    'sf': ['Semi-finals', 'Semi-final'],
+    'final': ['Final'],
+}
+
+
+async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: Dict[int, str]) -> dict:
+    """Parse the knockout-round fixtures into a bracket graph.
+
+    Returns:
+      {
+        round_name: [
+          {'fixture_id': int, 'home_slot': slot, 'away_slot': slot}
+          ...
+        ],
+        '_match_base': int   # FIFA match number of the first R32 fixture (e.g. 73)
+      }
+    """
+    # Find DB stage_ids matching each round in this tournament. Filter to the
+    # active tournament edition by stage start_date.
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT DISTINCT s.id, s.name, s.starting_at
+            FROM stages s
+            JOIN fixtures f ON f.stage_id = s.id
+            WHERE f.competition_id = %s AND f.kickoff_datetime > %s
+            ORDER BY s.starting_at, s.id
+            """,
+            (config.competition_id, '2026-05-01'),
+        )
+        stage_rows = await cur.fetchall()
+
+    stage_id_by_round = {}
+    for round_name in config.knockout_rounds:
+        for pattern in _STAGE_NAME_PATTERNS.get(round_name, []):
+            for sid, sname, _ in stage_rows:
+                if sname == pattern:
+                    stage_id_by_round[round_name] = sid
+                    break
+            if round_name in stage_id_by_round:
+                break
+
+    bracket = {}
+    match_base = None
+    for round_name in config.knockout_rounds:
+        sid = stage_id_by_round.get(round_name)
+        if sid is None:
+            continue
+
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT f.id, th.name AS home_name, ta.name AS away_name, f.kickoff_datetime
+                FROM fixtures f
+                JOIN teams th ON th.id = f.home_team_id
+                JOIN teams ta ON ta.id = f.away_team_id
+                WHERE f.stage_id = %s
+                ORDER BY f.kickoff_datetime, f.id
+                """,
+                (sid,),
+            )
+            fixture_rows = await cur.fetchall()
+
+        round_matches = []
+        for fid, h_name, a_name, _ in fixture_rows:
+            home_slot = _parse_slot(h_name)
+            away_slot = _parse_slot(a_name)
+            round_matches.append({
+                'fixture_id': fid,
+                'home_slot': home_slot,
+                'away_slot': away_slot,
+            })
+
+            # Derive match_base from the first "Winner Match N" reference in R16:
+            # the smallest N across all R16 home/away slots is the first R32 match.
+            if round_name == 'r16' and match_base is None:
+                for slot in (home_slot, away_slot):
+                    if slot and slot[0] == 'match_ref':
+                        n = slot[2]
+                        match_base = n if match_base is None else min(match_base, n)
+        bracket[round_name] = round_matches
+
+    bracket['_match_base'] = match_base or 1
+    return bracket
+
+
+# ----------------------------------------------------------------------------
 
 
 # ----------------------------------------------------------------------------
@@ -217,32 +369,53 @@ def _select_qualifiers(
     return winners, runners_up, best_thirds
 
 
-def _seed_bracket(
-    winners: List[int], runners_up: List[int], best_thirds: List[int],
-    ratings: Dict[int, Tuple[float, float]],
-) -> List[int]:
-    """Seed qualifiers into a bracket order. Winners get top seeds, then
-    runners-up, then best-thirds, sorted within each tier by overall rating.
+def _fill_r32_slots(
+    r32_matches: list,
+    winners_by_group: Dict[str, int],
+    runners_up_by_group: Dict[str, int],
+    best_thirds_by_group: Dict[str, int],
+    qualifying_third_groups: set,
+) -> List[Tuple[int, int]]:
+    """Resolve placeholder slots in R32 fixtures to actual team IDs.
 
-    Returns ordered list of qualifier team_ids — index 0 is top seed, last
-    index is bottom seed. R32 matchups are then (seed[0] vs seed[-1],
-    seed[1] vs seed[-2], …) in the standard knockout pattern.
+    Returns ordered list of (home_team_id, away_team_id) pairs, one per
+    R32 fixture in the order they appear in r32_matches.
 
-    NOTE: this is a balanced approximation, not FIFA's exact bracket
-    pairings (which depend on group_letter slot rules + which 3rds qualify
-    from which groups). The published WC 2026 bracket structure can be
-    coded as an explicit pairing table in a follow-up if calibration shows
-    it matters.
+    For 'best_third' slots with an allowed-groups list (e.g. C/E/F/H/I),
+    we pick a qualifying-third team whose group is in the allowed list.
+    Greedy: process the most-constrained slots first.
     """
-    def _ovr(t):
-        atk, defn = ratings.get(t, (100.0, 100.0))
-        return atk - defn
+    # Index best-third slots that still need filling
+    third_slots = []   # list of (match_idx, side, allowed_groups)
+    resolved = [[None, None] for _ in r32_matches]
 
-    return (
-        sorted(winners, key=_ovr, reverse=True)
-        + sorted(runners_up, key=_ovr, reverse=True)
-        + sorted(best_thirds, key=_ovr, reverse=True)
-    )
+    for i, m in enumerate(r32_matches):
+        for side, slot in (('home', m['home_slot']), ('away', m['away_slot'])):
+            if slot is None:
+                continue
+            if slot[0] == 'winner':
+                resolved[i][0 if side == 'home' else 1] = winners_by_group.get(slot[1])
+            elif slot[0] == 'runner_up':
+                resolved[i][0 if side == 'home' else 1] = runners_up_by_group.get(slot[1])
+            elif slot[0] == 'best_third':
+                third_slots.append((i, 0 if side == 'home' else 1, list(slot[1])))
+
+    # Assign qualifying thirds to slots via greedy constraint matching.
+    # Sort slots by tightness (fewest qualifying-groups in allowed list first)
+    # so highly-constrained slots get their pick before flexible ones.
+    available = set(qualifying_third_groups)
+    third_slots.sort(key=lambda s: len([g for g in s[2] if g in available]))
+    for match_idx, side_idx, allowed in third_slots:
+        candidates = [g for g in allowed if g in available]
+        if not candidates:
+            # Allocation infeasible — fall back to ANY available qualifying group
+            candidates = list(available) or list(allowed)
+        chosen = random.choice(candidates)
+        if chosen in available:
+            available.remove(chosen)
+        resolved[match_idx][side_idx] = best_thirds_by_group.get(chosen)
+
+    return [tuple(p) for p in resolved]
 
 
 def _simulate_knockout_match(
@@ -279,39 +452,103 @@ def _simulate_knockout_match(
     return home_id if random.random() < p_home else away_id
 
 
-def _simulate_knockout(
-    seeded: List[int],
+def _simulate_fifa_knockout(
+    bracket: dict,
+    r32_team_pairs: List[Tuple[int, int]],
     ratings: Dict[int, Tuple[float, float]],
     config: TournamentConfig,
 ) -> Dict[int, str]:
-    """Walk the bracket from R32 (or R16 etc.) down to the final.
+    """Walk the FIFA bracket from R32 (or R16) down to the final, using
+    the parsed slot graph from `bracket`.
 
     Returns {team_id: stage_reached} where stage_reached is the LAST round
-    the team played in (e.g. 'r16' = won R32 then lost R16, 'final' = won
-    SF then lost final, 'winner' = won the final).
+    the team played in (e.g. 'r16' = won R32 then lost R16, 'winner' =
+    won the final).
     """
-    rounds = config.knockout_rounds  # e.g. ['r32', 'r16', 'qf', 'sf', 'final']
-    stage_reached = {}  # team_id -> stage_label
+    stage_reached = {}
+    match_base = bracket.get('_match_base', 1)
 
-    current_round = seeded[:]
-    for round_idx, round_name in enumerate(rounds):
-        next_round = []
-        n = len(current_round)
-        # Standard bracket pairing: seed 0 vs seed -1, seed 1 vs seed -2 …
-        for i in range(n // 2):
-            home = current_round[i]
-            away = current_round[n - 1 - i]
-            winner = _simulate_knockout_match(home, away, ratings, config)
-            loser = away if winner == home else home
-            stage_reached[loser] = round_name  # eliminated at this round
-            next_round.append(winner)
-        current_round = next_round
-        if round_idx == len(rounds) - 1:
-            # Final round — winner takes 'winner' label
-            if len(current_round) == 1:
-                stage_reached[current_round[0]] = 'winner'
+    # Round-by-round: per-fixture winners stored so subsequent rounds can
+    # look them up via match-number / quarter-final / semi-final refs.
+    winners_by_round = {}  # round_name -> [winner_id per fixture in order]
+    losers_by_round = {}   # round_name -> [loser_id per fixture in order]
+    fifa_number_offsets = {}  # round_name -> starting FIFA match number
+
+    for round_idx, round_name in enumerate(config.knockout_rounds):
+        round_matches = bracket.get(round_name, [])
+        winners = []
+        losers = []
+
+        for fixture_idx, m in enumerate(round_matches):
+            # Determine home / away team for this fixture
+            if round_name == 'r32':
+                home_id, away_id = r32_team_pairs[fixture_idx]
+            else:
+                home_id = _resolve_ref(m['home_slot'], winners_by_round, losers_by_round,
+                                       fifa_number_offsets, match_base)
+                away_id = _resolve_ref(m['away_slot'], winners_by_round, losers_by_round,
+                                       fifa_number_offsets, match_base)
+
+            if home_id is None or away_id is None:
+                # Couldn't resolve a slot (placeholder doesn't match known patterns
+                # or upstream match failed). Skip this fixture in this sim.
+                winners.append(None)
+                losers.append(None)
+                continue
+
+            winner_id = _simulate_knockout_match(home_id, away_id, ratings, config)
+            loser_id = away_id if winner_id == home_id else home_id
+            stage_reached[loser_id] = round_name
+            winners.append(winner_id)
+            losers.append(loser_id)
+
+        winners_by_round[round_name] = winners
+        losers_by_round[round_name] = losers
+        # Track FIFA match numbering offsets for "Winner Match N" lookups
+        if round_name == 'r32':
+            fifa_number_offsets['r32'] = match_base
+        elif round_name == 'r16':
+            fifa_number_offsets['r16'] = match_base + len(bracket.get('r32', []))
+
+        # Final round — winner gets 'winner' label
+        if round_idx == len(config.knockout_rounds) - 1 and len(winners) == 1 and winners[0] is not None:
+            stage_reached[winners[0]] = 'winner'
 
     return stage_reached
+
+
+def _resolve_ref(slot, winners_by_round, losers_by_round, fifa_offsets, match_base):
+    """Resolve a parent-match reference slot to a team_id.
+       Slot tuples handled here:
+         ('match_ref', 'winner'|'loser', fifa_match_num)
+         ('qf_ref', 'winner'|'loser', qf_idx)        — 1-indexed
+         ('sf_ref', 'winner'|'loser', sf_idx)        — 1-indexed
+    """
+    if slot is None:
+        return None
+    kind = slot[0]
+    if kind == 'match_ref':
+        outcome, fifa_num = slot[1], slot[2]
+        source = winners_by_round if outcome == 'winner' else losers_by_round
+        # FIFA "Match N" with N in 73..88 = R32 indices 0..15; 89..96 = R16 indices 0..7.
+        r32_len = len(source.get('r32') or [])
+        r32_base = fifa_offsets.get('r32', match_base)
+        r16_base = fifa_offsets.get('r16', r32_base + r32_len)
+        if 'r32' in source and r32_base <= fifa_num < r32_base + r32_len:
+            return source['r32'][fifa_num - r32_base]
+        if 'r16' in source:
+            r16_len = len(source.get('r16') or [])
+            if r16_base <= fifa_num < r16_base + r16_len:
+                return source['r16'][fifa_num - r16_base]
+    elif kind == 'qf_ref':
+        outcome, idx = slot[1], slot[2] - 1
+        source = winners_by_round if outcome == 'winner' else losers_by_round
+        return (source.get('qf') or [None])[idx] if idx < len(source.get('qf') or []) else None
+    elif kind == 'sf_ref':
+        outcome, idx = slot[1], slot[2] - 1
+        source = winners_by_round if outcome == 'winner' else losers_by_round
+        return (source.get('sf') or [None])[idx] if idx < len(source.get('sf') or []) else None
+    return None
 
 
 def _simulate_one(
@@ -324,8 +561,31 @@ def _simulate_one(
     winners, runners_up, best_thirds = _select_qualifiers(group_orderings, team_stats, config)
     qualifiers = set(winners + runners_up + best_thirds)
 
-    seeded = _seed_bracket(winners, runners_up, best_thirds, data['ratings'])
-    knockout_stage = _simulate_knockout(seeded, data['ratings'], config)
+    # Build per-group-letter lookups for the bracket slot resolver
+    group_codes = data['group_codes']
+    winners_by_group = {}
+    runners_up_by_group = {}
+    thirds_by_group = {}   # ALL 3rd-place teams (only 8 of 12 qualify)
+    for gid, ordering in group_orderings.items():
+        code = group_codes.get(gid)
+        if code is None:
+            continue
+        if len(ordering) >= 1: winners_by_group[code] = ordering[0]
+        if len(ordering) >= 2: runners_up_by_group[code] = ordering[1]
+        if len(ordering) >= 3: thirds_by_group[code] = ordering[2]
+
+    qualifying_third_groups = {
+        code for code, tid in thirds_by_group.items() if tid in best_thirds
+    }
+
+    bracket = data['bracket']
+    r32_team_pairs = _fill_r32_slots(
+        bracket.get('r32', []),
+        winners_by_group, runners_up_by_group, thirds_by_group,
+        qualifying_third_groups,
+    )
+
+    knockout_stage = _simulate_fifa_knockout(bracket, r32_team_pairs, data['ratings'], config)
 
     outcomes = {}
     for t_id, stats in team_stats.items():
