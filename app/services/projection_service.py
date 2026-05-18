@@ -6,6 +6,7 @@ import warnings
 from app.repository.fixtures_repo import insert_fixtures_async
 from app.repository.team_repo import insert_teams_async
 from app.repository.predicted_table_repo import insert_predicted_table_async
+from app.repository.league_outcome_repo import write_league_outcomes_async
 from app.repository.player_stat_repo import insert_players_stats_async
 from app.repository.player_repo import insert_player_async, get_players_from_league
 from app.repository.fpl_repo import insert_fpl_projections_async
@@ -1155,6 +1156,12 @@ class ProjectionService:
                                                                                               all_tables)
             # avg_table_with_probs_and_point_limits.to_csv(rf"{save_file_path}\{league} Predicted Table.csv", index=False)
             await insert_predicted_table_async(avg_table_with_probs_and_point_limits, teams, comps, league)
+            # Dual-write: rule-driven league_projection_outcomes alongside the
+            # legacy *_percent columns. Non-fatal — must not break the run.
+            try:
+                await write_league_outcomes_async(all_tables, teams, comps, league)
+            except Exception as e:
+                logger.error(f"[{league}] league outcomes write failed (non-fatal): {e}", exc_info=True)
 
         # # **Team Projections**
         #
@@ -2416,6 +2423,12 @@ class ProjectionService:
                                                                                               all_tables)
             # avg_table_with_probs_and_point_limits.to_csv(rf"{save_file_path}\{league} Predicted Table.csv", index=False)
             await insert_predicted_table_async(avg_table_with_probs_and_point_limits, teams, comps, league)
+            # Dual-write: rule-driven league_projection_outcomes alongside the
+            # legacy *_percent columns. Non-fatal — must not break the run.
+            try:
+                await write_league_outcomes_async(all_tables, teams, comps, league)
+            except Exception as e:
+                logger.error(f"[{league}] league outcomes write failed (non-fatal): {e}", exc_info=True)
 
     async def teams(self, league_request):
         league = league_request.league or 'Championship'

@@ -13,6 +13,7 @@ import warnings
 from app.repository.fixtures_repo import insert_fixtures_async
 from app.repository.team_repo import insert_teams_async
 from app.repository.predicted_table_repo import insert_predicted_table_async
+from app.repository.league_outcome_repo import write_league_outcomes_async
 from app.repository.player_stat_repo import insert_players_stats_async
 from app.repository.player_repo import insert_player_async
 from app.repository.fpl_repo import insert_fpl_projections_async
@@ -1143,6 +1144,14 @@ class ProjectionAllTeams:
                     _t = time.time()
                     await insert_predicted_table_async(avg_table_with_probs_and_point_limits, teams, comps, league)
                     logger.info(f"[{league}] Predicted table inserted ({time.time()-_t:.1f}s)")
+                    # Dual-write: rule-driven league_projection_outcomes alongside
+                    # the legacy *_percent columns. Non-fatal — must not break the run.
+                    try:
+                        _t = time.time()
+                        _n_outcomes = await write_league_outcomes_async(all_tables, teams, comps, league)
+                        logger.info(f"[{league}] League outcomes written ({_n_outcomes} rows, {time.time()-_t:.1f}s)")
+                    except Exception as e:
+                        logger.error(f"[{league}] league outcomes write failed (non-fatal): {e}", exc_info=True)
 
                 # # **Team Projections**
                 #

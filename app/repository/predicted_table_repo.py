@@ -1,5 +1,9 @@
 import logging
 from app.repository.db_utils import execute_chunked
+from app.repository.league_outcome_repo import (
+    is_split_format_competition,
+    resolve_current_season_id,
+)
 
 logger = logging.getLogger("predicted_table_repo")
 
@@ -20,8 +24,25 @@ async def insert_predicted_table_async(data_list, teams, comps, league):
         else:
             raise Exception(f"League {league} not found in comps")
 
+    # Tie the projected table to the current season + skip split-format
+    # competitions (Scottish Premiership, Austrian/Belgian/Danish/Greek
+    # split rounds) — a single continuous table can't represent them.
+    # Defensive: a failure resolving this must not break the projection,
+    # so on error we proceed with the write (season_id NULL).
+    season_id = None
+    try:
+        season_id = await resolve_current_season_id(competition_id)
+        if season_id is not None and await is_split_format_competition(competition_id, season_id):
+            logger.info(f"[league_projections:{league}] split-format competition — "
+                        f"skipping predicted table write")
+            return 0
+    except Exception as e:
+        logger.warning(f"[league_projections:{league}] season/split-format check failed "
+                        f"(proceeding with write): {type(e).__name__}: {e}")
+
     df = data_list.copy()
     df['competition_id'] = competition_id
+    df['season_id'] = season_id
 
     for idx, row in df.iterrows():
         team_name = row["Team"]
@@ -77,6 +98,7 @@ async def insert_predicted_table_async(data_list, teams, comps, league):
             row['max_points'],
             row['min_points'],
             row['competition_id'],
+            row['season_id'],
         )
         for _, row in df.iterrows()
     ]
@@ -85,8 +107,9 @@ async def insert_predicted_table_async(data_list, teams, comps, league):
     INSERT INTO league_projections (
         position, team_id, points, goals_for, goals_against, goal_difference,
         win_percent, top_2_percent, top_4_percent, top_6_percent, top_7_percent,
-        relegation_percent, max_points, min_points, competition_id, created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+        relegation_percent, max_points, min_points, competition_id, season_id,
+        created_at, updated_at
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     ON DUPLICATE KEY UPDATE
         position = VALUES(position),
         points = VALUES(points),
@@ -101,6 +124,7 @@ async def insert_predicted_table_async(data_list, teams, comps, league):
         relegation_percent = VALUES(relegation_percent),
         max_points = VALUES(max_points),
         min_points = VALUES(min_points),
+        season_id = VALUES(season_id),
         updated_at = NOW()
     """
     return await execute_chunked(sql, values, label=f"[league_projections:{league}]")

@@ -101,6 +101,36 @@ async def _get_fresh_connection(label: str, chunk_info: str):
     return conn
 
 
+async def fetch_all(sql: str, params: tuple = ()) -> list:
+    """Run a SELECT and return all rows as a list of tuples. Self-contained:
+    acquires and releases its own pooled connection."""
+    conn = None
+    try:
+        conn = await asyncio.wait_for(get_connection(), timeout=30)
+        async with conn.cursor() as cursor:
+            await asyncio.wait_for(cursor.execute(sql, params), timeout=QUERY_TIMEOUT)
+            return list(await cursor.fetchall())
+    finally:
+        if conn and _db.pool:
+            _db.pool.release(conn)
+
+
+async def execute(sql: str, params: tuple = ()) -> int:
+    """Run a single write statement (DELETE/UPDATE/INSERT), commit, return the
+    affected row count. Self-contained connection. For bulk inserts use
+    execute_chunked instead."""
+    conn = None
+    try:
+        conn = await asyncio.wait_for(get_connection(), timeout=30)
+        async with conn.cursor() as cursor:
+            await asyncio.wait_for(cursor.execute(sql, params), timeout=QUERY_TIMEOUT)
+            await asyncio.wait_for(conn.commit(), timeout=30)
+            return cursor.rowcount
+    finally:
+        if conn and _db.pool:
+            _db.pool.release(conn)
+
+
 async def execute_chunked(sql: str, values: list, label: str = "") -> int:
     """
     Execute SQL in chunks of CHUNK_SIZE.
