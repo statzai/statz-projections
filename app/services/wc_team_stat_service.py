@@ -292,6 +292,11 @@ async def _load_data(conn) -> dict:
     placeholders_comp = ",".join(["%s"] * len(INTERNATIONAL_COMP_IDS))
     placeholders_stat = ",".join(["%s"] * len(STAT_TYPE_IDS))
 
+    # Discard any stale snapshot on this pooled connection — the prior
+    # WC step (fixture projections) commits just before this runs, and
+    # InnoDB REPEATABLE READ would otherwise pin reads to a pre-commit
+    # snapshot.
+    await conn.rollback()
     async with conn.cursor() as cur:
         # 1. All finished international fixtures
         await cur.execute(

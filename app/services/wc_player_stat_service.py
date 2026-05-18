@@ -214,6 +214,12 @@ async def _load_data(conn) -> dict:
     """Pull everything in one connection: confirmed WC squads, the
     international history (team + player stats, scoped to those squads),
     the WC team_projections to distribute, and name lookups."""
+    # End any transaction inherited on this pooled connection so the reads
+    # below get a FRESH snapshot. Under InnoDB REPEATABLE READ a pooled
+    # connection can carry a stale snapshot taken before WcTeamStatService
+    # (the immediately-prior step) committed its team_projections rows —
+    # which made this step see 0 rows and skip everything.
+    await conn.rollback()
     async with conn.cursor() as cur:
         # 1. Confirmed WC squads — the player universe.
         await cur.execute(
