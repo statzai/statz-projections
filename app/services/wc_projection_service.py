@@ -26,9 +26,10 @@ Pipeline:
 Skipped: fixtures with unknown team rating (knockout bracket placeholders
 like "1st Group A vs 3rd Group C/E/F/H/I").
 
-No team-level / player-level projections yet — those are deferred until
-squad announcements (~late May 2026). Service writes only fixture-level
-markets.
+After the fixture markets: a Monte Carlo tournament simulation, then
+per-team stat projections (WcTeamStatService → team_projections), then
+per-player stat projections (WcPlayerStatService → player_projections,
+scoped to nations with a confirmed tournament_squads entry).
 """
 import logging
 from datetime import date, datetime
@@ -41,6 +42,7 @@ from app.services.statz_functions import get_result_probs, find_inputs_for_probs
 from app.services.tournament_configs import WC_2026
 from app.services.tournament_simulation_service import TournamentSimulator
 from app.services.wc_team_stat_service import WcTeamStatService
+from app.services.wc_player_stat_service import WcPlayerStatService
 from app.source_database import get_source_connection, release_source_connection
 
 logger = logging.getLogger("wc_projection")
@@ -246,6 +248,19 @@ class WcProjectionService:
                 logger.exception(f"WC team-stat projection failed: {e}")
                 team_stat_result = {'error': str(e)}
 
+        # Step 5: Per-player stat projections — distributes the team-stat
+        # projections from step 4 to each confirmed WC squad's players.
+        # Scoped to nations with a tournament_squads entry, so it grows as
+        # more squads are announced.
+        player_stat_result = None
+        if commit:
+            try:
+                player_stat_result = await WcPlayerStatService().project(commit=commit)
+                logger.info(f"WC player-stat projection: {player_stat_result}")
+            except Exception as e:
+                logger.exception(f"WC player-stat projection failed: {e}")
+                player_stat_result = {'error': str(e)}
+
         return {
             'n_total': len(fixtures),
             'n_projected': len(inserts),
@@ -256,4 +271,5 @@ class WcProjectionService:
             'committed': commit,
             'tournament_simulation': sim_result,
             'team_stat_projection': team_stat_result,
+            'player_stat_projection': player_stat_result,
         }

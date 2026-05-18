@@ -26,9 +26,9 @@ after the existing fixture-projection + tournament-simulation steps):
     - Goals: overwritten with fixture_projections.home_goals (already
       cross-Poisson + bet365 blended upstream — no regression for Goals).
 
-  Storage: upsert into team_projections (10 of the 12 stats). The 2 that
-  aren't stored (Successful Passes, Interceptions) are computed because
-  downstream player-projection logic will need them.
+  Storage: upsert into team_projections (all 12 stats). Successful Passes
+  and Interceptions are stored too — the WC player-stat projection
+  distributes the team-level value of both per player.
 
 Pooling is across ALL international comps (mirrors international_ratings.py
 INTERNATIONAL_COMP_IDS) — not just comp 732. Same importance + decay system
@@ -151,12 +151,14 @@ STAT_QUALITY_BOUNDS = {
     'Offsides': (0, 15),
 }
 
-# Stats persisted to team_projections (the rest are computed for downstream
-# player-projection use but not stored in this table).
+# Stats persisted to team_projections — all 12 of STAT_LIST. Successful
+# Passes + Interceptions added 2026-05-18 (migration add_passes_
+# interceptions_to_team_projections) so the WC player-stat projection can
+# distribute the team-level value of both per player.
 STORED_STATS = [
     'Goals', 'Shots Total', 'Shots On Target', 'Corners',
-    'Fouls', 'Yellowcards', 'Tackles', 'Passes',
-    'Total Crosses', 'Offsides',
+    'Fouls', 'Yellowcards', 'Tackles', 'Passes', 'Successful Passes',
+    'Total Crosses', 'Interceptions', 'Offsides',
 ]
 
 

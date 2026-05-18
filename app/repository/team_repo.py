@@ -19,7 +19,9 @@ async def insert_teams_async(data_list, teams=None, competition_id=None, comp_te
         "Yellowcards": "yellowcards",
         "Tackles": "tackles",
         "Passes": "passes",
+        "Successful Passes": "successful_passes",
         "Total Crosses": "total_crosses",
+        "Interceptions": "interceptions",
         "Offsides": "offsides",
     })
 
@@ -42,7 +44,9 @@ async def insert_teams_async(data_list, teams=None, competition_id=None, comp_te
             row['yellowcards'],
             row['tackles'],
             row['passes'],
+            row.get('successful_passes'),
             row['total_crosses'],
+            row.get('interceptions'),
             row['offsides'],
             row['kickoff_datetime'],
         )
@@ -54,10 +58,10 @@ async def insert_teams_async(data_list, teams=None, competition_id=None, comp_te
         fixture_id, team_id, opponent_id,
         venue, goals,
         shots_total, shots_on_target, corners,
-        fouls, yellowcards, tackles, passes,
-        total_crosses, offsides, kickoff_datetime,
+        fouls, yellowcards, tackles, passes, successful_passes,
+        total_crosses, interceptions, offsides, kickoff_datetime,
         created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     ON DUPLICATE KEY UPDATE
         team_id = VALUES(team_id),
         opponent_id = VALUES(opponent_id),
@@ -70,7 +74,9 @@ async def insert_teams_async(data_list, teams=None, competition_id=None, comp_te
         yellowcards = VALUES(yellowcards),
         tackles = VALUES(tackles),
         passes = VALUES(passes),
+        successful_passes = VALUES(successful_passes),
         total_crosses = VALUES(total_crosses),
+        interceptions = VALUES(interceptions),
         offsides = VALUES(offsides),
         kickoff_datetime = VALUES(kickoff_datetime),
         updated_at = NOW()
