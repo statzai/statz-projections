@@ -41,6 +41,9 @@ Pipeline:
               Saves = opponent's (SoT − Goals), assigned to GKs.
               Fouls Drawn = fd-share × the opponent's projected Fouls.
   5. Idempotent DELETE + upsert into player_projections.
+  6. Poisson-distribute those expected-value lines across the 1+/2+/3+ prop
+     markets and write player_prop_projections — the table the
+     /projections/player-props page reads. Mirrors projection_service.py.
 """
 import logging
 from typing import Dict, List, Tuple
@@ -48,6 +51,8 @@ from typing import Dict, List, Tuple
 import pandas as pd
 
 from app.repository.player_repo import insert_player_async
+from app.repository.player_stat_repo import insert_players_stats_async
+from app.services.statz_functions import get_poisson_probs
 from app.services.wc_team_stat_service import INTERNATIONAL_COMP_IDS
 from app.source_database import get_source_connection, release_source_connection
 
@@ -127,6 +132,17 @@ FOULS_DRAWN_PLAYER_STAT_ID = 96    # fixture_player_stats Fouls Drawn
 # xG. Skipped when the xG window has fewer than XG_MIN_GAMES games.
 XG_STAT_ID = 5304     # Expected Goals (xG)
 XG_MIN_GAMES = 5      # min xG-window games before the xG blend is used at all
+
+# --- Player-prop markets ---------------------------------------------------
+# Once the expected-value lines are built, each is Poisson-distributed across
+# the 1+/2+/3+ thresholds to get prop probabilities (P(X >= line)) — the rows
+# player_prop_projections stores. Mirrors the domestic perc_stats/lines in
+# projection_service.py. Yellow Cards is 1+ only (2+ = a red card, ~0
+# probability, not a useful market). The 'Fouls' expected-value column is
+# renamed to the 'Fouls Committed' market before distribution.
+PROP_STATS = ['Shots On Target', 'Fouls Committed', 'Fouls Drawn',
+              'Goals', 'Tackles', 'Shots Total', 'Offsides']
+PROP_LINES = [1, 2, 3]
 
 _ALL_PLAYER_STAT_IDS = sorted(
     {p for p, _t, _c in SHARE_STATS.values()}
@@ -576,6 +592,25 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
     return output_rows, n_skipped_no_squad
 
 
+def _build_prop_rows(player_df: pd.DataFrame) -> pd.DataFrame:
+    """Poisson-distribute the per-player expected-value lines across the
+    1+/2+/3+ prop markets — the rows player_prop_projections stores.
+
+    Pure function of the player-stat DataFrame (extracted so it is directly
+    dry-runnable without a DB write). Mirrors the domestic block in
+    projection_service.py: P(X >= line) under Poisson(λ = expected value).
+    """
+    if player_df.empty:
+        return player_df
+    # The expected-value 'Fouls' column feeds the 'Fouls Committed' market.
+    prop_input = player_df.rename(columns={'Fouls': 'Fouls Committed'})
+    probs = get_poisson_probs(prop_input, PROP_STATS, PROP_LINES)
+    if 'Yellow Cards' in prop_input.columns:
+        yellow = get_poisson_probs(prop_input, ['Yellow Cards'], [1])
+        probs = pd.concat([probs, yellow], ignore_index=True)
+    return probs.round(2)
+
+
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
@@ -636,15 +671,26 @@ class WcPlayerStatService:
                 f"{len(skipped_no_data)} players skipped (no history)"
             )
 
+            n_prop_rows = 0
             if commit and output_rows:
                 df = pd.DataFrame(output_rows)
                 df['kickoff_datetime'] = pd.to_datetime(df['kickoff_datetime'])
 
-                # Idempotent: clear existing WC player rows before re-insert.
+                # Step 6: prop probabilities derived from the same df.
+                prop_df = _build_prop_rows(df)
+                n_prop_rows = len(prop_df)
+
+                # Idempotent: clear existing WC player + prop rows first.
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """DELETE pp FROM player_projections pp
                            JOIN fixtures f ON f.id = pp.fixture_id
+                           WHERE f.competition_id = %s""",
+                        (WC_COMP_ID,),
+                    )
+                    await cur.execute(
+                        """DELETE ppp FROM player_prop_projections ppp
+                           JOIN fixtures f ON f.id = ppp.fixture_id
                            WHERE f.competition_id = %s""",
                         (WC_COMP_ID,),
                     )
@@ -656,8 +702,14 @@ class WcPlayerStatService:
                 await insert_player_async(df, teams=teams_df, competition_id=WC_COMP_ID)
                 logger.info(f"WC player-stat projections written: {len(df)} rows")
 
+                await insert_players_stats_async(
+                    prop_df, teams=teams_df, competition_id=WC_COMP_ID
+                )
+                logger.info(f"WC player-prop projections written: {n_prop_rows} rows")
+
             return {
                 'n_player_rows': len(output_rows),
+                'n_prop_rows': n_prop_rows,
                 'n_squads': len(squads),
                 'n_team_projection_rows': len(team_projections),
                 'n_skipped_no_data': len(skipped_no_data),
