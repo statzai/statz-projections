@@ -15,12 +15,7 @@ before the read side cuts over.
 """
 import logging
 
-from app.repository.db_utils import (
-    execute,
-    execute_chunked,
-    fetch_all,
-    resolve_team_id,
-)
+from app.repository.db_utils import execute, execute_chunked, fetch_all
 
 logger = logging.getLogger("league_outcome_repo")
 
@@ -139,9 +134,15 @@ def build_markets(standings_rows, rule_meta):
     return out
 
 
-def build_outcome_rows(all_tables, teams, standings_rows, rule_meta,
+def build_outcome_rows(all_tables, name_to_id, standings_rows, rule_meta,
                        competition_id, season_id):
     """Pure: compute league_projection_outcomes value tuples from the sim.
+
+    name_to_id : {team name: team_id} scoped to the competition's current
+        roster. The sim keys teams by name; globally-ambiguous club names
+        (two clubs both "Liverpool" / "Everton") MUST be resolved against the
+        roster, not the global teams table, or the row lands under the wrong
+        team_id.
 
     For each (team, market):
       band_probability       = P(finish inside the market's position set)
@@ -164,15 +165,12 @@ def build_outcome_rows(all_tables, teams, standings_rows, rule_meta,
                  .unstack(fill_value=0))
     position_cols = list(pos_pivot.columns)
 
-    name_to_id = dict(zip(teams['name'], teams['id']))
-
     values = []
     for team in pos_pivot.index:
         team_id = name_to_id.get(team)
         if team_id is None:
-            team_id = resolve_team_id(team, teams)
-        if team_id is None:
-            logger.warning(f"[league_outcomes] could not resolve team_id for '{team}' — row skipped")
+            logger.warning(f"[league_outcomes] sim team '{team}' not in competition "
+                           f"roster — outcome row skipped")
             continue
         dist = pos_pivot.loc[team]
         for m in markets:
@@ -220,8 +218,24 @@ async def write_league_outcomes_async(all_tables, teams, comps, league):
     rule_rows = await fetch_all("SELECT id, market_key, direction FROM standing_rule_types")
     rule_meta = {int(r[0]): (r[1], r[2]) for r in rule_rows}
 
+    # Competition-scoped team name -> id map. The sim keys teams by name, and
+    # resolving those names against the full teams table is ambiguous (two
+    # clubs both "Liverpool"). The current-season standings roster is the
+    # authoritative, unambiguous team set for this competition.
+    roster_rows = await fetch_all(
+        "SELECT DISTINCT team_id FROM standings "
+        "WHERE competition_id = %s AND season_id = %s",
+        (competition_id, season_id),
+    )
+    id_to_name = dict(zip(teams['id'], teams['name']))
+    name_to_id = {}
+    for (tid,) in roster_rows:
+        nm = id_to_name.get(tid)
+        if nm is not None:
+            name_to_id[nm] = int(tid)
+
     values, markets = build_outcome_rows(
-        all_tables, teams, standings_rows, rule_meta, competition_id, season_id
+        all_tables, name_to_id, standings_rows, rule_meta, competition_id, season_id
     )
     if not values:
         logger.warning(f"[league_outcomes:{league}] no outcome rows built — skipping write")
