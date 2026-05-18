@@ -16,6 +16,11 @@ def convert_start(value):
     return 0
 
 
+# Projected per-fixture player stats persisted to `player_projections`.
+# Key = the column name on the projection DataFrame; value = stats_type id.
+# A stat is only stored when its column is present on the row, so leagues
+# that don't compute a given column (e.g. the PL-only defensive stats
+# below) simply skip it — no breakage.
 STATUS_TYPES = {
     "Shots Total": 42,
     "Offsides": 51,
@@ -32,6 +37,13 @@ STATUS_TYPES = {
     "Interceptions": 100,
     "Accurate Passes": 116,
     "Key Passes": 117,
+    # PL-only defensive projections — computed for the team-down CBIT
+    # calc (see projection_service.py) but previously discarded. Stored
+    # so the FPL planner can show projected defensive output; combined
+    # with Tackles (78) these give a full projected defensive
+    # contribution (DEF: Tackles+CBI, MID/FWD: Tackles+CBI+Recoveries).
+    "Ball Recovery": 27271,
+    "Clearances Blocks Interceptions (FPL)": 999002,
 }
 
 
