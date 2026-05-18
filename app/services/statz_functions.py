@@ -1436,10 +1436,16 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
     player_stats.reset_index(drop=True, inplace=True)
 
     if stat == 'Expected Goals (xG)':
-        # Vectorized xG zero filter: drop rows where xG=0 AND the player took shots
-        # (indicates missing xG data rather than a genuinely zero-xG game).
-        # Preserves the original behavior: keep if xG>0, keep if no shots row exists,
-        # keep if shots=0, drop only if shots>0 and xG=0.
+        # xG missing-data guard — drop fixtures whose xG=0 is missing data,
+        # not a genuine zero, so it can't deflate the player's xG average.
+        # Two independent drop conditions:
+        #   1. per-player  — xG=0 but the player took shots>0 (a shot can't
+        #      be worth 0.00 xG, so the xG row is missing).
+        #   2. per-fixture — the fixture has NO player-xG coverage at all
+        #      (no player has an xG row), i.e. xG simply wasn't tracked for
+        #      it. `stat_df` is the all-players frame, so its xG fixture_ids
+        #      are exactly the covered set.
+        # Genuine zeros (xG=0, shots=0, fixture IS covered) are kept.
         player_stats['value'] = player_stats['value'].astype(float)
         _shots_id = get_stat_id('Shots Total', stats_types)
         _shots_lookup = (
@@ -1448,12 +1454,19 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
             .drop_duplicates(subset=['fixture_id'])
         )
         player_stats = player_stats.merge(_shots_lookup, on='fixture_id', how='left')
-        _drop_mask = (
+        _missing_player = (
             (player_stats['value'] == 0)
             & player_stats['_shots'].notna()
             & (player_stats['_shots'] > 0)
         )
-        player_stats = player_stats[~_drop_mask].drop(columns=['_shots']).reset_index(drop=True)
+        _xg_sid = get_stat_id('Expected Goals (xG)', stats_types)
+        _xg_covered = set(stat_df.loc[stat_df['stats_type_id'] == _xg_sid, 'fixture_id'])
+        _no_coverage = ~player_stats['fixture_id'].isin(_xg_covered)
+        player_stats = (
+            player_stats[~(_missing_player | _no_coverage)]
+            .drop(columns=['_shots'])
+            .reset_index(drop=True)
+        )
 
     else:
         player_stats['value'] = player_stats['value'].astype(int)
