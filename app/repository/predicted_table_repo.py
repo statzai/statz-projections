@@ -16,8 +16,7 @@ async def insert_predicted_table_async(data_list, teams, comps, league):
     league_projection_outcomes, one row per (team, market), written by
     league_outcome_repo. The legacy fixed `*_percent` columns were dropped
     2026-05-19 (rollout step 6) once the rule-driven outcomes had soaked at
-    full cross-league parity. `data_list` may still carry leftover `Win %` /
-    `Top N %` columns from get_avg_table_with_probs — they are simply unused.
+    full cross-league parity.
     """
     if league == 'Brazil Serie A':
         competition_id = 648

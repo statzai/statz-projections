@@ -876,40 +876,10 @@ def sim_multiple_seasons(score_preds, current_league_table, num_sims=100):
     return avg_table, all_tables_df
 
 
-def get_avg_table_with_probs(league, avg_table, all_tables, sims=10000):
-    if league == 'Championship':
-        lines = [1, 2, 6, 22]
-    elif league == 'League One':
-        lines = [1, 2, 6, 21]
-    elif league == 'League Two':
-        lines = [1, 3, 7, 23]
-    elif league in ['Premier League', 'La Liga', 'Serie A']:
-        lines = [1, 4, 18]
-    elif league == 'Bundesliga':
-        lines = [1, 4]
-    elif league == 'Ligue 1':
-        lines = [1, 3]
-    elif league in ['Brazil Serie A', 'Campeonato Brasileiro']:
-        lines = [1, 4, 6, 17]
-    else:
-        lines = [1]
-    avg_table_with_probs = avg_table[
-        ['Position', 'Team', 'Points', 'Goals For', 'Goals Against', 'Goal Difference']].copy()
-    pos_probs = all_tables.groupby(['Team', 'Position']).size().reset_index(name='Count')
-    for line in lines:
-        if line > 10:
-            prob = pos_probs[pos_probs['Position'] >= line].groupby('Team')['Count'].sum() / sims
-            avg_table_with_probs['Relegation %'] = avg_table_with_probs['Team'].map(prob).fillna(0)
-            avg_table_with_probs['Relegation %'] = (avg_table_with_probs['Relegation %'] * 100).round(2)
-        else:
-            prob = pos_probs[pos_probs['Position'] <= line].groupby('Team')['Count'].sum() / sims
-            if line == 1:
-                avg_table_with_probs[f'Win %'] = avg_table_with_probs['Team'].map(prob).fillna(0)
-                avg_table_with_probs[f'Win %'] = (avg_table_with_probs[f'Win %'] * 100).round(2)
-            else:
-                avg_table_with_probs[f'Top {line} %'] = avg_table_with_probs['Team'].map(prob).fillna(0)
-                avg_table_with_probs[f'Top {line} %'] = (avg_table_with_probs[f'Top {line} %'] * 100).round(2)
-    return avg_table_with_probs
+# get_avg_table_with_probs (the old hardcoded per-league `lines` win/top-N/
+# relegation calculator) was retired 2026-05-19 — league markets are now
+# rule-driven, written to league_projection_outcomes by
+# app/repository/league_outcome_repo.py. See docs/league-projections-redesign.md.
 
 
 def get_avg_table_with_probs_and_point_limits(avg_table_with_probs, all_tables):

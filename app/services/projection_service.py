@@ -1151,8 +1151,7 @@ class ProjectionService:
 
             avg_table, all_tables = sim_multiple_seasons(season_score_preds, current_league_table, num_sims=10000)
 
-            avg_table_with_probs = get_avg_table_with_probs(league, avg_table, all_tables)
-            avg_table_with_probs_and_point_limits = get_avg_table_with_probs_and_point_limits(avg_table_with_probs,
+            avg_table_with_probs_and_point_limits = get_avg_table_with_probs_and_point_limits(avg_table,
                                                                                               all_tables)
             # avg_table_with_probs_and_point_limits.to_csv(rf"{save_file_path}\{league} Predicted Table.csv", index=False)
             await insert_predicted_table_async(avg_table_with_probs_and_point_limits, teams, comps, league)
@@ -2418,8 +2417,7 @@ class ProjectionService:
 
             avg_table, all_tables = sim_multiple_seasons(season_score_preds, current_league_table, num_sims=10000)
 
-            avg_table_with_probs = get_avg_table_with_probs(league, avg_table, all_tables)
-            avg_table_with_probs_and_point_limits = get_avg_table_with_probs_and_point_limits(avg_table_with_probs,
+            avg_table_with_probs_and_point_limits = get_avg_table_with_probs_and_point_limits(avg_table,
                                                                                               all_tables)
             # avg_table_with_probs_and_point_limits.to_csv(rf"{save_file_path}\{league} Predicted Table.csv", index=False)
             await insert_predicted_table_async(avg_table_with_probs_and_point_limits, teams, comps, league)
@@ -3964,8 +3962,7 @@ class ProjectionService:
 
             avg_table, all_tables = sim_multiple_seasons(season_score_preds, current_league_table, num_sims=10000)
 
-            avg_table_with_probs = get_avg_table_with_probs(league, avg_table, all_tables)
-            avg_table_with_probs_and_point_limits = get_avg_table_with_probs_and_point_limits(avg_table_with_probs,
+            avg_table_with_probs_and_point_limits = get_avg_table_with_probs_and_point_limits(avg_table,
                                                                                               all_tables)
 
         stat_list = get_stat_list()
