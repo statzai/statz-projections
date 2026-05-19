@@ -14,6 +14,7 @@ from app.repository.fixtures_repo import insert_fixtures_async
 from app.repository.team_repo import insert_teams_async
 from app.repository.predicted_table_repo import insert_predicted_table_async
 from app.repository.league_outcome_repo import write_league_outcomes_async
+from app.repository.league_position_repo import write_position_probabilities_async
 from app.repository.player_stat_repo import insert_players_stats_async
 from app.repository.player_repo import insert_player_async
 from app.repository.fpl_repo import insert_fpl_projections_async
@@ -1151,6 +1152,13 @@ class ProjectionAllTeams:
                         logger.info(f"[{league}] League outcomes written ({_n_outcomes} rows, {time.time()-_t:.1f}s)")
                     except Exception as e:
                         logger.error(f"[{league}] league outcomes write failed (non-fatal): {e}", exc_info=True)
+                    # Phase 2 dual-write: the full per-position finishing distribution.
+                    try:
+                        _t = time.time()
+                        _n_positions = await write_position_probabilities_async(all_tables, teams, comps, league)
+                        logger.info(f"[{league}] Position probabilities written ({_n_positions} rows, {time.time()-_t:.1f}s)")
+                    except Exception as e:
+                        logger.error(f"[{league}] league position probabilities write failed (non-fatal): {e}", exc_info=True)
 
                 # # **Team Projections**
                 #
