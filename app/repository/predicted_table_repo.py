@@ -8,13 +8,17 @@ from app.repository.league_outcome_repo import (
 logger = logging.getLogger("predicted_table_repo")
 
 
-def clean_percentage(value):
-    if isinstance(value, str) and '%' in value:
-        return float(value.replace('%', '').strip())
-    return float(value) if value is not None else None
-
-
 async def insert_predicted_table_async(data_list, teams, comps, league):
+    """Write the projected league table — position / points / goals / point
+    range — to league_projections.
+
+    The per-market probabilities are NOT written here: they live in
+    league_projection_outcomes, one row per (team, market), written by
+    league_outcome_repo. The legacy fixed `*_percent` columns were dropped
+    2026-05-19 (rollout step 6) once the rule-driven outcomes had soaked at
+    full cross-league parity. `data_list` may still carry leftover `Win %` /
+    `Top N %` columns from get_avg_table_with_probs — they are simply unused.
+    """
     if league == 'Brazil Serie A':
         competition_id = 648
     else:
@@ -63,23 +67,9 @@ async def insert_predicted_table_async(data_list, teams, comps, league):
         "Goals For": "goals_for",
         "Goals Against": "goals_against",
         "Goal Difference": "goal_difference",
-        "Win %": "win_percent",
-        "Top 2 %": "top_2_percent",
-        "Top 4 %": "top_4_percent",
-        "Top 6 %": "top_6_percent",
-        "Top 7 %": "top_7_percent",
-        "Relegation %": "relegation_percent",
         "Max Points": "max_points",
         "Min Points": "min_points",
     })
-
-    for col in ['win_percent', 'top_2_percent', 'top_4_percent', 'top_6_percent', 'top_7_percent', 'relegation_percent']:
-        if col in df.columns:
-            df[col] = df[col].apply(clean_percentage)
-
-    for col in ["top_2_percent", "top_4_percent", "top_6_percent", "top_7_percent", "relegation_percent"]:
-        if col not in df.columns:
-            df[col] = None
 
     values = [
         (
@@ -89,12 +79,6 @@ async def insert_predicted_table_async(data_list, teams, comps, league):
             row['goals_for'],
             row['goals_against'],
             row['goal_difference'],
-            row['win_percent'],
-            row['top_2_percent'],
-            row['top_4_percent'],
-            row['top_6_percent'],
-            row['top_7_percent'],
-            row['relegation_percent'],
             row['max_points'],
             row['min_points'],
             row['competition_id'],
@@ -106,22 +90,15 @@ async def insert_predicted_table_async(data_list, teams, comps, league):
     sql = """
     INSERT INTO league_projections (
         position, team_id, points, goals_for, goals_against, goal_difference,
-        win_percent, top_2_percent, top_4_percent, top_6_percent, top_7_percent,
-        relegation_percent, max_points, min_points, competition_id, season_id,
+        max_points, min_points, competition_id, season_id,
         created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     ON DUPLICATE KEY UPDATE
         position = VALUES(position),
         points = VALUES(points),
         goals_for = VALUES(goals_for),
         goals_against = VALUES(goals_against),
         goal_difference = VALUES(goal_difference),
-        win_percent = VALUES(win_percent),
-        top_2_percent = VALUES(top_2_percent),
-        top_4_percent = VALUES(top_4_percent),
-        top_6_percent = VALUES(top_6_percent),
-        top_7_percent = VALUES(top_7_percent),
-        relegation_percent = VALUES(relegation_percent),
         max_points = VALUES(max_points),
         min_points = VALUES(min_points),
         season_id = VALUES(season_id),
