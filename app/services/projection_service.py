@@ -49,11 +49,17 @@ class ProjectionService:
     def _filter_upcoming_fixtures(league: str, fixtures, date_from, date_to):
         """Slice fixtures to the projection scope for `league`.
 
-        Premier League: project 6 upcoming gameweeks (gameweek_id-based).
+        Premier League: project 7 upcoming gameweeks (gameweek_id-based).
         Aligns with the FPL gameweek concept and feeds the FPL planning
         tools that want fixture/team/player projections out to ~5 weeks
         for transfer + chip strategy. gameweek_id survives postponements
         and double/blank gameweeks better than round_id or date-window.
+
+        The window is 7 (not 6) so the fantasy tables — which drop any
+        gameweek whose deadline has already passed (see _fantasy_gw_filter)
+        — still get a full 6 future-deadline gameweeks even when the
+        soonest in-window gameweek is mid-flight. player / team / fixture
+        projections simply get the one extra gameweek, harmlessly.
 
         All other leagues: stay on the date_from..date_to window
         (typically today + PROJECTION_DAYS=5). gameweek_id isn't reliably
@@ -69,11 +75,37 @@ class ProjectionService:
             future = fixtures[fixtures['kickoff_datetime'] >= pd.to_datetime('today')]
             if not future.empty and 'gameweek_id' in future.columns and pd.notna(future['gameweek_id'].min()):
                 min_gw = future['gameweek_id'].min()
-                next_fix = future[future['gameweek_id'] < min_gw + 6]
-                logger.info(f"[{league}] gameweek-based filter: GW {int(min_gw)}–{int(min_gw)+5} ({len(next_fix)} fixtures)")
+                next_fix = future[future['gameweek_id'] < min_gw + 7]
+                logger.info(f"[{league}] gameweek-based filter: GW {int(min_gw)}–{int(min_gw)+6} ({len(next_fix)} fixtures)")
                 return next_fix
             logger.warning(f"[{league}] gameweek_id missing/null — falling back to date-window")
         return fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
+
+    @staticmethod
+    def _fantasy_gw_filter(df, upcoming_gws):
+        """Restrict a fantasy-projection DataFrame to gameweeks still open to
+        plan for.
+
+        `upcoming_gws` — the gameweek ids (gameweeks.id) whose deadline is in
+        the future, capped to the 6 soonest. A fantasy projection for a
+        gameweek whose deadline has already passed can't be acted on, so its
+        rows are dropped before they reach the fantasy table.
+
+        - `upcoming_gws is None` — deadline lookup failed / not a fantasy
+          league: return `df` unchanged (fail-open — a transient lookup glitch
+          must not blank the fantasy tables).
+        - `upcoming_gws == []` — no gameweek has a future deadline (e.g. end
+          of season): returns an empty frame, which is correct — there is
+          nothing left to plan for.
+
+        Only the five FANTASY frames go through this. player / team / fixture
+        projections keep the current gameweek's unplayed fixtures.
+        """
+        if upcoming_gws is None:
+            return df
+        if df is None or df.empty or 'Gameweek' not in df.columns:
+            return df
+        return df[df['Gameweek'].isin(upcoming_gws)].copy()
 
     @staticmethod
     async def _resolve_league_id_db(league_name: str) -> int:
@@ -96,6 +128,33 @@ class ProjectionService:
                 return int(row[0])
         finally:
             release_source_connection(conn)
+
+    @staticmethod
+    async def _load_gameweek_deadlines(gameweek_ids) -> dict:
+        """{gameweeks.id: deadline_time (pd.Timestamp)} for the given gameweek
+        ids — a direct DB lookup, mirroring _resolve_league_id_db.
+
+        Drives the fantasy-projection deadline filter: a fantasy table must
+        only ever hold gameweeks whose deadline is still in the future.
+        `deadline_time` is stored UTC; a NULL deadline maps to NaT and is
+        treated as "not upcoming". gameweeks.id is the same id-space as the
+        fixtures DataFrame's gameweek_id and the fantasy tables' Gameweek.
+        """
+        ids = sorted({int(g) for g in gameweek_ids if pd.notna(g)})
+        if not ids:
+            return {}
+        conn = await get_source_connection()
+        try:
+            async with conn.cursor() as cur:
+                placeholders = ",".join(["%s"] * len(ids))
+                await cur.execute(
+                    f"SELECT id, deadline_time FROM gameweeks WHERE id IN ({placeholders})",
+                    tuple(ids),
+                )
+                rows = await cur.fetchall()
+        finally:
+            release_source_connection(conn)
+        return {int(r[0]): pd.to_datetime(r[1]) for r in rows}
 
     @staticmethod
     def _read_df(path_no_ext: str) -> pd.DataFrame:
@@ -1574,6 +1633,32 @@ class ProjectionService:
         # opta_projections / fanteam_projections rows. Previously these
         # tables only updated when someone manually clicked "Run All
         # Leagues" — silently broken on the daily schedule for months.
+
+        # Fantasy projections must only cover gameweeks still open to plan
+        # for — those whose deadline is in the future. Load each in-window
+        # gameweek's deadline up front, derive the 6 soonest future-deadline
+        # gameweeks, and filter the five fantasy frames to them before insert
+        # (see _fantasy_gw_filter). player / team / fixture projections are
+        # deliberately unaffected — they keep the current GW's unplayed
+        # fixtures. _fantasy_upcoming_gws stays None on lookup failure so the
+        # filter fails open rather than blanking the fantasy tables.
+        _fantasy_now = pd.Timestamp.utcnow().tz_localize(None)
+        _fantasy_upcoming_gws = None
+        if fpl:
+            try:
+                _gw_deadlines = await ProjectionService._load_gameweek_deadlines(
+                    fixtures.loc[fixtures['id'].isin(next_fix['id']), 'gameweek_id']
+                )
+                _fantasy_upcoming_gws = sorted(
+                    gw for gw, dl in _gw_deadlines.items()
+                    if pd.notna(dl) and dl > _fantasy_now
+                )[:6]
+                logger.info(f"[{league}] fantasy projections scoped to gameweeks "
+                            f"{_fantasy_upcoming_gws} (future-deadline only)")
+            except Exception as e:
+                logger.warning(f"[{league}] gameweek-deadline load failed — fantasy "
+                               f"frames left unfiltered: {e}", exc_info=True)
+
         if fpl:
             try:
                 # FPL position now sourced from fpl_player_mappings table
@@ -1682,6 +1767,8 @@ class ProjectionService:
                 fpl_df['team_id'] = np.where(fpl_df['Venue'] == 'H', _home_id, _away_id)
                 fpl_df['opponent_id'] = np.where(fpl_df['Venue'] == 'H', _away_id, _home_id)
                 fpl_df = fpl_df.round(2)
+                # Fantasy-only: keep just gameweeks still open to plan for.
+                fpl_df = ProjectionService._fantasy_gw_filter(fpl_df, _fantasy_upcoming_gws)
 
                 logger.info(f"[{league}] Inserting FPL projections into DB ({len(fpl_df)} rows)...")
                 _t = time.time()
@@ -1711,6 +1798,8 @@ class ProjectionService:
                 opta_df['Gameweek'] = opta_df['fixture_id'].map(_fix_idx_op['gameweek_id'])
                 opta_df['team_id'] = np.where(opta_df['Venue'] == 'H', _home_id_op, _away_id_op)
                 opta_df['opponent_id'] = np.where(opta_df['Venue'] == 'H', _away_id_op, _home_id_op)
+                # Fantasy-only: keep just gameweeks still open to plan for.
+                opta_df = ProjectionService._fantasy_gw_filter(opta_df, _fantasy_upcoming_gws)
                 logger.info(f"[{league}] Inserting OPTA projections into DB ({len(opta_df)} rows)...")
                 _t = time.time()
                 await insert_opta_projections_async(opta_df)
@@ -1763,6 +1852,8 @@ class ProjectionService:
                 fanteam_df['Gameweek'] = fanteam_df['fixture_id'].map(_fix_idx_ft['gameweek_id'])
                 fanteam_df['team_id'] = np.where(fanteam_df['Venue'] == 'H', _home_id_ft, _away_id_ft)
                 fanteam_df['opponent_id'] = np.where(fanteam_df['Venue'] == 'H', _away_id_ft, _home_id_ft)
+                # Fantasy-only: keep just gameweeks still open to plan for.
+                fanteam_df = ProjectionService._fantasy_gw_filter(fanteam_df, _fantasy_upcoming_gws)
                 logger.info(f"[{league}] Inserting FanTeam projections into DB ({len(fanteam_df)} rows)...")
                 _t = time.time()
                 await insert_fanteam_projections_async(fanteam_df)
@@ -1819,6 +1910,8 @@ class ProjectionService:
                 dk_df['Gameweek'] = dk_df['fixture_id'].map(_fix_idx_dk['gameweek_id'])
                 dk_df['team_id'] = np.where(dk_df['Venue'] == 'H', _home_id_dk, _away_id_dk)
                 dk_df['opponent_id'] = np.where(dk_df['Venue'] == 'H', _away_id_dk, _home_id_dk)
+                # Fantasy-only: keep just gameweeks still open to plan for.
+                dk_df = ProjectionService._fantasy_gw_filter(dk_df, _fantasy_upcoming_gws)
                 logger.info(f"[{league}] Inserting DraftKings projections into DB ({len(dk_df)} rows)...")
                 _t = time.time()
                 await insert_draftkings_projections_async(dk_df)
@@ -1864,6 +1957,8 @@ class ProjectionService:
                 d11_df['Gameweek'] = d11_df['fixture_id'].map(_fix_idx_d11['gameweek_id'])
                 d11_df['team_id'] = np.where(d11_df['Venue'] == 'H', _home_id_d11, _away_id_d11)
                 d11_df['opponent_id'] = np.where(d11_df['Venue'] == 'H', _away_id_d11, _home_id_d11)
+                # Fantasy-only: keep just gameweeks still open to plan for.
+                d11_df = ProjectionService._fantasy_gw_filter(d11_df, _fantasy_upcoming_gws)
                 logger.info(f"[{league}] Inserting Dream11 projections into DB ({len(d11_df)} rows)...")
                 _t = time.time()
                 await insert_dream11_projections_async(d11_df)
