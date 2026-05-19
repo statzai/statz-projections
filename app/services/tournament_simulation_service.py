@@ -93,10 +93,11 @@ PENS_NOISE = 0.49    # coin-flip baseline; favourite tweak applied on top
 async def _load_data(conn, config: TournamentConfig) -> dict:
     """Fetch everything the simulator needs in one DB round-trip set."""
     async with conn.cursor() as cur:
-        # Ratings (Atk/Def per team)
+        # Ratings (Atk/Def per team) + FIFA confederation (for the
+        # Continental Betting market — best finisher per confederation).
         await cur.execute(
             """
-            SELECT t.id, t.name, tr.attack, tr.defense
+            SELECT t.id, t.name, t.confederation, tr.attack, tr.defense
             FROM team_ratings tr JOIN teams t ON t.id = tr.team_id
             WHERE tr.competition_id = %s AND tr.inverse = 'No'
               AND tr.date = (
@@ -108,9 +109,11 @@ async def _load_data(conn, config: TournamentConfig) -> dict:
         )
         ratings = {}
         team_name_by_id = {}
-        for tid, tname, atk, defn in await cur.fetchall():
+        confederation_by_team = {}
+        for tid, tname, conf, atk, defn in await cur.fetchall():
             ratings[tid] = (float(atk), float(defn))
             team_name_by_id[tid] = tname
+            confederation_by_team[tid] = conf
 
         # Group-stage fixtures + bet365-blended lambdas (from fixture_projections)
         # We only load fixtures with both teams known (placeholders skipped).
@@ -173,6 +176,7 @@ async def _load_data(conn, config: TournamentConfig) -> dict:
     return {
         'ratings': ratings,
         'team_name_by_id': team_name_by_id,
+        'confederation_by_team': confederation_by_team,
         'group_fixtures': group_fixtures,
         'teams_by_group': teams_by_group,
         'group_codes': group_codes,
@@ -500,25 +504,33 @@ def _simulate_knockout_match(
     home_id: int, away_id: int,
     ratings: Dict[int, Tuple[float, float]],
     config: TournamentConfig,
-) -> int:
-    """Returns the winning team_id. Models 90' + ET + pens if drawn."""
+) -> Tuple[int, int, int]:
+    """Simulate a knockout match.
+
+    Returns (winner_id, home_goals, away_goals). The goal counts are
+    90' + ET only — penalty-shootout goals are deliberately NOT counted
+    so the per-team goal aggregates match how official competition stats
+    treat shootouts. Models 90' + ET + pens if drawn.
+    """
     h_atk, h_def = ratings.get(home_id, (100.0, 100.0))
     a_atk, a_def = ratings.get(away_id, (100.0, 100.0))
     lam_h = (h_atk / 100) * (a_def / 100) * AVG_GOALS
     lam_a = (a_atk / 100) * (h_def / 100) * AVG_GOALS
 
     hg, ag = _sample_score(lam_h, lam_a)
-    if hg > ag: return home_id
-    if ag > hg: return away_id
+    if hg > ag: return home_id, hg, ag
+    if ag > hg: return away_id, hg, ag
 
     # Drawn → ET (30 min, pro-rated λ)
     et_h = lam_h * config.et_lambda_factor
     et_a = lam_a * config.et_lambda_factor
     et_hg, et_ag = _sample_score(et_h, et_a)
-    if et_hg > et_ag: return home_id
-    if et_ag > et_hg: return away_id
+    tot_h, tot_a = hg + et_hg, ag + et_ag
+    if et_hg > et_ag: return home_id, tot_h, tot_a
+    if et_ag > et_hg: return away_id, tot_h, tot_a
 
     # Still drawn → penalties. Mild edge to favourite (higher Overall).
+    # Shootout goals are not added to tot_h / tot_a.
     home_ovr = h_atk - h_def
     away_ovr = a_atk - a_def
     if home_ovr > away_ovr:
@@ -527,7 +539,8 @@ def _simulate_knockout_match(
         p_home = 1 - config.pens_p_favourite
     else:
         p_home = 0.5
-    return home_id if random.random() < p_home else away_id
+    winner = home_id if random.random() < p_home else away_id
+    return winner, tot_h, tot_a
 
 
 def _simulate_fifa_knockout(
@@ -535,15 +548,19 @@ def _simulate_fifa_knockout(
     r32_team_pairs: List[Tuple[int, int]],
     ratings: Dict[int, Tuple[float, float]],
     config: TournamentConfig,
-) -> Dict[int, str]:
+) -> Tuple[Dict[int, str], Dict[int, dict]]:
     """Walk the FIFA bracket from R32 (or R16) down to the final, using
     the parsed slot graph from `bracket`.
 
-    Returns {team_id: stage_reached} where stage_reached is the LAST round
-    the team played in (e.g. 'r16' = won R32 then lost R16, 'winner' =
-    won the final).
+    Returns (stage_reached, knockout_goals):
+      stage_reached  — {team_id: last round played} (e.g. 'r16' = won R32
+                       then lost R16, 'winner' = won the final).
+      knockout_goals — {team_id: {'gf': int, 'ga': int}} goals scored /
+                       conceded across all knockout matches the team
+                       played (90' + ET, shootout goals excluded).
     """
     stage_reached = {}
+    knockout_goals = defaultdict(lambda: {'gf': 0, 'ga': 0})
     match_base = bracket.get('_match_base', 1)
 
     # Round-by-round: per-fixture winners stored so subsequent rounds can
@@ -574,7 +591,11 @@ def _simulate_fifa_knockout(
                 losers.append(None)
                 continue
 
-            winner_id = _simulate_knockout_match(home_id, away_id, ratings, config)
+            winner_id, hg, ag = _simulate_knockout_match(home_id, away_id, ratings, config)
+            knockout_goals[home_id]['gf'] += hg
+            knockout_goals[home_id]['ga'] += ag
+            knockout_goals[away_id]['gf'] += ag
+            knockout_goals[away_id]['ga'] += hg
             loser_id = away_id if winner_id == home_id else home_id
             stage_reached[loser_id] = round_name
             winners.append(winner_id)
@@ -592,7 +613,7 @@ def _simulate_fifa_knockout(
         if round_idx == len(config.knockout_rounds) - 1 and len(winners) == 1 and winners[0] is not None:
             stage_reached[winners[0]] = 'winner'
 
-    return stage_reached
+    return stage_reached, dict(knockout_goals)
 
 
 def _resolve_ref(slot, winners_by_round, losers_by_round, fifa_offsets, match_base):
@@ -663,21 +684,32 @@ def _simulate_one(
         qualifying_third_groups,
     )
 
-    knockout_stage = _simulate_fifa_knockout(bracket, r32_team_pairs, data['ratings'], config)
+    knockout_stage, knockout_goals = _simulate_fifa_knockout(
+        bracket, r32_team_pairs, data['ratings'], config,
+    )
 
     outcomes = {}
     for t_id, stats in team_stats.items():
-        position_in_group = group_orderings[stats['group_id']].index(t_id) + 1
+        group_order = group_orderings[stats['group_id']]
+        position_in_group = group_order.index(t_id) + 1
+        kg = knockout_goals.get(t_id, {'gf': 0, 'ga': 0})
+        group_ga = stats['gf'] - stats['gd']
         outcomes[t_id] = {
             'group_id': stats['group_id'],
             'group_position': position_in_group,
             'group_points': stats['points'],
             'group_gd': stats['gd'],
             'group_gf': stats['gf'],
+            'group_ga': group_ga,
             'qualified': t_id in qualifiers,
             'is_group_winner': position_in_group == 1,
             'is_best_third': t_id in best_thirds,
+            # Bottom of group = last place (position 4 in a 4-team group).
+            'is_group_bottom': position_in_group == len(group_order),
             'knockout_stage': knockout_stage.get(t_id, None),  # None = eliminated at groups
+            # Whole-tournament goals: group stage + knockout (90'+ET).
+            'total_gf': stats['gf'] + kg['gf'],
+            'total_ga': group_ga + kg['ga'],
         }
     return outcomes
 
@@ -687,68 +719,168 @@ def _simulate_one(
 # ----------------------------------------------------------------------------
 
 def _aggregate(all_sim_outcomes: List[dict], config: TournamentConfig,
-               group_codes: Dict[int, str]) -> Dict[int, dict]:
-    """Convert num_sims worth of per-team outcomes into per-team probabilities."""
+               group_codes: Dict[int, str],
+               confederation_by_team: Dict[int, Optional[str]],
+               ) -> Tuple[Dict[int, dict], Dict[str, dict]]:
+    """Convert num_sims worth of per-team outcomes into projection rows.
+
+    Returns (team_agg, group_agg):
+      team_agg  — {team_id: {...}}    → tournament_projections
+      group_agg — {group_code: {...}} → tournament_group_projections
+
+    Per-sim cross-team metrics (highest/lowest scoring team, best finisher
+    per confederation, highest-scoring group, the champion's group) are
+    resolved inside the sim loop; ties split the credit fractionally so
+    every probability column still sums correctly across teams/groups.
+    """
     num_sims = len(all_sim_outcomes)
+    if num_sims == 0:
+        return {}, {}
+
     teams = set()
     for s in all_sim_outcomes:
         teams.update(s.keys())
 
-    # Build round-reach counts. A team reaches round X if their
-    # knockout_stage label is X *or later*. We define stage_order so
-    # 'sf' > 'qf', 'final' > 'sf', etc.
+    # stage_order so 'sf' > 'qf', 'final' > 'sf', 'winner' tops the chain.
     stage_order = config.knockout_rounds + ['winner']
     stage_rank = {s: i for i, s in enumerate(stage_order)}
 
-    agg = {}
-    for t_id in teams:
-        ctr = defaultdict(int)
-        group_positions = []
-        group_points = []
-        group_id = None
+    # Per-team running tallies.
+    ctr = {t: defaultdict(float) for t in teams}
+    sum_group_pos = defaultdict(float)
+    sum_group_pts = defaultdict(float)
+    sum_group_gf = defaultdict(float)
+    sum_group_ga = defaultdict(float)
+    sum_total_gf = defaultdict(float)
+    sum_total_ga = defaultdict(float)
+    team_group_id = {}
 
-        for sim in all_sim_outcomes:
-            if t_id not in sim:
-                continue
-            o = sim[t_id]
-            group_id = o['group_id']
-            group_positions.append(o['group_position'])
-            group_points.append(o['group_points'])
-            if o['is_group_winner']: ctr['win_group'] += 1
-            if o['qualified']: ctr['qualify'] += 1
+    # Per-group running tallies (keyed by group_code).
+    grp_win_tournament = defaultdict(float)   # sims whose champion is from this group
+    grp_highest_scoring = defaultdict(float)  # fractional credit on ties
+    grp_goals_samples = defaultdict(list)     # per-sim group-stage total goals
 
-            if o['knockout_stage'] == 'winner':
-                ctr['winner'] += 1
+    for sim in all_sim_outcomes:
+        # ---- per-team tallies ----
+        for t_id, o in sim.items():
+            team_group_id[t_id] = o['group_id']
+            sum_group_pos[t_id] += o['group_position']
+            sum_group_pts[t_id] += o['group_points']
+            sum_group_gf[t_id] += o['group_gf']
+            sum_group_ga[t_id] += o['group_ga']
+            sum_total_gf[t_id] += o['total_gf']
+            sum_total_ga[t_id] += o['total_ga']
+            c = ctr[t_id]
+            if o['is_group_winner']: c['win_group'] += 1
+            if o['qualified']: c['qualify'] += 1
+            if o['is_group_bottom']: c['group_bottom'] += 1
             stage = o['knockout_stage']
+            if stage == 'winner':
+                c['winner'] += 1
             if stage is not None:
-                # Team played in this round (eliminated here OR won it)
                 played_idx = stage_rank[stage]
-                # Tally "reached round X" for every X up to played_idx
                 for s_idx, s_name in enumerate(config.knockout_rounds):
                     if played_idx >= s_idx:
-                        ctr[f"reach_{s_name}"] += 1
+                        c[f"reach_{s_name}"] += 1
 
+        # ---- highest / lowest scoring team this sim (whole-tournament gf) ----
+        gf_by_team = {t: o['total_gf'] for t, o in sim.items()}
+        if gf_by_team:
+            max_gf = max(gf_by_team.values())
+            min_gf = min(gf_by_team.values())
+            top = [t for t, g in gf_by_team.items() if g == max_gf]
+            bot = [t for t, g in gf_by_team.items() if g == min_gf]
+            for t in top: ctr[t]['highest_scorer'] += 1.0 / len(top)
+            for t in bot: ctr[t]['lowest_scorer'] += 1.0 / len(bot)
+
+        # ---- best finisher per confederation this sim ----
+        # finish_key ranks by knockout stage first, then group form so
+        # group-stage exits still order sensibly within a confederation.
+        by_conf = defaultdict(list)
+        for t_id, o in sim.items():
+            conf = confederation_by_team.get(t_id)
+            if not conf:
+                continue
+            stage = o['knockout_stage']
+            srank = stage_rank[stage] if stage is not None else -1
+            finish_key = (srank, o['group_points'], o['group_gd'], o['group_gf'])
+            by_conf[conf].append((t_id, finish_key))
+        for entries in by_conf.values():
+            best_key = max(k for _, k in entries)
+            leaders = [t for t, k in entries if k == best_key]
+            for t in leaders:
+                ctr[t]['best_in_continent'] += 1.0 / len(leaders)
+
+        # ---- group-level: total goals, highest-scoring group, champion's group ----
+        sim_group_goals = defaultdict(int)
+        champion_group = None
+        for o in sim.values():
+            code = group_codes.get(o['group_id'])
+            if code is None:
+                continue
+            sim_group_goals[code] += o['group_gf']
+            if o['knockout_stage'] == 'winner':
+                champion_group = code
+        for code, g in sim_group_goals.items():
+            grp_goals_samples[code].append(g)
+        if champion_group is not None:
+            grp_win_tournament[champion_group] += 1
+        if sim_group_goals:
+            max_g = max(sim_group_goals.values())
+            top_groups = [c for c, g in sim_group_goals.items() if g == max_g]
+            for c in top_groups:
+                grp_highest_scoring[c] += 1.0 / len(top_groups)
+
+    # ---- assemble per-team rows ----
+    agg = {}
+    for t_id in teams:
+        c = ctr[t_id]
+        gid = team_group_id.get(t_id)
         agg[t_id] = {
-            'group_id': group_id,
-            'group_code': group_codes.get(group_id),
-            'expected_group_position': sum(group_positions) / len(group_positions),
-            'expected_group_points': sum(group_points) / len(group_points),
-            'win_group_percent': 100.0 * ctr['win_group'] / num_sims,
-            'qualify_percent': 100.0 * ctr['qualify'] / num_sims,
-            'win_tournament_percent': 100.0 * ctr['winner'] / num_sims,
+            'group_id': gid,
+            'group_code': group_codes.get(gid),
+            'expected_group_position': sum_group_pos[t_id] / num_sims,
+            'expected_group_points': sum_group_pts[t_id] / num_sims,
+            'win_group_percent': 100.0 * c['win_group'] / num_sims,
+            'qualify_percent': 100.0 * c['qualify'] / num_sims,
+            'win_tournament_percent': 100.0 * c['winner'] / num_sims,
+            'finish_bottom_group_percent': 100.0 * c['group_bottom'] / num_sims,
+            'best_in_continent_percent': 100.0 * c['best_in_continent'] / num_sims,
+            'highest_scoring_team_percent': 100.0 * c['highest_scorer'] / num_sims,
+            'lowest_scoring_team_percent': 100.0 * c['lowest_scorer'] / num_sims,
+            'expected_group_goals_for': sum_group_gf[t_id] / num_sims,
+            'expected_group_goals_against': sum_group_ga[t_id] / num_sims,
+            'expected_goals_for': sum_total_gf[t_id] / num_sims,
+            'expected_goals_against': sum_total_ga[t_id] / num_sims,
+            'expected_goal_difference': (sum_total_gf[t_id] - sum_total_ga[t_id]) / num_sims,
         }
         for round_name in config.knockout_rounds:
-            agg[t_id][f"reach_{round_name}_percent"] = 100.0 * ctr[f"reach_{round_name}"] / num_sims
+            agg[t_id][f"reach_{round_name}_percent"] = 100.0 * c[f"reach_{round_name}"] / num_sims
 
-    return agg
+    # ---- assemble per-group rows ----
+    group_agg = {}
+    all_codes = set(grp_goals_samples) | set(grp_win_tournament) | set(grp_highest_scoring)
+    for code in all_codes:
+        samples = grp_goals_samples.get(code, [])
+        group_agg[code] = {
+            'win_tournament_percent': 100.0 * grp_win_tournament.get(code, 0.0) / num_sims,
+            'highest_scoring_percent': 100.0 * grp_highest_scoring.get(code, 0.0) / num_sims,
+            'expected_goals': (sum(samples) / len(samples)) if samples else 0.0,
+        }
+
+    return agg, group_agg
 
 
 async def _write_to_db(
-    conn, agg: Dict[int, dict], config: TournamentConfig, num_sims: int,
+    conn, agg: Dict[int, dict], group_agg: Dict[str, dict],
+    config: TournamentConfig, num_sims: int,
 ) -> None:
-    """Upsert into tournament_projections — one row per team."""
+    """Upsert simulator output — one row per team into
+    tournament_projections, one row per group into
+    tournament_group_projections. Idempotent per (competition, season)."""
     now = datetime.now()
-    rows = []
+
+    team_rows = []
     for t_id, p in agg.items():
         # Map dynamic round columns. WC has r32→r16→qf→sf→final; Euros
         # has r16→qf→sf→final (no r32). Columns absent from this config
@@ -760,7 +892,7 @@ async def _write_to_db(
             'reach_sf_percent': p.get('reach_sf_percent'),
             'reach_final_percent': p.get('reach_final_percent'),
         }
-        rows.append((
+        team_rows.append((
             config.competition_id, config.season_id, t_id,
             p['group_code'],
             round(p['expected_group_position'], 2),
@@ -773,17 +905,36 @@ async def _write_to_db(
             None if rounds_pct['reach_sf_percent'] is None else round(rounds_pct['reach_sf_percent'], 2),
             None if rounds_pct['reach_final_percent'] is None else round(rounds_pct['reach_final_percent'], 2),
             round(p['win_tournament_percent'], 2),
+            round(p['expected_group_goals_for'], 2),
+            round(p['expected_group_goals_against'], 2),
+            round(p['expected_goals_for'], 2),
+            round(p['expected_goals_against'], 2),
+            round(p['expected_goal_difference'], 2),
+            round(p['finish_bottom_group_percent'], 2),
+            round(p['best_in_continent_percent'], 2),
+            round(p['highest_scoring_team_percent'], 2),
+            round(p['lowest_scoring_team_percent'], 2),
+            num_sims, now, now,
+        ))
+
+    group_rows = []
+    for code, g in group_agg.items():
+        group_rows.append((
+            config.competition_id, config.season_id, code,
+            round(g['win_tournament_percent'], 2),
+            round(g['highest_scoring_percent'], 2),
+            round(g['expected_goals'], 2),
             num_sims, now, now,
         ))
 
     async with conn.cursor() as cur:
-        # Idempotent: delete-by-competition then bulk insert. Mirrors the
-        # league_projections pattern.
+        # Idempotent: delete-by-(competition, season) then bulk insert.
+        # Mirrors the league_projections pattern.
         await cur.execute(
             "DELETE FROM tournament_projections WHERE competition_id = %s AND season_id = %s",
             (config.competition_id, config.season_id),
         )
-        for i in range(0, len(rows), 100):
+        for i in range(0, len(team_rows), 100):
             await cur.executemany(
                 """INSERT INTO tournament_projections
                    (competition_id, season_id, team_id,
@@ -791,9 +942,28 @@ async def _write_to_db(
                     win_group_percent, qualify_percent,
                     reach_r32_percent, reach_r16_percent, reach_qf_percent,
                     reach_sf_percent, reach_final_percent, win_tournament_percent,
+                    expected_group_goals_for, expected_group_goals_against,
+                    expected_goals_for, expected_goals_against, expected_goal_difference,
+                    finish_bottom_group_percent, best_in_continent_percent,
+                    highest_scoring_team_percent, lowest_scoring_team_percent,
                     num_sims, created_at, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                rows[i:i+100],
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                team_rows[i:i+100],
+            )
+
+        await cur.execute(
+            "DELETE FROM tournament_group_projections WHERE competition_id = %s AND season_id = %s",
+            (config.competition_id, config.season_id),
+        )
+        if group_rows:
+            await cur.executemany(
+                """INSERT INTO tournament_group_projections
+                   (competition_id, season_id, group_code,
+                    win_tournament_percent, highest_scoring_percent, expected_goals,
+                    num_sims, created_at, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                group_rows,
             )
     await conn.commit()
 
@@ -825,9 +995,13 @@ class TournamentSimulator:
                 if (sim_idx + 1) % log_every == 0:
                     logger.info(f"  sim {sim_idx + 1}/{num_sims}")
 
-            agg = _aggregate(all_outcomes, config, data['group_codes'])
-            await _write_to_db(conn, agg, config, num_sims)
-            logger.info(f"Tournament sim done — {len(agg)} teams written")
+            agg, group_agg = _aggregate(
+                all_outcomes, config, data['group_codes'], data['confederation_by_team'],
+            )
+            await _write_to_db(conn, agg, group_agg, config, num_sims)
+            logger.info(
+                f"Tournament sim done — {len(agg)} teams, {len(group_agg)} groups written"
+            )
 
             return {
                 'name': config.name,
