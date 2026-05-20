@@ -877,9 +877,9 @@ def sim_multiple_seasons(score_preds, current_league_table, num_sims=100):
 
 
 # get_avg_table_with_probs (the old hardcoded per-league `lines` win/top-N/
-# relegation calculator) was retired 2026-05-19 — league markets are now
-# rule-driven, written to league_projection_outcomes by
-# app/repository/league_outcome_repo.py. See docs/league-projections-redesign.md.
+# relegation calculator) was retired 2026-05-19 — every positional market is
+# now a read-time range-sum over league_position_probabilities (written by
+# app/repository/league_position_repo.py). See docs/league-projections-redesign.md.
 
 
 def get_avg_table_with_probs_and_point_limits(avg_table_with_probs, all_tables):

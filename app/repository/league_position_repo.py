@@ -3,7 +3,6 @@ League position probabilities — the full per-position finishing distribution.
 
 Phase 2 of the league-projections redesign (docs/league-projections-redesign.md).
 `sim_multiple_seasons()` produces a finishing-position histogram per team;
-`league_outcome_repo` collapses it into rule sections and discards the rest —
 this persists it RAW: one row per (competition, season, team, position) with
 P(finish exactly there).
 
@@ -12,17 +11,17 @@ market (Win, Top 4/5/6, Not Top 4, Top/Bottom Half, Finish Bottom, relegation)
 is a read-time range-sum over it, so the generator never changes again when a
 bookmaker adds a market or a qualification allocation shifts.
 
-Dual-writes alongside `league_outcome_repo` for one cycle so the read side can
-parity-check the derived win/relegation numbers; `league_projection_outcomes`
-retires once parity holds.
+Replaces `league_projection_outcomes` (the previous rule-section table),
+which was retired 2026-05-19 once the read side cut over and parity had
+been verified across every league.
 """
 import logging
 
 from app.repository.db_utils import execute, execute_chunked, fetch_all
-# Shared resolvers — split-format / season / competition-id detection. These
-# move out of league_outcome_repo when league_projection_outcomes retires;
-# for now they are imported, mirroring predicted_table_repo.
-from app.repository.league_outcome_repo import (
+# Shared resolvers — split-format / season / competition-id detection.
+# Live in league_season_helpers (was league_outcome_repo until the
+# rule-driven outcomes write retired 2026-05-19).
+from app.repository.league_season_helpers import (
     is_split_format_competition,
     resolve_competition_id,
     resolve_current_season_id,
@@ -51,8 +50,7 @@ def build_position_rows(all_tables, name_to_id, competition_id, season_id):
     a gap.
 
     name_to_id : {team name: team_id} scoped to the competition roster — the
-        same ambiguous-name guard league_outcome_repo uses ("Liverpool"
-        England vs Uruguay etc.).
+        ambiguous-name guard ("Liverpool" England vs Uruguay etc.).
 
     Returns (value_tuples, n_teams, n_positions).
     """
@@ -114,7 +112,7 @@ async def write_position_probabilities_async(all_tables, teams, comps, league):
     # Competition-scoped team name -> id map. The sim keys teams by name;
     # resolving against the full teams table is ambiguous (two clubs both
     # "Liverpool"). The current-season standings roster is the authoritative,
-    # unambiguous team set — same guard as league_outcome_repo.
+    # unambiguous team set.
     roster_rows = await fetch_all(
         "SELECT DISTINCT team_id FROM standings "
         "WHERE competition_id = %s AND season_id = %s",

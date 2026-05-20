@@ -13,7 +13,6 @@ import warnings
 from app.repository.fixtures_repo import insert_fixtures_async
 from app.repository.team_repo import insert_teams_async
 from app.repository.predicted_table_repo import insert_predicted_table_async
-from app.repository.league_outcome_repo import write_league_outcomes_async
 from app.repository.league_position_repo import write_position_probabilities_async
 from app.repository.player_stat_repo import insert_players_stats_async
 from app.repository.player_repo import insert_player_async
@@ -1144,15 +1143,9 @@ class ProjectionAllTeams:
                     _t = time.time()
                     await insert_predicted_table_async(avg_table_with_probs_and_point_limits, teams, comps, league)
                     logger.info(f"[{league}] Predicted table inserted ({time.time()-_t:.1f}s)")
-                    # Dual-write: rule-driven league_projection_outcomes alongside
-                    # the legacy *_percent columns. Non-fatal — must not break the run.
-                    try:
-                        _t = time.time()
-                        _n_outcomes = await write_league_outcomes_async(all_tables, teams, comps, league)
-                        logger.info(f"[{league}] League outcomes written ({_n_outcomes} rows, {time.time()-_t:.1f}s)")
-                    except Exception as e:
-                        logger.error(f"[{league}] league outcomes write failed (non-fatal): {e}", exc_info=True)
-                    # Phase 2 dual-write: the full per-position finishing distribution.
+                    # Per-team / per-position finishing distribution — every
+                    # positional market on the read side is a range-sum over
+                    # this. Non-fatal: must not break the run.
                     try:
                         _t = time.time()
                         _n_positions = await write_position_probabilities_async(all_tables, teams, comps, league)

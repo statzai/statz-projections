@@ -1,6 +1,6 @@
 import logging
 from app.repository.db_utils import execute_chunked
-from app.repository.league_outcome_repo import (
+from app.repository.league_season_helpers import (
     is_split_format_competition,
     resolve_current_season_id,
 )
@@ -13,10 +13,10 @@ async def insert_predicted_table_async(data_list, teams, comps, league):
     range — to league_projections.
 
     The per-market probabilities are NOT written here: they live in
-    league_projection_outcomes, one row per (team, market), written by
-    league_outcome_repo. The legacy fixed `*_percent` columns were dropped
-    2026-05-19 (rollout step 6) once the rule-driven outcomes had soaked at
-    full cross-league parity.
+    league_position_probabilities (the full per-position finishing
+    distribution), written by league_position_repo, and every betting
+    market is a read-time range-sum over that distribution. The legacy
+    fixed `*_percent` columns were dropped 2026-05-19 (rollout step 6).
     """
     if league == 'Brazil Serie A':
         competition_id = 648
