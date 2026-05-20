@@ -1,6 +1,7 @@
 import logging
 from app.repository.db_utils import execute_chunked
 from app.repository.league_season_helpers import (
+    is_league_stage_complete,
     is_split_format_competition,
     resolve_current_season_id,
 )
@@ -27,9 +28,14 @@ async def insert_predicted_table_async(data_list, teams, comps, league):
         else:
             raise Exception(f"League {league} not found in comps")
 
-    # Tie the projected table to the current season + skip split-format
-    # competitions (Scottish Premiership, Austrian/Belgian/Danish/Greek
-    # split rounds) — a single continuous table can't represent them.
+    # Tie the projected table to the current season + skip writes for two
+    # categories of "don't refresh league_projections" competition:
+    #   1. Split-format competitions (Scottish Premiership, Austrian /
+    #      Belgian / Danish / Greek split rounds) — a single continuous
+    #      table can't represent them.
+    #   2. Competitions whose regular league stage is over — e.g. the
+    #      Championship after 2026-05-02; the playoff fixtures still in
+    #      the schedule shouldn't muddle the final-table projection.
     # Defensive: a failure resolving this must not break the projection,
     # so on error we proceed with the write (season_id NULL).
     season_id = None
@@ -39,8 +45,12 @@ async def insert_predicted_table_async(data_list, teams, comps, league):
             logger.info(f"[league_projections:{league}] split-format competition — "
                         f"skipping predicted table write")
             return 0
+        if season_id is not None and await is_league_stage_complete(competition_id, season_id):
+            logger.info(f"[league_projections:{league}] league stage complete — "
+                        f"skipping predicted table write")
+            return 0
     except Exception as e:
-        logger.warning(f"[league_projections:{league}] season/split-format check failed "
+        logger.warning(f"[league_projections:{league}] season / format / stage check failed "
                         f"(proceeding with write): {type(e).__name__}: {e}")
 
     df = data_list.copy()

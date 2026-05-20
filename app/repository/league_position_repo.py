@@ -22,6 +22,7 @@ from app.repository.db_utils import execute, execute_chunked, fetch_all
 # Live in league_season_helpers (was league_outcome_repo until the
 # rule-driven outcomes write retired 2026-05-19).
 from app.repository.league_season_helpers import (
+    is_league_stage_complete,
     is_split_format_competition,
     resolve_competition_id,
     resolve_current_season_id,
@@ -94,9 +95,15 @@ def build_position_rows(all_tables, name_to_id, competition_id, season_id):
 async def write_position_probabilities_async(all_tables, teams, comps, league):
     """Compute + write league_position_probabilities for one competition.
 
-    Skips split-format competitions (a single continuous finishing table
-    can't represent them). Idempotent per (competition, season): DELETE then
-    re-insert, so a team leaving the league doesn't leave a stale row behind.
+    Skipped for:
+      - split-format competitions (a single continuous finishing table
+        can't represent the top/bottom split),
+      - competitions whose regular league stage has no upcoming fixtures
+        (the distribution is already final; refreshing during a
+        promotion-playoff window would muddle it).
+
+    Idempotent per (competition, season): DELETE then re-insert, so a
+    team leaving the league doesn't leave a stale row behind.
     """
     competition_id = resolve_competition_id(comps, league)
     season_id = await resolve_current_season_id(competition_id)
@@ -107,6 +114,10 @@ async def write_position_probabilities_async(all_tables, teams, comps, league):
 
     if await is_split_format_competition(competition_id, season_id):
         logger.info(f"[league_positions:{league}] split-format competition — skipping")
+        return 0
+
+    if await is_league_stage_complete(competition_id, season_id):
+        logger.info(f"[league_positions:{league}] league stage complete — skipping")
         return 0
 
     # Competition-scoped team name -> id map. The sim keys teams by name;
