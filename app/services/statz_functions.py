@@ -930,20 +930,34 @@ def get_avg_table_with_probs_and_point_limits(avg_table_with_probs, all_tables):
 #
 
 def load_model(stat, file_path, league):
+    """Load the global team-stat model for `stat`.
+
+    Every league now reads from the same `All Leagues` model — per-league
+    pickles were retired 2026-05-21. Spotted on Superliga: the per-league
+    `Superliga_Fouls_model.sav` was trained on 62 model_dataset rows and
+    drifted to predicting 23 fouls/game vs the league avg of 11. Tiny per-
+    league training sets are below the retraining min-row threshold, so
+    those stale files never get refreshed; pooling all leagues into one
+    global model (trained on ~5k top-5 rows) avoids the failure mode.
+
+    The active `All Leagues/All_Leagues_{stat}_model.sav` file is kept
+    current by `promote_model()` in `projection_model_repo` — it atomically
+    overwrites the unversioned filename whenever a new All-Leagues model
+    is promoted.
+
+    `league` is retained in the signature so call sites don't need
+    rewiring, but it's unused at lookup time.
+    """
     if stat == 'Goals':
         return None
 
-    filename = os.path.join(file_path, league, f"{league}_{stat}_model.sav")
-
+    global_path = os.path.join(file_path, "All Leagues", f"All_Leagues_{stat}_model.sav")
     try:
-        with open(filename, 'rb') as f:
-            model = pickle.load(f)
-    except:
-        fallback_path = os.path.join(file_path, "All Leagues", f"All_Leagues_{stat}_model.sav")
-        with open(fallback_path, 'rb') as f:
-            model = pickle.load(f)
-
-    return model
+        with open(global_path, 'rb') as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        _PROJ_LOGGER.warning(f"[load_model] no global model file for {stat}: {global_path}")
+        return None
 
 def load_all_models(stat_list, file_path, league):  # UPDATED - New Parameter: league
     models = {}

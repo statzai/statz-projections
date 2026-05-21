@@ -313,32 +313,16 @@ async def retrain_all_models(dry_run: bool = False) -> dict:
     logger.info(f"[retrain] loaded {len(all_df)} total rows from projection_model_dataset")
 
     stat_list = [s for s in get_stat_list() if s != "Goals"]
+    # `per_league` / `skipped_leagues` kept in the response shape so admin
+    # / API consumers don't break, but are always empty now — per-league
+    # models were retired 2026-05-21 (every league reads the same global
+    # model via load_model() in statz_functions). See the load_model
+    # docstring for the Superliga case that drove the change.
     results = {"per_league": {}, "all_leagues": {}, "skipped_leagues": []}
 
-    # Per-league models
-    for league_id in sorted(all_df["comp_id"].dropna().unique().tolist()):
-        league_df = all_df[all_df["comp_id"] == league_id]
-        league_name = str(league_id)  # placeholder; looked up below
-        try:
-            league_name = await _lookup_league_name(int(league_id))
-        except Exception as e:
-            logger.warning(f"[retrain] couldn't resolve name for comp_id={league_id}: {e}")
-
-        if len(league_df) < MIN_TRAINING_ROWS:
-            logger.info(
-                f"[retrain {league_name}] only {len(league_df)} rows — skipping (fallback to All Leagues)"
-            )
-            results["skipped_leagues"].append({"league_id": int(league_id), "league": league_name, "rows": len(league_df)})
-            continue
-
-        league_results = []
-        for stat in stat_list:
-            r = await _train_one(league_df, stat, int(league_id), league_name, dry_run=dry_run)
-            if r is not None:
-                league_results.append(r)
-        results["per_league"][league_name] = league_results
-
-    # All Leagues fallback — scoped to top-5 + recent-rows cap via helper.
+    # Single global model per stat, trained on the top-5 + recent-rows
+    # fallback dataset. This is now the ONLY model the projection pipeline
+    # reads.
     fallback_df = await _build_all_leagues_fallback_df(all_df)
     all_results = []
     for stat in stat_list:
@@ -350,8 +334,8 @@ async def retrain_all_models(dry_run: bool = False) -> dict:
     elapsed = (time.time() - t_start) / 60
     logger.info(
         f"[retrain] COMPLETE dry_run={dry_run} — {elapsed:.1f} min, "
-        f"{sum(len(v) for v in results['per_league'].values())} per-league models + "
-        f"{len(all_results)} All Leagues models"
+        f"{len(all_results)} global models trained "
+        f"(per-league training retired 2026-05-21)"
     )
     return results
 
