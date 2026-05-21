@@ -341,7 +341,14 @@ class ProjectionAllTeams:
                 ## THIS IS ALL NEW - FILL IN ANY MISSING TEAM STATS IN MODEL DATASET
 
                 model_dataset_league['comp_id'] = league_id
-                previous_fixtures = model_dataset_league[model_dataset_league.isnull().any(axis=1)]
+                # Gap-fill gate widened 2026-05-21 — see projection_service
+                # for the full incident note. Same poison-mask fix.
+                _null_mask = model_dataset_league.isnull().any(axis=1)
+                _poison_mask = model_dataset_league.get(
+                    'Team Passes',
+                    pd.Series(dtype='float64', index=model_dataset_league.index),
+                ) == 0
+                previous_fixtures = model_dataset_league[_null_mask | _poison_mask]
                 logger.info(f"[{league}] Filling missing stats in model dataset ({len(previous_fixtures)} rows)...")
                 for i in range(len(previous_fixtures)):
                     if i > 0 and i % 50 == 0:
@@ -359,7 +366,10 @@ class ProjectionAllTeams:
                             continue
                         team_df = fixture_stats[fixture_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
                         team_stat_df = team_df[team_df['team_id'] == team_id]
-                        stat_value = team_stat_df['value'].values[0] if not team_stat_df.empty else 0
+                        if team_stat_df.empty:
+                            # Skip — leave NaN for next-run retry.
+                            continue
+                        stat_value = team_stat_df['value'].values[0]
                         model_dataset_league.loc[(model_dataset_league['id'] == fixture_id) & (
                                     model_dataset_league['Team'] == team), 'Team ' + stat] = stat_value
                         model_dataset_all.loc[(model_dataset_all['id'] == fixture_id) & (
@@ -371,11 +381,17 @@ class ProjectionAllTeams:
 
                 ## THIS IS ALL NEW - FILL IN ANY MISSING TEAM STATS IN ACCURACY DATASET
 
-                previous_accuracy_fixtures = projection_accuracy_dataset_league[
-                    projection_accuracy_dataset_league.isnull().any(axis=1)]
+                # Widened gate (see projection_service for full context).
+                _acc_null_mask = projection_accuracy_dataset_league.isnull().any(axis=1)
+                _acc_poison_mask = (
+                    (projection_accuracy_dataset_league.get('Total Goals') == 0)
+                    & (projection_accuracy_dataset_league.get('Total Shots Total') == 0)
+                )
+                previous_accuracy_fixtures = projection_accuracy_dataset_league[_acc_null_mask | _acc_poison_mask]
                 previous_accuracy_fixtures = previous_accuracy_fixtures[
                     previous_accuracy_fixtures['kickoff_datetime'] < pd.to_datetime('today')]
                 logger.info(f"[{league}] Filling missing stats in accuracy dataset ({len(previous_accuracy_fixtures)} rows)...")
+                skipped_missing_stats = 0
                 for i in range(len(previous_accuracy_fixtures)):
                     if i > 0 and i % 50 == 0:
                         logger.info(f"[{league}] accuracy dataset fill progress: {i}/{len(previous_accuracy_fixtures)}")
@@ -391,8 +407,11 @@ class ProjectionAllTeams:
                         fixture_stat_df = fixture_stats[fixture_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
                         home_team_stat_df = fixture_stat_df[fixture_stat_df['team_id'] == home_team_id]
                         away_team_stat_df = fixture_stat_df[fixture_stat_df['team_id'] == away_team_id]
-                        home_stat_value = home_team_stat_df['value'].values[0] if not home_team_stat_df.empty else 0
-                        away_stat_value = away_team_stat_df['value'].values[0] if not away_team_stat_df.empty else 0
+                        if home_team_stat_df.empty or away_team_stat_df.empty:
+                            skipped_missing_stats += 1
+                            continue
+                        home_stat_value = home_team_stat_df['value'].values[0]
+                        away_stat_value = away_team_stat_df['value'].values[0]
                         # Update stat values for both datasets
                         for ds in [projection_accuracy_dataset_league, projection_accuracy_dataset_all]:
                             ds.loc[ds['fixture_id'] == fixture_id, 'Home ' + stat] = home_stat_value
@@ -423,6 +442,12 @@ class ProjectionAllTeams:
                                 ds.loc[ds['fixture_id'] == fixture_id, 'BTTS'] = 1 if btts else 0
                                 ds.loc[ds['fixture_id'] == fixture_id, 'Away Clean Sheet'] = 1 if away_cs else 0
                                 ds.loc[ds['fixture_id'] == fixture_id, 'Home Clean Sheet'] = 1 if home_cs else 0
+
+                if skipped_missing_stats > 0:
+                    logger.warning(
+                        f"[{league}] accuracy gap-fill: skipped {skipped_missing_stats} "
+                        f"(fixture, stat) writes due to missing team_stats rows — left NaN for retry"
+                    )
 
                 # ## **Re-Train Models**
 
