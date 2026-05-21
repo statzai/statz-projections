@@ -19,6 +19,7 @@ class PromoteModelRequest(BaseModel):
 class PartialRetrainRequest(BaseModel):
     competition_id: Optional[int] = None  # None → All Leagues fallback scope
     stats: List[str]  # e.g. ["Interceptions", "Offsides"]
+    promote: bool = False  # True → run the Phase 5 guardrail and auto-promote on pass
 
 
 class RetrainRequest(BaseModel):
@@ -267,9 +268,11 @@ async def retrain_partial_endpoint(request: PartialRetrainRequest, background_ta
     if not _try_acquire_lock():
         return {"status": "busy", "message": "A projection or retrain is already running. Wait for it to finish."}
 
+    dry_run = not bool(request.promote)
+
     async def _run():
         try:
-            await retrain_partial(request.competition_id, request.stats, dry_run=True)
+            await retrain_partial(request.competition_id, request.stats, dry_run=dry_run)
         except Exception as e:
             logger.error(f"retrain partial FAILED: {e}", exc_info=True)
         finally:
@@ -278,7 +281,8 @@ async def retrain_partial_endpoint(request: PartialRetrainRequest, background_ta
 
     background_tasks.add_task(_run)
     scope = "All Leagues" if request.competition_id is None else f"competition_id={request.competition_id}"
-    return {"status": "started", "mode": "dry-run", "scope": scope, "stats": request.stats}
+    mode = "promote" if request.promote else "dry-run"
+    return {"status": "started", "mode": mode, "scope": scope, "stats": request.stats}
 
 
 @router.post("/models/{model_id}/promote")
