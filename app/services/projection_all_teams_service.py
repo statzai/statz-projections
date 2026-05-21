@@ -449,70 +449,21 @@ class ProjectionAllTeams:
                         f"(fixture, stat) writes due to missing team_stats rows — left NaN for retry"
                     )
 
-                # ## **Re-Train Models**
+                # Per-league + All-Leagues model training block removed
+                # 2026-05-21. Projection runs must not train models —
+                # retrain_service.py is the sole owner of model training
+                # (weekly Mon 03:00 cron + admin-panel per-stat button).
+                # This block was writing .sav files for every (league,
+                # stat) on every projection run, which after we retired
+                # per-league models meant 11 stats × 25 leagues of fresh
+                # 3-minute trainings per run (~14 hours per nightly cron
+                # — caught 2026-05-21 when an all-leagues heal triggered
+                # it). The `model` / `model_all` variables built here
+                # were never referenced downstream; the real model load
+                # for projection happens via load_all_models() later in
+                # the function.
 
-                # In[ ]:
-
-                ## THIS IS ALL NEW - RE-TRAIN AND SAVE MODELS
-
-                league_training_dataset = model_dataset_league.dropna().copy()
-                league_training_dataset = league_training_dataset[league_training_dataset['Team Passes'] > 0]
-                league_training_dataset.reset_index(drop=True, inplace=True)
-                all_league_training_dataset = model_dataset_all.dropna().copy()
-                all_league_training_dataset = all_league_training_dataset[all_league_training_dataset['Team Passes'] > 0]
-                all_league_training_dataset.reset_index(drop=True, inplace=True)
-
-                for stat in stat_list:
-                    if stat == 'Goals':
-                        continue
-
-                    # Putanja do modela po ligi
-                    file_path = os.path.join(model_file_path, league, f"{league}_{stat}_model.sav")
-
-                    if os.path.exists(file_path):
-                        with open(file_path, 'rb') as f:
-                            model = pickle.load(f)
-                        logger.info(f"[{league}] Model loaded: {stat}")
-                    else:
-                        logger.info(f"[{league}] Training model: {stat}...")
-                        predictors = ['Team ' + stat + ' History', 'Opponent ' + stat + ' History Against']
-                        target = 'Team ' + stat
-                        X = league_training_dataset[predictors]
-                        y = league_training_dataset[target]
-                        X_train, X_test, y_train, y_test = train_test_split(X, y)
-
-                        if stat in ['Passes', 'Successful Passes']:
-                            model = fit_model(X_train, y_train)
-                        else:
-                            model = grid_search(X_train, y_train)
-
-                        # Snimanje modela
-                        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                        with open(file_path, 'wb') as f:
-                            pickle.dump(model, f)
-                        logger.info(f"[{league}] Model trained and saved: {stat}")
-
-                    # Isto za model svih liga
-                    folder_path = os.path.join(model_file_path, "All Leagues")
-                    os.makedirs(folder_path, exist_ok=True)
-                    file_path_all = os.path.join(folder_path, f"All_Leagues_{stat}_model.sav")
-
-                    if os.path.exists(file_path_all):
-                        with open(file_path_all, 'rb') as f:
-                            model_all = pickle.load(f)
-                        logger.info(f"[{league}] All-leagues model loaded: {stat}")
-                    else:
-                        logger.info(f"[{league}] Training all-leagues model: {stat}...")
-                        X_all = all_league_training_dataset[predictors]
-                        y_all = all_league_training_dataset[target]
-                        X_train_all, X_test_all, y_train_all, y_test_all = train_test_split(X_all, y_all)
-                        model_all = grid_search(X_train_all, y_train_all)
-
-                        with open(file_path_all, 'wb') as f:
-                            pickle.dump(model_all, f)
-                        logger.info(f"[{league}] All-leagues model trained and saved: {stat}")
-
-                    # ## **Re-Calculate Accuracy**
+                # ## **Re-Calculate Accuracy**
 
                 # ## Team Stat Accuracy
 
