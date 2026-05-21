@@ -51,7 +51,7 @@ class EuroCompProjectionService:
         'Austrian Bundesliga':   'Austria',
         'Belgian Pro League':    'Belgium',
         'Eliteserien':           'Norway',
-        'Super League':          'Greece',
+        'Super League':          'Switzerland',
         'Super Lig':             'Turkey',
         'Superliga':             'Denmark',
         'Allsvenskan':           'Sweden',
