@@ -31,15 +31,30 @@ class EuroCompProjectionService:
 
     EURO_COMPS = ['Champions League', 'Europa League', 'Conference League', 'Europa Conference League']
 
+    # Domestic top tiers in scope for Euro-comp cross-league ratings.
+    # Every league here MUST have:
+    #   - team_ratings rows (so the rescale step has data to anchor on)
+    #   - a competition_projection_config row (so the cross-league
+    #     weighting / transfermarkt-code lookup resolves)
+    # Confirmed 2026-05-21 for all 15 entries below.
     LEAGUE_COUNTRY_DICT = {
-        'Premier League': 'England',
-        'La Liga': 'Spain',
-        'Serie A': 'Italy',
-        'Bundesliga': 'Germany',
-        'Ligue 1': 'France',
-        'Eredivisie': 'Netherlands',
-        'Liga Portugal': 'Portugal',
-        'Scottish Premiership': 'Scotland',
+        'Premier League':       'England',
+        'La Liga':               'Spain',
+        'Serie A':               'Italy',
+        'Bundesliga':            'Germany',
+        'Ligue 1':               'France',
+        'Eredivisie':            'Netherlands',
+        'Liga Portugal':         'Portugal',
+        'Scottish Premiership':  'Scotland',
+        # added 2026-05-21 — every one has clubs in current UCL/UEL/UECL
+        # and full team_ratings + projection_config coverage.
+        'Austrian Bundesliga':   'Austria',
+        'Belgian Pro League':    'Belgium',
+        'Eliteserien':           'Norway',
+        'Super League':          'Greece',
+        'Super Lig':             'Turkey',
+        'Superliga':             'Denmark',
+        'Allsvenskan':           'Sweden',
     }
 
     @staticmethod
