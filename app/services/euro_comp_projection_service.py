@@ -501,7 +501,7 @@ class EuroCompProjectionService:
         logger.info(f'[{league}] Building team projections...')
 
         # Load pre-trained models (no retraining)
-        models = load_all_models(stat_list, str(model_file_path), league)
+        models = load_all_models(stat_list, str(model_file_path))
 
         team_projections = get_team_round_predictions(
             next_fix, stat_list, fixtures_df, team_stats, teams, stats_types, models,

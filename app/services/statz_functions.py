@@ -929,7 +929,7 @@ def get_avg_table_with_probs_and_point_limits(avg_table_with_probs, all_tables):
 #     return None
 #
 
-def load_model(stat, file_path, league):
+def load_model(stat, file_path):
     """Load the global team-stat model for `stat`.
 
     Every league now reads from the same `All Leagues` model — per-league
@@ -944,9 +944,6 @@ def load_model(stat, file_path, league):
     current by `promote_model()` in `projection_model_repo` — it atomically
     overwrites the unversioned filename whenever a new All-Leagues model
     is promoted.
-
-    `league` is retained in the signature so call sites don't need
-    rewiring, but it's unused at lookup time.
     """
     if stat == 'Goals':
         return None
@@ -959,11 +956,10 @@ def load_model(stat, file_path, league):
         _PROJ_LOGGER.warning(f"[load_model] no global model file for {stat}: {global_path}")
         return None
 
-def load_all_models(stat_list, file_path, league):  # UPDATED - New Parameter: league
+def load_all_models(stat_list, file_path):
     models = {}
     for stat in stat_list:
-        model = load_model(stat, file_path, league)  # UPDATED - Pass league parameter
-        models[stat] = model
+        models[stat] = load_model(stat, file_path)
     return models
 
 def get_weighted_team_stats(stat, team, fixtures, team_stats, teams, stats_types, weight, venue='Yes', comp_id=None,

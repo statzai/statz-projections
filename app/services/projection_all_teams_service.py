@@ -1139,7 +1139,7 @@ class ProjectionAllTeams:
 
                 # In[21]:
 
-                models = load_all_models(stat_list, model_file_path, league)  # UPDATED - New League Parameter
+                models = load_all_models(stat_list, model_file_path)
 
                 # In[22]:
 

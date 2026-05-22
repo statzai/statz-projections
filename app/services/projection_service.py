@@ -532,54 +532,15 @@ class ProjectionService:
 
         # In[ ]:
 
-        ## THIS IS ALL NEW - RE-TRAIN AND SAVE MODELS
+        # Per-league + All-Leagues model training/load block removed
+        # 2026-05-22 as Phase 2 of the per-league model retirement.
+        # Projection runs no longer train models — retrain_service.py
+        # owns all training. The `model` / `model_all` locals built
+        # here were never referenced outside the for-loop; the real
+        # model load for projection happens via load_all_models() later
+        # in the function. See Phase 1 in projection_all_teams_service.
 
-        league_training_dataset = model_dataset_league.dropna().copy()
-        league_training_dataset = league_training_dataset[league_training_dataset['Team Passes'] > 0]
-        league_training_dataset.reset_index(drop=True, inplace=True)
-        all_league_training_dataset = model_dataset_all.dropna().copy()
-        all_league_training_dataset = all_league_training_dataset[all_league_training_dataset['Team Passes'] > 0]
-        all_league_training_dataset.reset_index(drop=True, inplace=True)
-
-        for stat in stat_list:
-            if stat == 'Goals':
-                continue
-
-            # Putanja do modela po ligi
-            file_path = os.path.join(model_file_path, league, f"{league}_{stat}_model.sav")
-
-            # All Leagues model path (always needed, used as fallback for new leagues)
-            folder_path = os.path.join(model_file_path, "All Leagues")
-            os.makedirs(folder_path, exist_ok=True)
-            file_path_all = os.path.join(folder_path, f"All_Leagues_{stat}_model.sav")
-
-            predictors = ['Team ' + stat + ' History', 'Opponent ' + stat + ' History Against']
-            target = 'Team ' + stat
-
-            # Load or train the All Leagues model
-            if os.path.exists(file_path_all):
-                with open(file_path_all, 'rb') as f:
-                    model_all = pickle.load(f)
-            else:
-                X_all = all_league_training_dataset[predictors]
-                y_all = all_league_training_dataset[target]
-                X_train_all, X_test_all, y_train_all, y_test_all = train_test_split(X_all, y_all)
-                model_all = grid_search(X_train_all, y_train_all)
-
-                with open(file_path_all, 'wb') as f:
-                    pickle.dump(model_all, f)
-                logger.info(f"[{league}] Trained and saved All_Leagues_{stat}_model.sav")
-
-            # Load league-specific model, or fall back to All Leagues model.
-            # No retraining from scratch — that's a planned future task.
-            if os.path.exists(file_path):
-                with open(file_path, 'rb') as f:
-                    model = pickle.load(f)
-            else:
-                model = model_all
-                logger.info(f"[{league}] No league model for {stat} — using All Leagues model")
-
-            # ## **Re-Calculate Accuracy**
+        # ## **Re-Calculate Accuracy**
 
         # ## Team Stat Accuracy
 
@@ -1279,7 +1240,7 @@ class ProjectionService:
 
         # In[21]:
 
-        models = load_all_models(stat_list, model_file_path, league)  # UPDATED - New League Parameter
+        models = load_all_models(stat_list, model_file_path)
 
         # In[22]:
 
@@ -2869,7 +2830,7 @@ class ProjectionService:
 
         # In[21]:
 
-        models = load_all_models(stat_list, ProjectionService.MODEL_FILE_PATH, league)  # UPDATED - New League Parameter
+        models = load_all_models(stat_list, ProjectionService.MODEL_FILE_PATH)
 
         # In[22]:
 
@@ -3416,7 +3377,7 @@ class ProjectionService:
 
         # In[21]:
 
-        models = load_all_models(stat_list, ProjectionService.MODEL_FILE_PATH, league)  # UPDATED - New League Parameter
+        models = load_all_models(stat_list, ProjectionService.MODEL_FILE_PATH)
 
         # In[22]:
 
@@ -4113,7 +4074,7 @@ class ProjectionService:
 
         # In[21]:
 
-        models = load_all_models(stat_list, ProjectionService.MODEL_FILE_PATH, league)  # UPDATED - New League Parameter
+        models = load_all_models(stat_list, ProjectionService.MODEL_FILE_PATH)
 
         # In[22]:
 
