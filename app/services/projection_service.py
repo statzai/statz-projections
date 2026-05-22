@@ -690,6 +690,41 @@ class ProjectionService:
         except Exception as _mv_err:
             logger.warning(f"[{league}] Market value block failed for {league}: {_mv_err} — skipping MV adjustment")
 
+        # Manual operator overrides from the Projections Admin Console
+        # (projections_team_dials). Applied AFTER MV adjustment and BEFORE
+        # the rescale-to-mean=100, so dialled teams shift the league mean
+        # and other teams' indexed values drift naturally — exactly what
+        # an operator expects when they say "boost Arsenal by 20%".
+        # Also runs before the xG snapshot below, so the override flows
+        # through to the xG-per-game column as well.
+        try:
+            from app.repository.team_dials_repo import load_team_dials
+            dials = await load_team_dials(league_id)
+            if dials:
+                # Build team_id → team_name from the teams DataFrame, then
+                # walk dials and multiply Attack/Defense in-place. Log each
+                # touched team so projection.log shows exactly what shifted.
+                id_to_name = teams.set_index('id')['name'].to_dict() if teams is not None else {}
+                touched = []
+                for team_id, (atk_pct, def_pct) in dials.items():
+                    team_name = id_to_name.get(int(team_id))
+                    if not team_name:
+                        logger.warning(f"[{league}] team_dial team_id={team_id} not in teams DataFrame — skipping")
+                        continue
+                    mask = ratings['Team'] == team_name
+                    if not mask.any():
+                        logger.warning(f"[{league}] team_dial '{team_name}' not in ratings — skipping")
+                        continue
+                    if atk_pct:
+                        ratings.loc[mask, 'Attack'] = ratings.loc[mask, 'Attack'] * (1 + atk_pct / 100)
+                    if def_pct:
+                        ratings.loc[mask, 'Defense'] = ratings.loc[mask, 'Defense'] * (1 + def_pct / 100)
+                    touched.append(f"{team_name}({atk_pct:+d}A/{def_pct:+d}D)")
+                if touched:
+                    logger.info(f"[{league}] team dials applied: {', '.join(touched)}")
+        except Exception as _dial_err:
+            logger.warning(f"[{league}] team dials block failed: {_dial_err} — skipping overrides")
+
         # Snapshot the post-MV, pre-rescale ratings in xG/game units. These
         # ride through to the writer alongside the indexed columns so the UI
         # can display "xGF per game" / "xGA per game" directly.
