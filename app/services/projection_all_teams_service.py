@@ -338,116 +338,12 @@ class ProjectionAllTeams:
 
                 # In[ ]:
 
-                ## THIS IS ALL NEW - FILL IN ANY MISSING TEAM STATS IN MODEL DATASET
-
                 model_dataset_league['comp_id'] = league_id
-                # Gap-fill gate widened 2026-05-21 — see projection_service
-                # for the full incident note. Same poison-mask fix.
-                _null_mask = model_dataset_league.isnull().any(axis=1)
-                _poison_mask = model_dataset_league.get(
-                    'Team Passes',
-                    pd.Series(dtype='float64', index=model_dataset_league.index),
-                ) == 0
-                previous_fixtures = model_dataset_league[_null_mask | _poison_mask]
-                logger.info(f"[{league}] Filling missing stats in model dataset ({len(previous_fixtures)} rows)...")
-                for i in range(len(previous_fixtures)):
-                    if i > 0 and i % 50 == 0:
-                        logger.info(f"[{league}] model dataset fill progress: {i}/{len(previous_fixtures)}")
-                    fixture_id = previous_fixtures.iloc[i]['id']
-                    team = previous_fixtures.iloc[i]['Team']
-                    try:
-                        team_id = get_team_id(team, teams, league_id, comp_teams)
-                    except IndexError:
-                        logger.warning(f"Team not found in teams table: {team} — skipping fixture {fixture_id}")
-                        continue
-                    fixture_stats = team_stats[team_stats['fixture_id'] == fixture_id]
-                    for stat in stat_list:
-                        if stat == 'Goals':
-                            continue
-                        team_df = fixture_stats[fixture_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
-                        team_stat_df = team_df[team_df['team_id'] == team_id]
-                        if team_stat_df.empty:
-                            # Skip — leave NaN for next-run retry.
-                            continue
-                        stat_value = team_stat_df['value'].values[0]
-                        model_dataset_league.loc[(model_dataset_league['id'] == fixture_id) & (
-                                    model_dataset_league['Team'] == team), 'Team ' + stat] = stat_value
-                        model_dataset_all.loc[(model_dataset_all['id'] == fixture_id) & (
-                                    model_dataset_all['Team'] == team), 'Team ' + stat] = stat_value
-
-                # ## For Accuracy Dataset
-
-                # In[ ]:
-
-                ## THIS IS ALL NEW - FILL IN ANY MISSING TEAM STATS IN ACCURACY DATASET
-
-                # Widened gate (see projection_service for full context).
-                _acc_null_mask = projection_accuracy_dataset_league.isnull().any(axis=1)
-                _acc_poison_mask = (
-                    (projection_accuracy_dataset_league.get('Total Goals') == 0)
-                    & (projection_accuracy_dataset_league.get('Total Shots Total') == 0)
-                )
-                previous_accuracy_fixtures = projection_accuracy_dataset_league[_acc_null_mask | _acc_poison_mask]
-                previous_accuracy_fixtures = previous_accuracy_fixtures[
-                    previous_accuracy_fixtures['kickoff_datetime'] < pd.to_datetime('today')]
-                logger.info(f"[{league}] Filling missing stats in accuracy dataset ({len(previous_accuracy_fixtures)} rows)...")
-                skipped_missing_stats = 0
-                for i in range(len(previous_accuracy_fixtures)):
-                    if i > 0 and i % 50 == 0:
-                        logger.info(f"[{league}] accuracy dataset fill progress: {i}/{len(previous_accuracy_fixtures)}")
-                    fixture_id = previous_accuracy_fixtures.iloc[i]['fixture_id']
-                    try:
-                        home_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Home Team'], teams, league_id, comp_teams)
-                        away_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Away Team'], teams, league_id, comp_teams)
-                    except IndexError as e:
-                        logger.warning(f"Team not found in teams table — skipping fixture {fixture_id}: {e}")
-                        continue
-                    fixture_stats = team_stats[team_stats['fixture_id'] == fixture_id]
-                    for stat in stat_list:
-                        fixture_stat_df = fixture_stats[fixture_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
-                        home_team_stat_df = fixture_stat_df[fixture_stat_df['team_id'] == home_team_id]
-                        away_team_stat_df = fixture_stat_df[fixture_stat_df['team_id'] == away_team_id]
-                        if home_team_stat_df.empty or away_team_stat_df.empty:
-                            skipped_missing_stats += 1
-                            continue
-                        home_stat_value = home_team_stat_df['value'].values[0]
-                        away_stat_value = away_team_stat_df['value'].values[0]
-                        # Update stat values for both datasets
-                        for ds in [projection_accuracy_dataset_league, projection_accuracy_dataset_all]:
-                            ds.loc[ds['fixture_id'] == fixture_id, 'Home ' + stat] = home_stat_value
-                            ds.loc[ds['fixture_id'] == fixture_id, 'Away ' + stat] = away_stat_value
-                            ds.loc[ds['fixture_id'] == fixture_id, 'Total ' + stat] = home_stat_value + away_stat_value
-
-                        # Only for 'Goals', update result columns
-                        if stat == 'Goals':
-                            home_win = home_stat_value > away_stat_value
-                            draw = home_stat_value == away_stat_value
-                            over_2_5 = (home_stat_value + away_stat_value) > 2.5
-                            over_1_5 = (home_stat_value + away_stat_value) > 1.5
-                            btts = home_stat_value > 0 and away_stat_value > 0
-                            away_cs = home_stat_value == 0
-                            home_cs = away_stat_value == 0
-
-                            # Write outcome flags as integers (1/0), NOT
-                            # 'Y'/'N' strings — mixing string assignments
-                            # into a numeric-from-DB column breaks parquet
-                            # writes (ArrowTypeError). See projection_service
-                            # line 325 comment for the full context.
-                            for ds in [projection_accuracy_dataset_league, projection_accuracy_dataset_all]:
-                                ds.loc[ds['fixture_id'] == fixture_id, 'Home Win'] = 1 if home_win else 0
-                                ds.loc[ds['fixture_id'] == fixture_id, 'Draw'] = 1 if draw else 0
-                                ds.loc[ds['fixture_id'] == fixture_id, 'Away Win'] = 1 if (not home_win and not draw) else 0
-                                ds.loc[ds['fixture_id'] == fixture_id, 'Over 2.5'] = 1 if over_2_5 else 0
-                                ds.loc[ds['fixture_id'] == fixture_id, 'Over 1.5'] = 1 if over_1_5 else 0
-                                ds.loc[ds['fixture_id'] == fixture_id, 'BTTS'] = 1 if btts else 0
-                                ds.loc[ds['fixture_id'] == fixture_id, 'Away Clean Sheet'] = 1 if away_cs else 0
-                                ds.loc[ds['fixture_id'] == fixture_id, 'Home Clean Sheet'] = 1 if home_cs else 0
-
-                if skipped_missing_stats > 0:
-                    logger.warning(
-                        f"[{league}] accuracy gap-fill: skipped {skipped_missing_stats} "
-                        f"(fixture, stat) writes due to missing team_stats rows — left NaN for retry"
-                    )
+                # In-projection gap-fill removed 2026-05-22. Actuals +
+                # outcome flags now flow into both dataset tables via the
+                # Laravel BackfillFixtureAccuracy job (event-driven from
+                # ImportFixtureStatsJobV2 the moment team stats land).
+                # See projection_service for the full architecture note.
 
                 # Per-league + All-Leagues model training block removed
                 # 2026-05-21. Projection runs must not train models —

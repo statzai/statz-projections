@@ -162,17 +162,10 @@ INSERT INTO projection_model_dataset (
     opponent_name = VALUES(opponent_name),
     venue = VALUES(venue),
     kickoff_datetime = VALUES(kickoff_datetime),
-    team_shots_total = VALUES(team_shots_total),
-    team_shots_on_target = VALUES(team_shots_on_target),
-    team_corners = VALUES(team_corners),
-    team_fouls = VALUES(team_fouls),
-    team_yellowcards = VALUES(team_yellowcards),
-    team_tackles = VALUES(team_tackles),
-    team_passes = VALUES(team_passes),
-    team_successful_passes = VALUES(team_successful_passes),
-    team_interceptions = VALUES(team_interceptions),
-    team_total_crosses = VALUES(team_total_crosses),
-    team_offsides = VALUES(team_offsides),
+    -- team_{stat} columns intentionally omitted from UPDATE: those are
+    -- exclusively owned by Laravel BackfillFixtureAccuracy. Projection
+    -- only writes them on initial INSERT (typically NULL until the
+    -- fixture is played + backfilled). See architecture note 2026-05-22.
     team_shots_total_history = VALUES(team_shots_total_history),
     opponent_shots_total_history_against = VALUES(opponent_shots_total_history_against),
     team_shots_on_target_history = VALUES(team_shots_on_target_history),
@@ -270,6 +263,22 @@ async def insert_model_dataset_async(df, league_id, league_name, teams, fixtures
 # ──────────────────────────────────────────────────────────────────────────
 
 def _build_accuracy_insert_sql():
+    # Actuals + outcome flags are written exclusively by the Laravel
+    # BackfillFixtureAccuracy job (event-driven from ImportFixtureStatsJobV2).
+    # Projection runs MUST NOT touch them on UPSERT — otherwise the next
+    # projection would overwrite real backfilled values with NULL/NaN
+    # from the in-memory DataFrame that no longer carries actuals.
+    # See architecture note 2026-05-22.
+    actuals_cols = set()
+    for stat in ACCURACY_DATASET_STATS:
+        for venue in ["total", "home", "away"]:
+            actuals_cols.add(f"{venue}_{stat}")
+    actuals_cols.update([
+        "home_win", "draw", "away_win",
+        "home_clean_sheet", "away_clean_sheet",
+        "over_15", "over_25", "btts",
+    ])
+
     cols = [
         "fixture_id", "competition_id", "home_team_id", "away_team_id",
         "home_team_name", "away_team_name", "kickoff_datetime",
@@ -289,7 +298,12 @@ def _build_accuracy_insert_sql():
     ])
     placeholders = ", ".join(["%s"] * len(cols))
     col_list = ", ".join(cols)
-    update_list = ",\n    ".join(f"{c} = VALUES({c})" for c in cols if c != "fixture_id")
+    # ON DUPLICATE KEY UPDATE excludes fixture_id (the unique key) AND
+    # the actuals/outcome columns owned by BackfillFixtureAccuracy.
+    update_list = ",\n    ".join(
+        f"{c} = VALUES({c})" for c in cols
+        if c != "fixture_id" and c not in actuals_cols
+    )
     return f"""
 INSERT INTO projection_accuracy_dataset (
     {col_list},

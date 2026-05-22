@@ -395,138 +395,19 @@ class ProjectionService:
         skip_accuracy = (mode == "refresh")
         logger.info(f"[{league}] _prepare_league mode={mode} skip_accuracy={skip_accuracy}")
         model_dataset_league['comp_id'] = league_id
-        # Gap-fill gate widened 2026-05-21: original `isnull().any(axis=1)`
-        # only retries rows with at least one NULL. If an earlier gap-fill
-        # missed (e.g. team_stats DataFrame empty for the fixture) the row
-        # got fully populated with zeros and was then excluded from every
-        # subsequent retry. The poison_mask catches those rows so they
-        # heal on the next run. See PL fids 19427206/19427230 etc. (12
-        # zeroed rows surfaced 2026-05-21 via accuracy admin panel).
-        null_mask = model_dataset_league.isnull().any(axis=1)
-        poison_mask = model_dataset_league.get(
-            'Team Passes',
-            pd.Series(dtype='float64', index=model_dataset_league.index),
-        ) == 0
-        previous_fixtures = model_dataset_league[null_mask | poison_mask]
-        for i in range(len(previous_fixtures)):
-            fixture_id = previous_fixtures.iloc[i]['id']
-            team = previous_fixtures.iloc[i]['Team']
-            try:
-                team_id = get_team_id(team, teams, league_id, comp_teams)
-            except IndexError:
-                logger.warning(f"Team not found in teams table: {team} — skipping fixture {fixture_id}")
-                continue
-            fixture_stats = team_stats[team_stats['fixture_id'] == fixture_id]
-            for stat in stat_list:
-                if stat == 'Goals':
-                    continue
-                team_df = fixture_stats[fixture_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
-                team_stat_df = team_df[team_df['team_id'] == team_id]
-                if team_stat_df.empty:
-                    # No row in fixture_team_stats yet for this (fixture,
-                    # team, stat). Skip — leaves the column NaN so the
-                    # next run's gate retries the fixture. Writing 0 here
-                    # (the old behaviour) would have permanently masked
-                    # the row from future retries.
-                    continue
-                stat_value = team_stat_df['value'].values[0]
-                model_dataset_league.loc[(model_dataset_league['id'] == fixture_id) & (
-                            model_dataset_league['Team'] == team), 'Team ' + stat] = stat_value
-                model_dataset_all.loc[(model_dataset_all['id'] == fixture_id) & (
-                            model_dataset_all['Team'] == team), 'Team ' + stat] = stat_value
-
-        # ## For Accuracy Dataset
-
-        # In[ ]:
-
-        ## THIS IS ALL NEW - FILL IN ANY MISSING TEAM STATS IN ACCURACY DATASET
-        ## Skipped on refresh runs — 2am run already gap-filled the same past
-        ## fixtures a few hours earlier, no new matches have completed since.
-
-        if skip_accuracy:
-            logger.info(f"[{league}] skipping accuracy gap-fill (refresh mode)")
-            previous_accuracy_fixtures = projection_accuracy_dataset_league.iloc[0:0]  # empty
-        else:
-            # Gap-fill gate widened 2026-05-21: same poison-mask fix as
-            # the model_dataset block above. Without it, a once-zeroed
-            # row stays poisoned forever (no NULLs → no retry). Total
-            # Goals == 0 AND Total Shots Total == 0 is the all-but-
-            # impossible-for-real-football signature.
-            null_mask = projection_accuracy_dataset_league.isnull().any(axis=1)
-            poison_mask = (
-                (projection_accuracy_dataset_league.get('Total Goals') == 0)
-                & (projection_accuracy_dataset_league.get('Total Shots Total') == 0)
-            )
-            previous_accuracy_fixtures = projection_accuracy_dataset_league[null_mask | poison_mask]
-            previous_accuracy_fixtures = previous_accuracy_fixtures[
-                previous_accuracy_fixtures['kickoff_datetime'] < pd.to_datetime('today')]
-        skipped_missing_stats = 0
-        for i in range(len(previous_accuracy_fixtures)):
-            fixture_id = previous_accuracy_fixtures.iloc[i]['fixture_id']
-            try:
-                home_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Home Team'], teams, league_id, comp_teams)
-                away_team_id = get_team_id(previous_accuracy_fixtures.iloc[i]['Away Team'], teams, league_id, comp_teams)
-            except IndexError as e:
-                logger.warning(f"Team not found in teams table — skipping fixture {fixture_id}: {e}")
-                continue
-            fixture_stats = team_stats[team_stats['fixture_id'] == fixture_id]
-            for stat in stat_list:
-                fixture_stat_df = fixture_stats[fixture_stats['stats_type_id'] == get_stat_id(stat, stats_types)]
-                home_team_stat_df = fixture_stat_df[fixture_stat_df['team_id'] == home_team_id]
-                away_team_stat_df = fixture_stat_df[fixture_stat_df['team_id'] == away_team_id]
-                if home_team_stat_df.empty or away_team_stat_df.empty:
-                    # Stats not yet present for this (fixture, team, stat).
-                    # Skip — leaves the column NaN so the next run's
-                    # null_mask gate retries. Writing 0 (old behaviour)
-                    # masked the row from every future retry.
-                    skipped_missing_stats += 1
-                    continue
-                home_stat_value = home_team_stat_df['value'].values[0]
-                away_stat_value = away_team_stat_df['value'].values[0]
-                # Update stat values for both datasets
-                for ds in [projection_accuracy_dataset_league, projection_accuracy_dataset_all]:
-                    ds.loc[ds['fixture_id'] == fixture_id, 'Home ' + stat] = home_stat_value
-                    ds.loc[ds['fixture_id'] == fixture_id, 'Away ' + stat] = away_stat_value
-                    ds.loc[ds['fixture_id'] == fixture_id, 'Total ' + stat] = home_stat_value + away_stat_value
-
-                # Only for 'Goals', update result columns
-                if stat == 'Goals':
-                    home_win = home_stat_value > away_stat_value
-                    draw = home_stat_value == away_stat_value
-                    over_2_5 = (home_stat_value + away_stat_value) > 2.5
-                    over_1_5 = (home_stat_value + away_stat_value) > 1.5
-                    btts = home_stat_value > 0 and away_stat_value > 0
-                    away_cs = home_stat_value == 0
-                    home_cs = away_stat_value == 0
-
-                    # Write outcome flags as integers (1/0), NOT 'Y'/'N'
-                    # strings. The columns are loaded from DB (TINYINT) as
-                    # numeric, so mixing strings here poisons the column
-                    # dtype to object — the parquet writer then chokes with
-                    # ArrowTypeError ("Could not convert 'N' to double") on
-                    # every projection after the 2026-04-24 accuracy-dataset
-                    # DB cutover. _parse_bool in the DB dual-write path
-                    # already accepts int OR 'Y'/'N', so no compat break.
-                    for ds in [projection_accuracy_dataset_league, projection_accuracy_dataset_all]:
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Home Win'] = 1 if home_win else 0
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Draw'] = 1 if draw else 0
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Away Win'] = 1 if (not home_win and not draw) else 0
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Over 2.5'] = 1 if over_2_5 else 0
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Over 1.5'] = 1 if over_1_5 else 0
-                        ds.loc[ds['fixture_id'] == fixture_id, 'BTTS'] = 1 if btts else 0
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Away Clean Sheet'] = 1 if away_cs else 0
-                        ds.loc[ds['fixture_id'] == fixture_id, 'Home Clean Sheet'] = 1 if home_cs else 0
-
-        if skipped_missing_stats > 0:
-            # Each (fixture, stat) where fixture_team_stats hadn't yet
-            # caught up. NaN left in place so next run's widened gate
-            # retries. Watch this counter in projection.log — sustained
-            # high values across runs would indicate a deeper loader or
-            # import-lag problem upstream of the gap-fill.
-            logger.warning(
-                f"[{league}] accuracy gap-fill: skipped {skipped_missing_stats} "
-                f"(fixture, stat) writes due to missing team_stats rows — left NaN for retry"
-            )
+        # In-projection gap-fill removed 2026-05-22. Actuals + outcome
+        # flags now flow into projection_accuracy_dataset +
+        # projection_model_dataset via the Laravel BackfillFixtureAccuracy
+        # job — dispatched from ImportFixtureStatsJobV2 the moment team
+        # stats land in fixture_team_stats. Sweep command
+        # `projections:sweep-accuracy-backfill` (06:00 UTC daily) catches
+        # any rows the event-driven path missed (e.g. stats arrived
+        # before projection created the row).
+        #
+        # Projection no longer writes anything to the actual-stat /
+        # outcome columns; the matching `ON DUPLICATE KEY UPDATE` clauses
+        # in projection_dataset_repo.py now exclude those columns so
+        # re-projecting a played fixture can't overwrite real values.
 
         # ## **Re-Train Models**
 
