@@ -180,17 +180,20 @@ def _decide_promotion(incumbent: Optional[dict], new_mae: float) -> tuple:
 async def _train_one(
     df: pd.DataFrame,
     stat_name: str,
-    competition_id: Optional[int],
-    label: str,
     dry_run: bool = True,
 ) -> Optional[dict]:
-    """Train one (optionally scoped) model. Returns summary dict or None if
+    """Train one global model. Returns summary dict or None if
     insufficient data / training fails.
+
+    Per-league training was retired 2026-05-21 — every league now uses
+    the single "All Leagues" global model. Caller no longer passes a
+    competition_id; rows are always inserted with NULL.
 
     dry_run=True: Phase 4 — log promotion decision only.
     dry_run=False: Phase 5 — if guardrail passes, call promote_model() to
     flip is_active to the new row and demote the incumbent.
     """
+    label = "All Leagues"
     predictors = _predictor_columns(stat_name)
     target = _target_column(stat_name)
 
@@ -222,14 +225,13 @@ async def _train_one(
     holdout_mae = float(mean_absolute_error(y_test, y_pred))
     holdout_r2 = float(r2_score(y_test, y_pred))
 
-    # Save .sav
-    league_dir = label if competition_id is not None else "All Leagues"
-    file_path = _model_build_path(league_dir, stat_name)
+    # Save .sav under the global "All Leagues" directory
+    file_path = _model_build_path(label, stat_name)
     with open(file_path, "wb") as f:
         pickle.dump(model, f)
 
     new_id = await insert_projection_model(
-        competition_id=competition_id,
+        competition_id=None,
         stat_name=stat_name,
         algorithm=algo,
         hyperparams=hyperparams,
@@ -239,7 +241,7 @@ async def _train_one(
         file_path=file_path,
     )
 
-    incumbent = await fetch_active_model(competition_id, stat_name)
+    incumbent = await fetch_active_model(None, stat_name)
     would_promote, reason = _decide_promotion(incumbent, holdout_mae)
     incumbent_mae = incumbent.get("holdout_mae") if incumbent else None
 
@@ -326,7 +328,7 @@ async def retrain_all_models(dry_run: bool = False) -> dict:
     fallback_df = await _build_all_leagues_fallback_df(all_df)
     all_results = []
     for stat in stat_list:
-        r = await _train_one(fallback_df, stat, None, "All Leagues", dry_run=dry_run)
+        r = await _train_one(fallback_df, stat, dry_run=dry_run)
         if r is not None:
             all_results.append(r)
     results["all_leagues"] = all_results
@@ -379,13 +381,15 @@ async def _build_all_leagues_fallback_df(all_df: pd.DataFrame) -> pd.DataFrame:
 
 
 async def retrain_partial(competition_id: Optional[int], stats: list, dry_run: bool = False) -> dict:
-    """Train a subset of (competition, stat) pairs — used to fill gaps left
-    by a partial-success full retrain without re-doing the per-league work
-    that already completed.
+    """Train a subset of global models — used to fill gaps left by a
+    partial-success full retrain without re-doing the work that already
+    completed.
 
-    competition_id=None runs the "All Leagues" fallback scope (top-5 + row
-    cap). An integer competition_id trains just that league's models on
-    its own data.
+    Per-league training was retired 2026-05-21; the `competition_id`
+    parameter is retained at the API surface (PartialRetrainRequest)
+    for callers built against the older contract, but is ignored —
+    every retrain runs against the "All Leagues" fallback scope
+    (top-5 + row cap) and writes a single global row.
 
     stats is a list of canonical stat names (e.g. ["Interceptions",
     "Offsides"]) matching get_stat_list() output. Unknown stats are
@@ -393,14 +397,18 @@ async def retrain_partial(competition_id: Optional[int], stats: list, dry_run: b
 
     dry_run defaults to False (Phase 5) — pass True for an inspection-only
     run that doesn't flip is_active.
-
-    Returns: { "scope": str, "results": [...], "skipped": [...] }
     """
     if not stats:
         return {"scope": "n/a", "results": [], "skipped": [], "message": "no stats specified"}
 
+    if competition_id is not None:
+        logger.warning(
+            f"[retrain partial] ignoring competition_id={competition_id} — "
+            f"per-league training retired 2026-05-21; running All Leagues"
+        )
+
     t_start = time.time()
-    scope = "All Leagues" if competition_id is None else f"competition_id={competition_id}"
+    scope = "All Leagues"
     logger.info(f"[retrain partial] START scope={scope} stats={stats}")
 
     valid_stats = [s for s in get_stat_list() if s != "Goals"]
@@ -413,45 +421,17 @@ async def retrain_partial(competition_id: Optional[int], stats: list, dry_run: b
 
     all_df = await load_model_dataset_async()
     logger.info(f"[retrain partial] loaded {len(all_df)} total rows from projection_model_dataset")
-
-    if competition_id is None:
-        df = await _build_all_leagues_fallback_df(all_df)
-        label = "All Leagues"
-    else:
-        df = all_df[all_df["comp_id"] == competition_id]
-        try:
-            label = await _lookup_league_name(int(competition_id))
-        except Exception as e:
-            logger.warning(f"[retrain partial] couldn't resolve name for comp_id={competition_id}: {e}")
-            label = str(competition_id)
+    df = await _build_all_leagues_fallback_df(all_df)
 
     results = []
     for stat in target_stats:
-        r = await _train_one(df, stat, competition_id, label, dry_run=dry_run)
+        r = await _train_one(df, stat, dry_run=dry_run)
         if r is not None:
             results.append(r)
 
     elapsed = (time.time() - t_start) / 60
     logger.info(f"[retrain partial] COMPLETE scope={scope} — {elapsed:.1f} min, {len(results)} models trained")
     return {"scope": scope, "results": results, "skipped": unknown}
-
-
-async def _lookup_league_name(competition_id: int) -> str:
-    """Resolve competition_id → name via the competitions table."""
-    import app.database as _db
-    from app.database import get_connection
-    conn = None
-    try:
-        conn = await get_connection()
-        async with conn.cursor() as cursor:
-            await cursor.execute("SELECT name FROM competitions WHERE id = %s", (competition_id,))
-            row = await cursor.fetchone()
-            if not row:
-                raise ValueError(f"no competition with id={competition_id}")
-            return row[0]
-    finally:
-        if conn and _db.pool:
-            _db.pool.release(conn)
 
 
 async def _lookup_competition_ids(names: tuple) -> list:
