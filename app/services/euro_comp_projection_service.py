@@ -230,13 +230,20 @@ class EuroCompProjectionService:
 
             previous_season_id = get_season_id(league_id, seasons, True)
             league_current_season_id = get_season_id(league_id, seasons, False)
-            # Skip this domestic league if it's between seasons (no
-            # is_current row) or if standings haven't landed yet for the
-            # current season. Returning early just drops its contribution
-            # to the cross-league rating set — the euro comp still runs.
+            # Between-season fallback: if a domestic league has no
+            # is_current=1 row (e.g. Bundesliga / Ligue 1 right after
+            # the season ended + before Sportmonks creates the next
+            # season), use the previous season's data so the league's
+            # teams still contribute to cross-league ratings. Without
+            # this, euro comp fixtures between teams in the affected
+            # league(s) get dropped at the "team not in ratings" check
+            # — e.g. the CL final with PSG (Ligue 1) was being excluded.
             if league_current_season_id is None:
-                logger.info(f"[{league}] inner {league_name}: no current season — skipping")
-                continue
+                if previous_season_id is None:
+                    logger.info(f"[{league}] inner {league_name}: no current OR previous season — skipping")
+                    continue
+                logger.info(f"[{league}] inner {league_name}: no current season — falling back to previous season {previous_season_id}")
+                league_current_season_id = previous_season_id
             standings_league = standings[standings['season_id'] == league_current_season_id]
             if standings_league.empty:
                 logger.info(f"[{league}] inner {league_name}: standings empty for season {league_current_season_id} — skipping")
