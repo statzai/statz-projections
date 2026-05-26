@@ -705,30 +705,8 @@ class ProjectionService:
         # Also runs before the xG snapshot below, so the override flows
         # through to the xG-per-game column as well.
         try:
-            from app.repository.team_dials_repo import load_team_dials
-            dials = await load_team_dials(league_id)
-            if dials:
-                # Build team_id → team_name from the teams DataFrame, then
-                # walk dials and multiply Attack/Defense in-place. Log each
-                # touched team so projection.log shows exactly what shifted.
-                id_to_name = teams.set_index('id')['name'].to_dict() if teams is not None else {}
-                touched = []
-                for team_id, (atk_pct, def_pct) in dials.items():
-                    team_name = id_to_name.get(int(team_id))
-                    if not team_name:
-                        logger.warning(f"[{league}] team_dial team_id={team_id} not in teams DataFrame — skipping")
-                        continue
-                    mask = ratings['Team'] == team_name
-                    if not mask.any():
-                        logger.warning(f"[{league}] team_dial '{team_name}' not in ratings — skipping")
-                        continue
-                    if atk_pct:
-                        ratings.loc[mask, 'Attack'] = ratings.loc[mask, 'Attack'] * (1 + atk_pct / 100)
-                    if def_pct:
-                        ratings.loc[mask, 'Defense'] = ratings.loc[mask, 'Defense'] * (1 + def_pct / 100)
-                    touched.append(f"{team_name}({atk_pct:+d}A/{def_pct:+d}D)")
-                if touched:
-                    logger.info(f"[{league}] team dials applied: {', '.join(touched)}")
+            from app.repository.team_dials_repo import apply_team_dials_to_ratings
+            await apply_team_dials_to_ratings(ratings, league_id, teams, league)
         except Exception as _dial_err:
             logger.warning(f"[{league}] team dials block failed: {_dial_err} — skipping overrides")
 

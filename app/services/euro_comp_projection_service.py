@@ -340,6 +340,19 @@ class EuroCompProjectionService:
             except Exception as _mv_err:
                 logger.warning(f"[{league}] Market value block failed for {league_name}: {_mv_err} — skipping MV adjustment")
 
+            # Manual operator overrides for this inner league. Dials set
+            # against a team's *domestic* league propagate through here
+            # to the cross-league rating set (and therefore through to
+            # the euro comp's fixture projections too). Same post-MV,
+            # pre-rescale position as projection_service._prepare_league.
+            try:
+                from app.repository.team_dials_repo import apply_team_dials_to_ratings
+                await apply_team_dials_to_ratings(
+                    ratings, league_id, teams, f"{league} / {league_name}"
+                )
+            except Exception as _dial_err:
+                logger.warning(f"[{league}] team dials block failed for {league_name}: {_dial_err}")
+
             # Snapshot post-MV, pre-rescale ratings in xG/game units.
             ratings['Attack_xG'] = ratings['Attack']
             ratings['Defense_xG'] = ratings['Defense']
