@@ -47,19 +47,21 @@ logger = logging.getLogger("data_loader")
 
 # Match DataCache.fixtures_df bet365 column expectations exactly. Downstream
 # code reads e.g. `bet365_home_odds_decimal` — these renames preserve those.
+#
+# Over 1.5 / 2.5 goals moved out of bet365_fixture_odds into
+# bet365_totals_odds 2026-05-22 (commit 76ae9cf0 dropped the legacy
+# columns). They're now pulled in via separate derived-table joins in
+# _load_fixtures so the downstream column names stay identical.
 _BET365_COLS_NEEDED = [
     "fixture_id",
     "home_win_odd", "draw_odd", "away_win_odd",
     "btts_yes_odd",
-    "over_1_5_odd", "over_2_5_odd",
 ]
 _BET365_RENAMES = {
     "home_win_odd": "bet365_home_odds_decimal",
     "draw_odd": "bet365_draw_odds_decimal",
     "away_win_odd": "bet365_away_odds_decimal",
     "btts_yes_odd": "bet365_btts_yes_odds_decimal",
-    "over_1_5_odd": "over_1_5_odds_decimal",
-    "over_2_5_odd": "over_2_5_odds_decimal",
 }
 
 # Fixture history depth. Matches the ~2-season rolling window used by the
@@ -336,10 +338,31 @@ class LeagueDataLoader:
             f"b365.{col} AS {_BET365_RENAMES.get(col, col)}"
             for col in _BET365_COLS_NEEDED if col != "fixture_id"
         )
+        # Goals totals (match-grain, side=over) live in bet365_totals_odds
+        # as of 2026-05-22. team_id IS NULL marks match-level. The unique
+        # index covers team_id but MySQL allows multiple NULLs, so we
+        # collapse with MAX(price) per (fixture, line) — duplicate rows
+        # typically share a price anyway.
         sql = f"""
-            SELECT f.*, {b365_select}
+            SELECT f.*, {b365_select},
+                bt15.price AS over_1_5_odds_decimal,
+                bt25.price AS over_2_5_odds_decimal
             FROM fixtures f
             LEFT JOIN bet365_fixture_odds b365 ON b365.fixture_id = f.id
+            LEFT JOIN (
+                SELECT fixture_id, MAX(price) AS price
+                FROM bet365_totals_odds
+                WHERE market = 'goals' AND team_id IS NULL
+                  AND line = 1.5 AND side = 'over'
+                GROUP BY fixture_id
+            ) bt15 ON bt15.fixture_id = f.id
+            LEFT JOIN (
+                SELECT fixture_id, MAX(price) AS price
+                FROM bet365_totals_odds
+                WHERE market = 'goals' AND team_id IS NULL
+                  AND line = 2.5 AND side = 'over'
+                GROUP BY fixture_id
+            ) bt25 ON bt25.fixture_id = f.id
             WHERE f.id IN ({fix_ph})
         """
         async with conn.cursor() as cur:
