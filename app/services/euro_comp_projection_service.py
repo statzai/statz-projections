@@ -230,7 +230,17 @@ class EuroCompProjectionService:
 
             previous_season_id = get_season_id(league_id, seasons, True)
             league_current_season_id = get_season_id(league_id, seasons, False)
+            # Skip this domestic league if it's between seasons (no
+            # is_current row) or if standings haven't landed yet for the
+            # current season. Returning early just drops its contribution
+            # to the cross-league rating set — the euro comp still runs.
+            if league_current_season_id is None:
+                logger.info(f"[{league}] inner {league_name}: no current season — skipping")
+                continue
             standings_league = standings[standings['season_id'] == league_current_season_id]
+            if standings_league.empty:
+                logger.info(f"[{league}] inner {league_name}: standings empty for season {league_current_season_id} — skipping")
+                continue
             matches_played = standings_league['played'].mode().values[0]
 
             if league_name == 'League Two':
