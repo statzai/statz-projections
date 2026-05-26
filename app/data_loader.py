@@ -380,7 +380,14 @@ class LeagueDataLoader:
             # decimal.Decimal via aiomysql, but downstream code expects floats
             # (e.g. `1/odd`, `.round()`, `*` with floats). CSV mode dodges
             # this via pandas type inference.
-            for col in _BET365_RENAMES.values():
+            #
+            # The over_1_5/2_5 columns come from the new bet365_totals_odds
+            # derived-table joins and aren't in _BET365_RENAMES — coerce
+            # them explicitly so they don't slip through as Decimal.
+            _coerce_cols = list(_BET365_RENAMES.values()) + [
+                'over_1_5_odds_decimal', 'over_2_5_odds_decimal'
+            ]
+            for col in _coerce_cols:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
         self.fixtures_df = df

@@ -62,16 +62,30 @@ def get_league_id(league_name, comps):
 
 
 def get_season_id(comp_id, seasons, previous=False):
+    """Return the (current / previous) season id for a competition.
+
+    Returns None when no matching season exists — caller should check and
+    bail out of the projection. Historically this was `.values[0]` which
+    threw IndexError, exposing every league with a recently-ended season
+    + no replacement created yet (e.g. Bundesliga / Ligue 1 in late May
+    2026 — 2024-25 ended, Sportmonks hadn't created 2025-26 rows).
+    """
     import pandas as pd
     comp_seasons = seasons[seasons['competition_id'] == comp_id]
     current_season = comp_seasons[comp_seasons['is_current'] == 1]
     if previous:
         comp_seasons = comp_seasons.drop(current_season.index)
+        if comp_seasons.empty:
+            return None
         comp_seasons['end_date'] = pd.to_datetime(comp_seasons['end_date'])
         previous_season = comp_seasons[comp_seasons['end_date'] < pd.to_datetime('today')]
+        if previous_season.empty:
+            return None
         previous_season = previous_season.sort_values('end_date', ascending=False).iloc[[0]]
         return previous_season['id'].values[0]
     else:
+        if current_season.empty:
+            return None
         return current_season['id'].values[0]
 
 
@@ -268,7 +282,14 @@ def get_team_fixtures(team_name, fixtures, teams, comp_id=None, season_id=None, 
     team_id = get_team_id(team_name, teams, comp_id, comp_teams)
     fixtures = fixtures[(fixtures['home_team_id'] == team_id) | (fixtures['away_team_id'] == team_id)].reset_index(
         drop=True)
-    fixtures[['home_team', 'away_team']] = fixtures['name'].str.split(' vs ', expand=True)
+    # Derive home/away team names from IDs rather than splitting fixtures['name']
+    # on ' vs '. The split path broke on World Cup placeholder fixtures
+    # whose name reads "Winner Match 73" (no separator) — ValueError:
+    # "Columns must be same length as key". ID-mapped lookup also avoids
+    # ambiguity for teams whose names legitimately contain " vs ".
+    _id_to_name = teams.set_index('id')['name']
+    fixtures['home_team'] = fixtures['home_team_id'].map(_id_to_name)
+    fixtures['away_team'] = fixtures['away_team_id'].map(_id_to_name)
     fixtures['opponent'] = fixtures.apply(lambda x: x['away_team'] if x['home_team'] == team_name else x['home_team'],
                                           axis=1)
     if comp_id is not None:

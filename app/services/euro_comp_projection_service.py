@@ -157,6 +157,12 @@ class EuroCompProjectionService:
 
         fixtures = fixtures_df[fixtures_df['competition_id'] == comp_id]
         current_season_id = get_season_id(comp_id, seasons, False)
+        if current_season_id is None:
+            # Typical for euro comps right after the final — Sportmonks
+            # hasn't created the next season yet. Skip cleanly.
+            raise RuntimeError(
+                f"no current season in seasons table for competition_id={comp_id} — skipping"
+            )
         stat_list = get_stat_list()
 
         logger.info(f'[{league}] Building cross-league ratings...')

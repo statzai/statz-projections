@@ -317,6 +317,14 @@ class ProjectionAllTeams:
                     league_below_id = None
                 previous_season_id = get_season_id(league_id, seasons, True)
                 current_season_id = get_season_id(league_id, seasons, False)
+                if current_season_id is None:
+                    # No is_current=1 season row — typical when a league
+                    # has just ended its previous season and Sportmonks
+                    # hasn't created the next one yet. Skip with a clean
+                    # log rather than crashing with IndexError.
+                    raise RuntimeError(
+                        f"no current season in seasons table for competition_id={league_id} — skipping"
+                    )
                 standings = standings[standings['season_id'] == current_season_id]
                 matches_played = standings['played'].mode().values[
                     0]  # NEW - This gets the number of matches played so far in the current season
@@ -897,12 +905,25 @@ class ProjectionAllTeams:
                     over_2_5_goals = float(score_preds.loc[i, 'Over 2.5 Goals %'].strip('%')) / 100
                     btts = float(score_preds.loc[i, 'Both Teams Score %'].strip('%')) / 100
 
-                    home_win_odds = 1 / fix['bet365_home_odds_decimal'].values[0]
-                    draw_odds = 1 / fix['bet365_draw_odds_decimal'].values[0]
-                    away_win_odds = 1 / fix['bet365_away_odds_decimal'].values[0]
-                    over_1_5_goals_odds = 1 / fix['over_1_5_odds_decimal'].values[0]
-                    over_2_5_goals_odds = 1 / fix['over_2_5_odds_decimal'].values[0]
-                    btts_odds = 1 / fix['bet365_btts_yes_odds_decimal'].values[0]
+                    # Skip best-bet eval if any bet365 odd is missing
+                    # (None/NaN). bet365_totals_odds is sparse for some
+                    # leagues (e.g. Belgian Pro League playoff fixtures).
+                    _odds_vals = [
+                        fix['bet365_home_odds_decimal'].values[0],
+                        fix['bet365_draw_odds_decimal'].values[0],
+                        fix['bet365_away_odds_decimal'].values[0],
+                        fix['over_1_5_odds_decimal'].values[0],
+                        fix['over_2_5_odds_decimal'].values[0],
+                        fix['bet365_btts_yes_odds_decimal'].values[0],
+                    ]
+                    if any(v is None or pd.isna(v) for v in _odds_vals):
+                        continue
+                    home_win_odds = 1 / _odds_vals[0]
+                    draw_odds = 1 / _odds_vals[1]
+                    away_win_odds = 1 / _odds_vals[2]
+                    over_1_5_goals_odds = 1 / _odds_vals[3]
+                    over_2_5_goals_odds = 1 / _odds_vals[4]
+                    btts_odds = 1 / _odds_vals[5]
 
                     home_win_edge = home_win - home_win_odds
                     draw_edge = draw - draw_odds
