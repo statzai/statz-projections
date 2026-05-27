@@ -424,8 +424,19 @@ class EuroCompProjectionService:
         if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
             next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
             logger.info(f'[{league}] Filtered to {len(next_fix)} fixtures by IDs')
-        next_fix = next_fix[['id', 'kickoff_datetime', 'name', 'home_team_id', 'away_team_id',
-                             'bet365_home_odds_decimal', 'bet365_draw_odds_decimal', 'bet365_away_odds_decimal']]
+        # Carry `neutral_venue` through — read at projection time by
+        # make_round_goal_prediction + get_team_round_predictions to
+        # disable home-advantage bias for finals at neutral grounds.
+        # Defaults to False if the source DF doesn't have the column
+        # yet (legacy fixtures pre-migration 2026-05-27).
+        _has_neutral = 'neutral_venue' in next_fix.columns
+        _cols = ['id', 'kickoff_datetime', 'name', 'home_team_id', 'away_team_id',
+                 'bet365_home_odds_decimal', 'bet365_draw_odds_decimal', 'bet365_away_odds_decimal']
+        if _has_neutral:
+            _cols.append('neutral_venue')
+        next_fix = next_fix[_cols]
+        if not _has_neutral:
+            next_fix['neutral_venue'] = False
         next_fix['home_team'] = next_fix['home_team_id'].apply(lambda x: get_team(x, teams))
         next_fix['away_team'] = next_fix['away_team_id'].apply(lambda x: get_team(x, teams))
         next_fix = next_fix.drop(columns=['home_team_id', 'away_team_id'])

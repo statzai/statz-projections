@@ -640,12 +640,21 @@ def make_round_goal_prediction(fixtures, team_ratings, average_home_goals, avera
         v = df[col].values[0]
         return None if (v is None or (isinstance(v, float) and math.isnan(v))) else v
 
+    # For neutral-venue fixtures (e.g. CL/Europa/ECL finals at a third
+    # ground), the home-advantage goals bias is wrong — neither team is
+    # actually playing at home. Use the midpoint of league avg H + avg A
+    # goals as a symmetric baseline for both teams. Per-fixture flag
+    # arrives via the fixtures DataFrame's `neutral_venue` column when
+    # populated (see migration 2026_05_27_165528 + ImportFixtureStoreJob).
+    neutral_baseline = (average_home_goals + average_away_goals) / 2
+
     predictions = []
     for i in range(len(fixtures)):
         id = fixtures.iloc[i]['id']
         kickoff_datetime = fixtures.iloc[i]['kickoff_datetime']
         home_team = fixtures.iloc[i]['home_team']
         away_team = fixtures.iloc[i]['away_team']
+        is_neutral = bool(fixtures.iloc[i].get('neutral_venue', False))
         _home = team_ratings[team_ratings['Team'] == home_team]
         _away = team_ratings[team_ratings['Team'] == away_team]
         home_attack = _safe_rating(_home, 'Attack')
@@ -660,8 +669,10 @@ def make_round_goal_prediction(fixtures, team_ratings, average_home_goals, avera
         home_defense_rating = home_defense if home_defense is not None else 100
         away_attack_rating = away_attack if away_attack is not None else 100
         away_defense_rating = away_defense if away_defense is not None else 100
-        home_goals = (make_goal_prediction(home_attack_rating, away_defense_rating, average_home_goals))
-        away_goals = (make_goal_prediction(away_attack_rating, home_defense_rating, average_away_goals))
+        home_baseline = neutral_baseline if is_neutral else average_home_goals
+        away_baseline = neutral_baseline if is_neutral else average_away_goals
+        home_goals = (make_goal_prediction(home_attack_rating, away_defense_rating, home_baseline))
+        away_goals = (make_goal_prediction(away_attack_rating, home_defense_rating, away_baseline))
         # home_goal_boost, away_goal_boost = get_goal_boost(team_ratings, average_home_goals, average_away_goals)
         # home_goals = (home_goals * home_goal_boost).round(2)
         # away_goals = (away_goals * away_goal_boost).round(2)
@@ -1266,7 +1277,14 @@ def get_team_round_predictions(next_fix, stat_list, fixtures, team_stats, teams,
         id = row['id']
         kickoff_datetime = row['kickoff_datetime']
         league_weightings = original_weightings.copy() if original_weightings is not None else None
-        if neutral_venue == True:
+        # Per-row neutral check — the DataFrame's `neutral_venue` column
+        # (added by ImportFixtureStoreJob via the `fixtures` table)
+        # overrides the function-level kwarg so we can have mixed
+        # neutral/home fixtures in one batch. Falls back to the kwarg
+        # when the column is absent (older code paths or DataFrames
+        # that pre-date the migration).
+        row_neutral = bool(row.get('neutral_venue', neutral_venue))
+        if row_neutral == True:
             home_team_preds = get_team_all_stats_prediction(row['home_team'], row['away_team'], fixtures, stat_list,
                                                             team_stats, teams, stats_types, models, ratings=ratings,
                                                             comp_id=comp_id, league_weightings=league_weightings,
