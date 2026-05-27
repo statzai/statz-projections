@@ -1293,6 +1293,13 @@ def get_team_round_predictions(next_fix, stat_list, fixtures, team_stats, teams,
                                                             team_stats, teams, stats_types, models, ratings=ratings,
                                                             comp_id=comp_id, league_weightings=league_weightings,
                                                             season_id=season_id, games=games, comp_teams=comp_teams)
+            # team_projections.venue is NOT NULL — venue=None propagates
+            # through get_team_all_stats_prediction's Venue field and
+            # blows up the insert. Label the rows with 'N' (Neutral) so
+            # the stat predictions stay venue-agnostic but the row still
+            # has a non-null Venue label for storage / downstream UI.
+            home_team_preds['Venue'] = 'N'
+            away_team_preds['Venue'] = 'N'
         else:
             home_team_preds = get_team_all_stats_prediction(row['home_team'], row['away_team'], fixtures, stat_list,
                                                             team_stats, teams, stats_types, models, ratings=ratings,
