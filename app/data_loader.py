@@ -791,10 +791,14 @@ class LeagueDataLoader:
                    tr.attack AS Attack,
                    tr.defense AS Defense,
                    tr.overall AS Overall,
+                   tr.attack_xg AS Attack_xG,
+                   tr.defense_xg AS Defense_xG,
+                   tr.overall_xg AS Overall_xG,
                    tr.movement AS Movement,
                    tr.inverse AS Inverse,
                    tr.team_id,
-                   tr.competition_id
+                   tr.competition_id,
+                   tr.id AS row_id
             FROM team_ratings tr
             JOIN competitions c ON c.id = tr.competition_id
             JOIN teams t ON t.id = tr.team_id
@@ -804,8 +808,9 @@ class LeagueDataLoader:
             self.team_ratings["Date"] = pd.to_datetime(self.team_ratings["Date"]).dt.date
             # MySQL DECIMAL → Python decimal.Decimal via aiomysql; CSV mode
             # gets float for free. Coerce so arithmetic in get_ratings
-            # (Attack/Defense weighting, Movement subtraction) works.
-            for col in ("Attack", "Defense", "Overall", "Movement"):
+            # (Attack/Defense weighting, Movement subtraction) and the
+            # euro-comp cached-ratings path both work.
+            for col in ("Attack", "Defense", "Overall", "Attack_xG", "Defense_xG", "Overall_xG", "Movement"):
                 if col in self.team_ratings.columns:
                     self.team_ratings[col] = pd.to_numeric(
                         self.team_ratings[col], errors="coerce"

@@ -184,195 +184,48 @@ class EuroCompProjectionService:
 
         ratings_df = pd.DataFrame()
 
-        for league_name, country in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.items():
-            league_id = get_league_id(league_name, comps)
-            league_dashed = league_name.replace(' ', '-').replace('.', '').lower()
-
-            # League config — try DB first, xlsx fallback (mirrors the
-            # pattern in projection_service.py and projection_all_teams_service.py).
-            # Required because dict keys now match competitions.name (e.g.
-            # 'Scottish Premiership'), but League Weightings.xlsx hasn't
-            # been re-labelled — bare xlsx lookup returned empty and .values[0]
-            # crashed the whole euro comp run.
-            db_config = source.projection_config
-            db_row = db_config[db_config['league_name'] == league_name] if not db_config.empty else pd.DataFrame()
-
-            if len(db_row) > 0:
-                r = db_row.iloc[0]
-                league_above = r.get('league_above_name') if pd.notna(r.get('league_above_name')) else None
-                league_below = r.get('league_below_name') if pd.notna(r.get('league_below_name')) else None
-                league_above_attack_weight = float(r.get('above_attack_weight', 1.0))
-                league_above_defense_weight = float(r.get('above_defense_weight', 1.0))
-                league_below_attack_weight = float(r.get('below_attack_weight', 1.0))
-                league_below_defense_weight = float(r.get('below_defense_weight', 1.0))
-                country_code = r.get('transfermarkt_code') if pd.notna(r.get('transfermarkt_code')) else None
-                div = r.get('transfermarkt_div') if pd.notna(r.get('transfermarkt_div')) else None
-                mv_beta = float(r.get('mv_beta', 0.15))
-                odds_beta_val = float(r.get('odds_beta', 0.3))
-            else:
-                league_row = league_weightings_df[league_weightings_df['League'] == league_name]
-                if len(league_row) == 0:
-                    logger.warning(f"[{league}] No config for {league_name} in DB or xlsx — skipping this domestic league in cross-league ratings")
-                    continue
-                league_below = league_row['League Below'].values[0]
-                league_above = league_row['League Above'].values[0]
-                league_below_attack_weight = league_row['League Below Attack Weight'].values[0]
-                league_below_defense_weight = league_row['League Below Defense Weight'].values[0]
-                league_above_attack_weight = league_row['League Above Attack Weight'].values[0]
-                league_above_defense_weight = league_row['League Above Defense Weight'].values[0]
-                country_code = league_row['code'].values[0]
-                div = league_row['div'].values[0]
-                mv_beta = league_row['mv_beta'].values[0]
-                odds_beta_val = league_row['odds_beta'].values[0]
-            weightings = [league_above_attack_weight, league_above_defense_weight, league_below_attack_weight,
-                          league_below_defense_weight]
-
-            if pd.notna(league_above):
-                league_above_id = get_league_id(league_above, comps)
-            else:
-                league_above_id = None
-            if pd.notna(league_below):
-                league_below_id = get_league_id(league_below, comps)
-            else:
-                league_below_id = None
-
-            previous_season_id = get_season_id(league_id, seasons, True)
-            league_current_season_id = get_season_id(league_id, seasons, False)
-            # Between-season fallback: if a domestic league has no
-            # is_current=1 row (e.g. Bundesliga / Ligue 1 right after
-            # the season ended + before Sportmonks creates the next
-            # season), use the previous season's data so the league's
-            # teams still contribute to cross-league ratings. Without
-            # this, euro comp fixtures between teams in the affected
-            # league(s) get dropped at the "team not in ratings" check
-            # — e.g. the CL final with PSG (Ligue 1) was being excluded.
-            if league_current_season_id is None:
-                if previous_season_id is None:
-                    logger.info(f"[{league}] inner {league_name}: no current OR previous season — skipping")
-                    continue
-                logger.info(f"[{league}] inner {league_name}: no current season — falling back to previous season {previous_season_id}")
-                league_current_season_id = previous_season_id
-            standings_league = standings[standings['season_id'] == league_current_season_id]
-            if standings_league.empty:
-                logger.info(f"[{league}] inner {league_name}: standings empty for season {league_current_season_id} — skipping")
-                continue
-            matches_played = standings_league['played'].mode().values[0]
-
-            if league_name == 'League Two':
-                previous_season_id_below = 23846
-            else:
-                previous_season_id_below = get_season_id(league_below_id, seasons, True) if league_below_id else None
-            previous_season_id_above = get_season_id(league_above_id, seasons, True) if league_above_id else None
-
-            ratings = get_ratings(
-                league_id=league_id, previous_team_ratings=all_team_ratings,
-                current_season_id=league_current_season_id,
-                all_season_ids=[league_current_season_id, previous_season_id, previous_season_id_above, previous_season_id_below],
-                comp_teams=comp_teams, teams_df=teams, fixtures_df=fixtures_df, team_stats=team_stats,
-                stats_types=stats_types, weight=0.95, games=30, weightings=weightings,
-                league_above_id=league_above_id, league_below_id=league_below_id,
+        # CACHED-RATINGS PATH (2026-05-27): inner-league ratings are read
+        # from the team_ratings DB table instead of recomputed per league.
+        # The domestic projection cron writes fresh, post-MV, post-dial,
+        # rescaled-to-mean-100 rows nightly — recomputing here was ~25s
+        # per league × 15 leagues = ~6 min of wasted work every euro
+        # comp run. Now we just pick the latest row per (competition_id,
+        # team_id), apply the UEFA coefficient on top, and concat.
+        #
+        # Things that USED to happen in this loop and now don't, because
+        # they're already baked into team_ratings:
+        #   - get_ratings() weighted compute
+        #   - promoted-team blend (handled by domestic projection)
+        #   - market-value adjustment
+        #   - team dials apply
+        #   - per-league rescale-to-mean-100
+        latest_ratings_by_id = {}
+        if all_team_ratings is not None and not all_team_ratings.empty:
+            # Pick latest row per (competition_id, team_id). Frame includes
+            # all leagues so we filter as we iterate.
+            sorted_tr = all_team_ratings.sort_values('Date', ascending=False)
+            latest_ratings_by_id = sorted_tr.drop_duplicates(
+                subset=['competition_id', 'team_id'], keep='first'
             )
 
-            # Promoted team ratings adjustment — try DB first (admin panel),
-            # fall back to per-league xlsx if the league doesn't have DB rows
-            # yet. Mirrors the pattern in projection_service.py.
-            try:
-                db_promoted = source.promoted_team_ratings
-                db_promoted_rows = db_promoted[db_promoted['league_name'] == league_name] if not db_promoted.empty else pd.DataFrame()
+        for league_name, country in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.items():
+            league_id = get_league_id(league_name, comps)
 
-                if len(db_promoted_rows) > 0:
-                    second_ratings = db_promoted_rows[['team_name', 'attack', 'defense']].copy()
-                    second_ratings.columns = ['Team', 'Attack', 'Defense']
-                    logger.info(f"[{league}] {league_name}: promoted team ratings loaded from DB ({len(second_ratings)} teams)")
-                else:
-                    second_ratings = pd.read_excel(os.path.join(data_folder_path, f"{league_name} Promoted Team Ratings.xlsx"))
-                    second_ratings = second_ratings[['Team', 'Attack', 'Defense']]
-                    logger.info(f"[{league}] {league_name}: promoted team ratings loaded from xlsx")
-                second_ratings['Attack'] = (second_ratings['Attack']) * league_below_attack_weight
-                second_ratings['Defense'] = (second_ratings['Defense']) / league_below_defense_weight
-                promoted_teams = second_ratings['Team'].unique()
-                old_weight = 0.85 ** matches_played
-                new_weight = 1 - old_weight
-                ratings_copy = ratings.copy()
-                second_ratings['New Attack'] = second_ratings['Team'].map(ratings_copy.set_index('Team')['Attack'])
-                second_ratings['New Defense'] = second_ratings['Team'].map(ratings_copy.set_index('Team')['Defense'])
-                second_ratings['Attack'] = (second_ratings['Attack'] * old_weight) + (second_ratings['New Attack'] * new_weight)
-                second_ratings['Defense'] = (second_ratings['Defense'] * old_weight) + (second_ratings['New Defense'] * new_weight)
-                second_ratings = second_ratings[['Team', 'Attack', 'Defense']]
-                ratings = ratings[~ratings['Team'].isin(promoted_teams)]
-                ratings = pd.concat([ratings, second_ratings], ignore_index=True)
-                ratings.dropna(inplace=True)
-                ratings.reset_index(drop=True, inplace=True)
-            except:
-                pass
-
-            # Market value adjustment — mappings come from the DB cache (shared with domestic projections)
-            db_mappings = source.transfermarkt_team_mappings
-            if not db_mappings.empty:
-                team_mapping = dict(zip(db_mappings['from_name'], db_mappings['to_name']))
+            if isinstance(latest_ratings_by_id, pd.DataFrame):
+                league_rows = latest_ratings_by_id[latest_ratings_by_id['competition_id'] == league_id]
             else:
-                team_mapping = {}
-                logger.warning(f"[{league}] Team mappings: DB empty — MV adjustment will run unmapped")
+                league_rows = pd.DataFrame()
+            if league_rows.empty:
+                logger.warning(f"[{league}] {league_name}: no team_ratings rows in DB — skipping (run the domestic projection first to seed it)")
+                continue
 
-            try:
-                market_values = await get_market_value_with_cache(league_dashed, div, country_code)
-                market_values['MV Index'] = market_values['Market Value'].astype(float) / market_values['Market Value'].astype(float).median()
-                market_values['MV Index'] = np.log1p(market_values['MV Index'])
-                market_values['MV Index'] = market_values['MV Index'] / market_values['MV Index'].mean()
-                mv_max = market_values['MV Index'].max() if market_values['MV Index'].max() < 2.0 else 2.0
-                mv_min = market_values['MV Index'].min() if market_values['MV Index'].min() > 0.5 else 0.5
-                market_values['MV Index'] = rescale_to_range(market_values['MV Index'], mv_min, mv_max)
-                market_values['MV Index'] = market_values['MV Index'] / market_values['MV Index'].mean()
-                market_values['Team'] = market_values['Team'].replace(team_mapping)
-                market_values['Team'] = market_values['Team'].str.strip()
-
-                ratings['Team'] = ratings['Team'].str.strip()
-                ratings['MV Index'] = ratings['Team'].map(market_values.set_index('Team')['MV Index'])
-                ratings['MV Index Reverse'] = (ratings['MV Index'].mean() / ratings['MV Index'])
-                ratings['MV Index Reverse'] = ratings['MV Index Reverse'] / ratings['MV Index Reverse'].mean()
-
-                teams_to_map = ratings.loc[ratings['MV Index'].isna(), 'Team']
-                if len(teams_to_map) > 0:
-                    logger.warning(f'[{league}] Unmapped teams in {league_name}: {teams_to_map.tolist()}')
-
-                ratings['MV Attack Underperformance'] = (ratings['MV Index'] - ratings['Attack'] / ratings['Attack'].mean()) * mv_beta
-                ratings['MV Attack Underperformance %'] = ratings['MV Attack Underperformance'] / ratings['Attack']
-                ratings['MV Defense Underperformance'] = (ratings['MV Index Reverse'] - ratings['Defense'] / ratings['Defense'].mean()) * mv_beta
-                ratings['MV Defense Underperformance %'] = ratings['MV Defense Underperformance'] / ratings['Defense']
-                ratings['Attack'] = ratings['Attack'] * (1 + ratings['MV Attack Underperformance %'])
-                ratings['Defense'] = ratings['Defense'] * (1 + ratings['MV Defense Underperformance %'])
-                ratings.drop(columns=['MV Defense Underperformance', 'MV Attack Underperformance', 'MV Index',
-                                      'MV Defense Underperformance %', 'MV Attack Underperformance %', 'MV Index Reverse'],
-                             inplace=True)
-                logger.info(f"[{league}] Step: market value adjustments applied")
-            except Exception as _mv_err:
-                logger.warning(f"[{league}] Market value block failed for {league_name}: {_mv_err} — skipping MV adjustment")
-
-            # Manual operator overrides for this inner league. Dials set
-            # against a team's *domestic* league propagate through here
-            # to the cross-league rating set (and therefore through to
-            # the euro comp's fixture projections too). Same post-MV,
-            # pre-rescale position as projection_service._prepare_league.
-            try:
-                from app.repository.team_dials_repo import apply_team_dials_to_ratings
-                await apply_team_dials_to_ratings(
-                    ratings, league_id, teams, f"{league} / {league_name}"
-                )
-            except Exception as _dial_err:
-                logger.warning(f"[{league}] team dials block failed for {league_name}: {_dial_err}")
-
-            # Snapshot post-MV, pre-rescale ratings in xG/game units.
-            ratings['Attack_xG'] = ratings['Attack']
-            ratings['Defense_xG'] = ratings['Defense']
-            ratings['Overall_xG'] = ratings['Attack'] - ratings['Defense']
-
-            for col in ['Attack', 'Defense']:
-                ratings[col] = (ratings[col] / ratings[col].mean()) * 100
-
-            ratings['Overall'] = ratings['Attack'] - ratings['Defense']
-            ratings.sort_values('Overall', ascending=False, inplace=True)
-            ratings.reset_index(drop=True, inplace=True)
-            ratings = ratings[['Team', 'Attack', 'Defense', 'Overall', 'Attack_xG', 'Defense_xG', 'Overall_xG']]
+            ratings = league_rows[['Team', 'Attack', 'Defense', 'Overall',
+                                   'Attack_xG', 'Defense_xG', 'Overall_xG']].copy()
+            # Defensive — strip whitespace on team names so cross-league
+            # joins downstream match cleanly (transfermarkt mapping uses
+            # exact strings).
+            ratings['Team'] = ratings['Team'].astype(str).str.strip()
+            logger.info(f"[{league}] {league_name}: loaded {len(ratings)} teams from team_ratings cache")
 
             # Apply UEFA coefficient — same scaling applies to both the
             # indexed and the xG/game columns so euro-comp rankings stay
