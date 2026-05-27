@@ -114,6 +114,7 @@ class LeagueDataLoader:
         self.player_ids: List[int] = []
         self.team_fixture_ids: List[int] = []     # team-based set
         self.player_fixture_ids: List[int] = []   # player-based set (cross-club + intl)
+        self.comp_fixture_ids: List[int] = []     # comp-based set (narrow scope only)
         self.fixture_ids: List[int] = []          # UNION — drives fixtures_df
 
         # Scoped tables (the 3 big ones)
@@ -314,8 +315,35 @@ class LeagueDataLoader:
         Team-based: any in-scope team's fixtures in last 2yr.
         Player-based: any fixture an in-scope player appeared in (last 2yr) —
         captures cross-club history (e.g. Bernal's Barca games while now at
-        Palace) AND international fixtures (e.g. Saka for England)."""
+        Palace) AND international fixtures (e.g. Saka for England).
+        Comp-based (narrow scope only): all fixtures from comps in scope —
+        ensures league-wide averages (avg_shots/avg_goals/etc) have full
+        coverage even when team_ids is collapsed to just the upcoming
+        fixture's participants."""
         cutoff = datetime.utcnow() - timedelta(days=365 * _FIXTURE_LOOKBACK_YEARS)
+
+        # Comp-based set — only needed when team_ids is artificially narrow
+        # (otherwise team_fixture_ids already covers every team in those
+        # comps, which IS every team in those comps' historical fixtures).
+        self.comp_fixture_ids: List[int] = []
+        if self.restrict_team_ids:
+            comp_ids = list(self._all_scope_comp_ids())
+            if comp_ids:
+                comp_ph = ",".join(["%s"] * len(comp_ids))
+                sql = f"""
+                    SELECT id FROM fixtures
+                    WHERE competition_id IN ({comp_ph})
+                      AND kickoff_datetime >= %s
+                """
+                params = tuple(comp_ids) + (cutoff,)
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, params)
+                    self.comp_fixture_ids = sorted({int(r[0]) for r in await cur.fetchall()})
+                logger.info(
+                    "LeagueDataLoader: narrow scope — pulled %d comp fixtures "
+                    "across %d comps for league-wide aggregations",
+                    len(self.comp_fixture_ids), len(comp_ids),
+                )
 
         # Team-based set
         if self.team_ids:
@@ -350,7 +378,9 @@ class LeagueDataLoader:
             self.player_fixture_ids = []
 
         self.fixture_ids = sorted(
-            set(self.team_fixture_ids) | set(self.player_fixture_ids)
+            set(self.team_fixture_ids)
+            | set(self.player_fixture_ids)
+            | set(self.comp_fixture_ids)
         )
 
     # ── Scoped table loaders ──────────────────────────────────────────────
