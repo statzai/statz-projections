@@ -93,10 +93,21 @@ class LeagueDataLoader:
         # passes the list explicitly. None = single-league scope.
         extra_league_ids: Optional[Sequence[int]] = None,
         league_weightings_xlsx_path: Optional[str] = None,
+        # Narrow the team_ids set directly (skips the
+        # competition_season_teams + league_above/below resolution). Used
+        # by euro-comp runs that already know the small set of teams in
+        # their upcoming fixtures — collapses a ~248-team scope to a
+        # ~2-team scope for finals, cutting loader time from ~7min to
+        # <30s. None = derive scope from league_id + extras (default).
+        restrict_team_ids: Optional[Sequence[int]] = None,
     ):
         self.league_id = int(league_id)
         self.extra_league_ids: List[int] = [int(x) for x in (extra_league_ids or [])]
         self.league_weightings_xlsx_path = league_weightings_xlsx_path
+        self.restrict_team_ids: Optional[List[int]] = (
+            sorted({int(x) for x in restrict_team_ids})
+            if restrict_team_ids is not None else None
+        )
 
         # Resolved scope (populated by _resolve_scope / _resolve_fixture_ids)
         self.team_ids: List[int] = []
@@ -190,7 +201,21 @@ class LeagueDataLoader:
         Team scope = (target_league + extras + league_above + league_below)
         × current 2 seasons. Players = current_team_id IN team_ids.
         Fixture-ID resolution is a separate step (`_resolve_fixture_ids`).
+
+        When `restrict_team_ids` is supplied (euro-comp single-fixture
+        path), skip the comp-derived resolution entirely and use it
+        directly — collapses ~248 → ~2 teams for finals.
         """
+        if self.restrict_team_ids:
+            self.team_ids = list(self.restrict_team_ids)
+            logger.info(
+                "LeagueDataLoader: restrict_team_ids supplied — skipping "
+                "comp-derived scope, using %d teams directly",
+                len(self.team_ids),
+            )
+            await self._resolve_players(conn)
+            return
+
         comp_ids = self._all_scope_comp_ids()
 
         # Add league_above / league_below from competition_projection_config
@@ -243,6 +268,15 @@ class LeagueDataLoader:
             )
             self.team_ids = sorted({int(r[0]) for r in await cur.fetchall()})
 
+        await self._resolve_players(conn)
+
+    async def _resolve_players(self, conn) -> None:
+        """Resolve self.players + self.player_ids from self.team_ids.
+
+        Shared between the standard comp-derived scope path and the
+        `restrict_team_ids` shortcut — both need current_team_id-based
+        player resolution off the same team set.
+        """
         if not self.team_ids:
             logger.warning(
                 "LeagueDataLoader: scope resolution returned 0 teams for comp_id=%s",
@@ -252,10 +286,6 @@ class LeagueDataLoader:
             self.players = pd.DataFrame(columns=['id', 'display_name', 'current_team_id', 'position'])
             return
 
-        # Resolve players via current squad membership.
-        # Loads id + display_name + current_team_id + position (the only
-        # columns downstream projection code consumes). display_name is
-        # stripped here once so service code doesn't need to re-strip.
         async with conn.cursor() as cur:
             placeholders = ",".join(["%s"] * len(self.team_ids))
             await cur.execute(

@@ -79,6 +79,40 @@ class EuroCompProjectionService:
     def is_euro_comp(league: str) -> bool:
         return league in EuroCompProjectionService.EURO_COMPS
 
+    @staticmethod
+    async def _resolve_upcoming_fixture_teams(comp_id: int, date_from, date_to):
+        """Return distinct home+away team_ids for upcoming euro-comp
+        fixtures in the projection window.
+
+        Returns None if zero upcoming fixtures — callers should fall
+        back to the full comp-derived scope so the loader has something
+        sensible to load (the projection then skips cleanly via the
+        empty-next_fix guard downstream).
+        """
+        from app.source_database import get_source_connection, release_source_connection
+        conn = await get_source_connection()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT DISTINCT home_team_id FROM fixtures
+                     WHERE competition_id = %s
+                       AND kickoff_datetime >= %s AND kickoff_datetime <= %s
+                       AND home_team_id IS NOT NULL
+                    UNION
+                    SELECT DISTINCT away_team_id FROM fixtures
+                     WHERE competition_id = %s
+                       AND kickoff_datetime >= %s AND kickoff_datetime <= %s
+                       AND away_team_id IS NOT NULL
+                    """,
+                    (comp_id, date_from, date_to, comp_id, date_from, date_to),
+                )
+                rows = await cur.fetchall()
+        finally:
+            release_source_connection(conn)
+        ids = sorted({int(r[0]) for r in rows})
+        return ids if ids else None
+
     async def projections(self, league_request):
         league = league_request.league or 'Champions League'
         _start_time = time.time()
@@ -102,14 +136,34 @@ class EuroCompProjectionService:
         for dom_league in EuroCompProjectionService.LEAGUE_COUNTRY_DICT.keys():
             domestic_ids.append(await ProjectionService._resolve_league_id_db(dom_league))
         league_weightings_path = os.path.join(data_folder_path, "League Weightings.xlsx")
+
+        # Loader scope narrowing (2026-05-27): we only need history for
+        # the teams playing in upcoming fixtures, not every team across
+        # all 8 domestic top tiers. For a final, that's 2 teams instead
+        # of 248. Loader time goes from ~7min → <30s. team_ratings is
+        # still loaded in full (it's a reference table, not scoped) so
+        # cross-league rating computation downstream still works.
+        #
+        # If 0 upcoming fixtures, restrict_team_ids stays None and the
+        # loader falls back to its full comp-derived scope — safer than
+        # loading nothing, and the projection skips cleanly downstream
+        # via the `len(next_fix) == 0` guard.
+        restrict_team_ids = await self._resolve_upcoming_fixture_teams(
+            comp_id_for_load, date_from, date_to
+        )
+
         _loader = LeagueDataLoader(
             comp_id_for_load,
             extra_league_ids=domestic_ids,
             league_weightings_xlsx_path=league_weightings_path,
+            restrict_team_ids=restrict_team_ids,
         )
         await _loader.load()
         source = _loader
-        logger.info(f"[{league}] Data source: LeagueDataLoader (+8 domestic comps)")
+        logger.info(
+            f"[{league}] Data source: LeagueDataLoader "
+            f"({'narrow scope, ' + str(len(restrict_team_ids)) + ' teams' if restrict_team_ids else 'full scope, +8 domestic comps'})"
+        )
         ProjectionService._current_source = source
         # Loader is per-call so mutation safety isn't a concern. _maybe_copy
         # kept as a no-op shim so call sites don't churn.
