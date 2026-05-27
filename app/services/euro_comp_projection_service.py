@@ -31,6 +31,14 @@ class EuroCompProjectionService:
 
     EURO_COMPS = ['Champions League', 'Europa League', 'Conference League', 'Europa Conference League']
 
+    # Top-5 league competition_ids — used as the baseline for the
+    # Poisson goal averages in euro-comp projections (avg_home_goals /
+    # avg_away_goals). Averaging across all 15 LEAGUE_COUNTRY_DICT
+    # entries pulled the baseline toward smaller-league scoring rates
+    # (Eliteserien/Allsvenskan etc.) that don't reflect realistic
+    # scoring at the euro-comp level. Decision: 2026-05-27.
+    TOP_5_LEAGUE_IDS = [8, 564, 384, 82, 301]  # PL, La Liga, Serie A, Bundesliga, Ligue 1
+
     # Domestic top tiers in scope for Euro-comp cross-league ratings.
     # Every league here MUST have:
     #   - team_ratings rows (so the rescale step has data to anchor on)
@@ -460,11 +468,21 @@ class EuroCompProjectionService:
 
         logger.info(f'[{league}] Projecting {len(next_fix)} fixtures...')
 
-        # Goal averages from all domestic leagues
-        avg_home_goals_list = [get_home_goal_avg(lid, team_stats, fixtures_df, stats_types) for lid in league_ids]
-        avg_away_goals_list = [get_away_goal_avg(lid, team_stats, fixtures_df, stats_types) for lid in league_ids]
-        avg_home_goals = np.mean(avg_home_goals_list)
-        avg_away_goals = np.mean(avg_away_goals_list)
+        # Goal averages from the top-5 leagues only (PL, La Liga, Serie A,
+        # Bundesliga, Ligue 1). All 15 LEAGUE_COUNTRY_DICT entries get
+        # ratings, but smaller leagues' goal rates don't reflect realistic
+        # euro-comp scoring — using them in the Poisson baseline pulled
+        # PSG/Arsenal/etc.'s projections toward Nordic / Austrian averages.
+        # NaN-filter keeps the math safe for between-season leagues whose
+        # team_stats might return None.
+        _goal_avg_pool = [lid for lid in EuroCompProjectionService.TOP_5_LEAGUE_IDS if lid in league_ids]
+        avg_home_goals_list = [get_home_goal_avg(lid, team_stats, fixtures_df, stats_types) for lid in _goal_avg_pool]
+        avg_away_goals_list = [get_away_goal_avg(lid, team_stats, fixtures_df, stats_types) for lid in _goal_avg_pool]
+        avg_home_goals_list = [v for v in avg_home_goals_list if v is not None and not np.isnan(v)]
+        avg_away_goals_list = [v for v in avg_away_goals_list if v is not None and not np.isnan(v)]
+        avg_home_goals = np.mean(avg_home_goals_list) if avg_home_goals_list else 1.5
+        avg_away_goals = np.mean(avg_away_goals_list) if avg_away_goals_list else 1.2
+        logger.info(f"[{league}] Goal averages: avg_home={avg_home_goals:.3f} avg_away={avg_away_goals:.3f} (from {len(avg_home_goals_list)} top-5 leagues)")
 
         score_preds = make_round_goal_prediction(next_fix, ratings, avg_home_goals, avg_away_goals)
 
