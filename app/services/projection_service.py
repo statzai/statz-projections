@@ -1470,7 +1470,12 @@ class ProjectionService:
         pl_projections = pl_projections.merge(_player_lookup, on=['Player', 'Team'], how='left')
 
         _pos_map = {'goalkeeper': 'GK', 'defender': 'DEF', 'midfielder': 'MID', 'attacker': 'FWD'}
-        pl_projections['Position'] = pl_projections['position'].map(_pos_map).fillna(pl_projections['position'])
+        # Final .fillna('Unknown') catches players whose Sportmonks row has
+        # NULL position (3 Allsvenskan players hit this 2026-05-28). The
+        # downstream player_prop_projections.position column is NOT NULL,
+        # so leaving NaN here propagates through to the SQL insert and
+        # kills the whole league's projection run.
+        pl_projections['Position'] = pl_projections['position'].map(_pos_map).fillna(pl_projections['position']).fillna('Unknown')
         pl_projections.loc[pl_projections['Player'] == 'Caoimhin Kelleher', 'Position'] = 'GK'
 
         pl_projections['Saves'] = 0
@@ -3626,7 +3631,12 @@ class ProjectionService:
         pl_projections = pl_projections.merge(_player_lookup, on=['Player', 'Team'], how='left')
 
         _pos_map = {'goalkeeper': 'GK', 'defender': 'DEF', 'midfielder': 'MID', 'attacker': 'FWD'}
-        pl_projections['Position'] = pl_projections['position'].map(_pos_map).fillna(pl_projections['position'])
+        # Final .fillna('Unknown') catches players whose Sportmonks row has
+        # NULL position (3 Allsvenskan players hit this 2026-05-28). The
+        # downstream player_prop_projections.position column is NOT NULL,
+        # so leaving NaN here propagates through to the SQL insert and
+        # kills the whole league's projection run.
+        pl_projections['Position'] = pl_projections['position'].map(_pos_map).fillna(pl_projections['position']).fillna('Unknown')
         pl_projections.loc[pl_projections['Player'] == 'Caoimhin Kelleher', 'Position'] = 'GK'
 
         pl_projections['Saves'] = 0
@@ -4337,7 +4347,12 @@ class ProjectionService:
         pl_projections = pl_projections.merge(_player_lookup, on=['Player', 'Team'], how='left')
 
         _pos_map = {'goalkeeper': 'GK', 'defender': 'DEF', 'midfielder': 'MID', 'attacker': 'FWD'}
-        pl_projections['Position'] = pl_projections['position'].map(_pos_map).fillna(pl_projections['position'])
+        # Final .fillna('Unknown') catches players whose Sportmonks row has
+        # NULL position (3 Allsvenskan players hit this 2026-05-28). The
+        # downstream player_prop_projections.position column is NOT NULL,
+        # so leaving NaN here propagates through to the SQL insert and
+        # kills the whole league's projection run.
+        pl_projections['Position'] = pl_projections['position'].map(_pos_map).fillna(pl_projections['position']).fillna('Unknown')
         pl_projections.loc[pl_projections['Player'] == 'Caoimhin Kelleher', 'Position'] = 'GK'
         pl_projections['Saves'] = 0
 
