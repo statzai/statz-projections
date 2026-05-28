@@ -43,6 +43,7 @@ from app.services.tournament_configs import WC_2026
 from app.services.tournament_simulation_service import TournamentSimulator
 from app.services.wc_team_stat_service import WcTeamStatService
 from app.services.wc_player_stat_service import WcPlayerStatService
+from app.services.wc_fantasy_points_service import WcFantasyPointsService
 from app.source_database import get_source_connection, release_source_connection
 
 logger = logging.getLogger("wc_projection")
@@ -261,6 +262,20 @@ class WcProjectionService:
                 logger.exception(f"WC player-stat projection failed: {e}")
                 player_stat_result = {'error': str(e)}
 
+        # Step 6: Per-(fixture, player) WC Fantasy point projections — feeds
+        # the WC Fantasy planner at /wc/my-team. Reads the long-format
+        # player_projections rows from step 5 + fixture_projections from
+        # step 2 (for clean-sheet probabilities) and applies the 2026 FIFA
+        # WC Fantasy scoring rules.
+        fantasy_points_result = None
+        if commit:
+            try:
+                fantasy_points_result = await WcFantasyPointsService().project(commit=commit)
+                logger.info(f"WC fantasy points projection: {fantasy_points_result}")
+            except Exception as e:
+                logger.exception(f"WC fantasy points projection failed: {e}")
+                fantasy_points_result = {'error': str(e)}
+
         return {
             'n_total': len(fixtures),
             'n_projected': len(inserts),
@@ -272,4 +287,5 @@ class WcProjectionService:
             'tournament_simulation': sim_result,
             'team_stat_projection': team_stat_result,
             'player_stat_projection': player_stat_result,
+            'fantasy_points_projection': fantasy_points_result,
         }
