@@ -711,6 +711,58 @@ class WcTeamStatService:
                 df = df[[c for c in cols_for_insert if c in df.columns]]
                 df['kickoff_datetime'] = pd.to_datetime(df['kickoff_datetime'])
 
+                # ── Team-stat odds-blend ──
+                # Reels each team's projected stats (corners/cards/shots/
+                # SoT/fouls/tackles) toward bookmaker expected via the
+                # cascade. Same WC blend weight as 1X2 goals (ODDS_BETA=0.5).
+                # All WC fixtures are bracket-home/away; bookies still
+                # price by that role even at neutral venues.
+                from app.services.odds_blend import (
+                    load_team_stat_odds, blend_team_stat,
+                    TEAM_STAT_BOOKIE_PRIORITY, STAT_COLUMN_TO_MARKET,
+                )
+                from app.services.wc_projection_service import ODDS_BETA as _WC_ODDS_BETA
+                _fix_ids = df['fixture_id'].astype(int).unique().tolist()
+                _odds_per_market = {}
+                for _market, _books in TEAM_STAT_BOOKIE_PRIORITY.items():
+                    _odds_per_market[_market] = await load_team_stat_odds(
+                        conn, _fix_ids, _market, _books,
+                    )
+
+                # Build fixture → home_team_name map from wc_fixtures_rows.
+                _fid_to_home_name = {row[0]: row[4] for row in wc_fixtures_rows}
+
+                _seen = set()
+                for _i in range(len(df)):
+                    fid = int(df['fixture_id'].iloc[_i])
+                    if fid in _seen:
+                        continue
+                    _seen.add(fid)
+                    pair = df[df['fixture_id'] == fid]
+                    if len(pair) != 2:
+                        continue
+                    home_name = _fid_to_home_name.get(fid)
+                    if not home_name:
+                        continue
+                    home_mask = (df['fixture_id'] == fid) & (df['Team'] == home_name)
+                    away_mask = (df['fixture_id'] == fid) & (df['Team'] != home_name)
+
+                    for stat_col, market in STAT_COLUMN_TO_MARKET.items():
+                        if stat_col not in df.columns:
+                            continue
+                        try:
+                            mh = float(df.loc[home_mask, stat_col].iloc[0])
+                            ma = float(df.loc[away_mask, stat_col].iloc[0])
+                        except (IndexError, KeyError, ValueError):
+                            continue
+                        fh, fa = blend_team_stat(
+                            mh, ma,
+                            _odds_per_market.get(market, {}).get(fid, {}),
+                            market, _WC_ODDS_BETA,
+                        )
+                        df.loc[home_mask, stat_col] = round(fh, 2)
+                        df.loc[away_mask, stat_col] = round(fa, 2)
+
                 # Delete existing WC rows before insert (idempotent — mirrors
                 # the wc_projection_service pattern).
                 async with conn.cursor() as cur:

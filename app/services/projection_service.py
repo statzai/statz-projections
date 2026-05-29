@@ -1394,6 +1394,65 @@ class ProjectionService:
              'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
+
+        # ── Team-stat odds-blend ──
+        # Reels each team's projected stats (corners/cards/shots/SoT/
+        # fouls/tackles) toward bookmaker expected via the cascade
+        # (Path 1 per-team ladder → Path 1.5 partial+match → Path 2
+        # match-split via model ratio). Per-stat bookmaker priority
+        # lists in TEAM_STAT_BOOKIE_PRIORITY. Falls back to model
+        # unchanged for any (stat, fixture) with no usable book data.
+        from app.services.odds_blend import (
+            load_team_stat_odds, blend_team_stat,
+            TEAM_STAT_BOOKIE_PRIORITY, STAT_COLUMN_TO_MARKET,
+        )
+        _fix_ids = team_projections['fixture_id'].astype(int).unique().tolist()
+        _odds_per_market = {}
+        _odds_conn = await get_source_connection()
+        try:
+            for _market, _books in TEAM_STAT_BOOKIE_PRIORITY.items():
+                _odds_per_market[_market] = await load_team_stat_odds(
+                    _odds_conn, _fix_ids, _market, _books,
+                )
+        finally:
+            release_source_connection(_odds_conn)
+
+        _fid_to_home_team = {}
+        for _fid in _fix_ids:
+            _row = next_fix[next_fix['id'] == _fid]
+            if not _row.empty:
+                _fid_to_home_team[_fid] = _row['home_team'].iloc[0]
+
+        _seen_fixtures = set()
+        for _i in range(len(team_projections)):
+            fid = int(team_projections['fixture_id'].iloc[_i])
+            if fid in _seen_fixtures:
+                continue
+            _seen_fixtures.add(fid)
+            pair = team_projections[team_projections['fixture_id'] == fid]
+            if len(pair) != 2:
+                continue
+            home_team_name = _fid_to_home_team.get(fid)
+            if not home_team_name:
+                continue
+            home_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] == home_team_name)
+            away_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] != home_team_name)
+
+            for stat_col, market in STAT_COLUMN_TO_MARKET.items():
+                if stat_col not in team_projections.columns:
+                    continue
+                try:
+                    mh = float(team_projections.loc[home_mask, stat_col].iloc[0])
+                    ma = float(team_projections.loc[away_mask, stat_col].iloc[0])
+                except (IndexError, KeyError, ValueError):
+                    continue
+                fh, fa = blend_team_stat(
+                    mh, ma,
+                    _odds_per_market.get(market, {}).get(fid, {}),
+                    market, odds_beta,
+                )
+                team_projections.loc[home_mask, stat_col] = round(fh, 2)
+                team_projections.loc[away_mask, stat_col] = round(fa, 2)
         
         # print(team_projections['Assists', 'Key Passes'])
         # In[ ]:
@@ -3051,6 +3110,65 @@ class ProjectionService:
              'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
+
+        # ── Team-stat odds-blend ──
+        # Reels each team's projected stats (corners/cards/shots/SoT/
+        # fouls/tackles) toward bookmaker expected via the cascade
+        # (Path 1 per-team ladder → Path 1.5 partial+match → Path 2
+        # match-split via model ratio). Per-stat bookmaker priority
+        # lists in TEAM_STAT_BOOKIE_PRIORITY. Falls back to model
+        # unchanged for any (stat, fixture) with no usable book data.
+        from app.services.odds_blend import (
+            load_team_stat_odds, blend_team_stat,
+            TEAM_STAT_BOOKIE_PRIORITY, STAT_COLUMN_TO_MARKET,
+        )
+        _fix_ids = team_projections['fixture_id'].astype(int).unique().tolist()
+        _odds_per_market = {}
+        _odds_conn = await get_source_connection()
+        try:
+            for _market, _books in TEAM_STAT_BOOKIE_PRIORITY.items():
+                _odds_per_market[_market] = await load_team_stat_odds(
+                    _odds_conn, _fix_ids, _market, _books,
+                )
+        finally:
+            release_source_connection(_odds_conn)
+
+        _fid_to_home_team = {}
+        for _fid in _fix_ids:
+            _row = next_fix[next_fix['id'] == _fid]
+            if not _row.empty:
+                _fid_to_home_team[_fid] = _row['home_team'].iloc[0]
+
+        _seen_fixtures = set()
+        for _i in range(len(team_projections)):
+            fid = int(team_projections['fixture_id'].iloc[_i])
+            if fid in _seen_fixtures:
+                continue
+            _seen_fixtures.add(fid)
+            pair = team_projections[team_projections['fixture_id'] == fid]
+            if len(pair) != 2:
+                continue
+            home_team_name = _fid_to_home_team.get(fid)
+            if not home_team_name:
+                continue
+            home_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] == home_team_name)
+            away_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] != home_team_name)
+
+            for stat_col, market in STAT_COLUMN_TO_MARKET.items():
+                if stat_col not in team_projections.columns:
+                    continue
+                try:
+                    mh = float(team_projections.loc[home_mask, stat_col].iloc[0])
+                    ma = float(team_projections.loc[away_mask, stat_col].iloc[0])
+                except (IndexError, KeyError, ValueError):
+                    continue
+                fh, fa = blend_team_stat(
+                    mh, ma,
+                    _odds_per_market.get(market, {}).get(fid, {}),
+                    market, odds_beta,
+                )
+                team_projections.loc[home_mask, stat_col] = round(fh, 2)
+                team_projections.loc[away_mask, stat_col] = round(fa, 2)
         
         team_projections_save = team_projections.copy()
         
@@ -3648,6 +3766,65 @@ class ProjectionService:
              'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
+
+        # ── Team-stat odds-blend ──
+        # Reels each team's projected stats (corners/cards/shots/SoT/
+        # fouls/tackles) toward bookmaker expected via the cascade
+        # (Path 1 per-team ladder → Path 1.5 partial+match → Path 2
+        # match-split via model ratio). Per-stat bookmaker priority
+        # lists in TEAM_STAT_BOOKIE_PRIORITY. Falls back to model
+        # unchanged for any (stat, fixture) with no usable book data.
+        from app.services.odds_blend import (
+            load_team_stat_odds, blend_team_stat,
+            TEAM_STAT_BOOKIE_PRIORITY, STAT_COLUMN_TO_MARKET,
+        )
+        _fix_ids = team_projections['fixture_id'].astype(int).unique().tolist()
+        _odds_per_market = {}
+        _odds_conn = await get_source_connection()
+        try:
+            for _market, _books in TEAM_STAT_BOOKIE_PRIORITY.items():
+                _odds_per_market[_market] = await load_team_stat_odds(
+                    _odds_conn, _fix_ids, _market, _books,
+                )
+        finally:
+            release_source_connection(_odds_conn)
+
+        _fid_to_home_team = {}
+        for _fid in _fix_ids:
+            _row = next_fix[next_fix['id'] == _fid]
+            if not _row.empty:
+                _fid_to_home_team[_fid] = _row['home_team'].iloc[0]
+
+        _seen_fixtures = set()
+        for _i in range(len(team_projections)):
+            fid = int(team_projections['fixture_id'].iloc[_i])
+            if fid in _seen_fixtures:
+                continue
+            _seen_fixtures.add(fid)
+            pair = team_projections[team_projections['fixture_id'] == fid]
+            if len(pair) != 2:
+                continue
+            home_team_name = _fid_to_home_team.get(fid)
+            if not home_team_name:
+                continue
+            home_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] == home_team_name)
+            away_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] != home_team_name)
+
+            for stat_col, market in STAT_COLUMN_TO_MARKET.items():
+                if stat_col not in team_projections.columns:
+                    continue
+                try:
+                    mh = float(team_projections.loc[home_mask, stat_col].iloc[0])
+                    ma = float(team_projections.loc[away_mask, stat_col].iloc[0])
+                except (IndexError, KeyError, ValueError):
+                    continue
+                fh, fa = blend_team_stat(
+                    mh, ma,
+                    _odds_per_market.get(market, {}).get(fid, {}),
+                    market, odds_beta,
+                )
+                team_projections.loc[home_mask, stat_col] = round(fh, 2)
+                team_projections.loc[away_mask, stat_col] = round(fa, 2)
         
         # print(team_projections['Assists', 'Key Passes'])
         # In[ ]:
@@ -4383,6 +4560,65 @@ class ProjectionService:
              'Key Passes'] + stat_list + ['Fouls Drawn', 'Saves'] + _extra_def_cols]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
         logger.debug(f"[{league}] team_projections columns ready")
+
+        # ── Team-stat odds-blend ──
+        # Reels each team's projected stats (corners/cards/shots/SoT/
+        # fouls/tackles) toward bookmaker expected via the cascade
+        # (Path 1 per-team ladder → Path 1.5 partial+match → Path 2
+        # match-split via model ratio). Per-stat bookmaker priority
+        # lists in TEAM_STAT_BOOKIE_PRIORITY. Falls back to model
+        # unchanged for any (stat, fixture) with no usable book data.
+        from app.services.odds_blend import (
+            load_team_stat_odds, blend_team_stat,
+            TEAM_STAT_BOOKIE_PRIORITY, STAT_COLUMN_TO_MARKET,
+        )
+        _fix_ids = team_projections['fixture_id'].astype(int).unique().tolist()
+        _odds_per_market = {}
+        _odds_conn = await get_source_connection()
+        try:
+            for _market, _books in TEAM_STAT_BOOKIE_PRIORITY.items():
+                _odds_per_market[_market] = await load_team_stat_odds(
+                    _odds_conn, _fix_ids, _market, _books,
+                )
+        finally:
+            release_source_connection(_odds_conn)
+
+        _fid_to_home_team = {}
+        for _fid in _fix_ids:
+            _row = next_fix[next_fix['id'] == _fid]
+            if not _row.empty:
+                _fid_to_home_team[_fid] = _row['home_team'].iloc[0]
+
+        _seen_fixtures = set()
+        for _i in range(len(team_projections)):
+            fid = int(team_projections['fixture_id'].iloc[_i])
+            if fid in _seen_fixtures:
+                continue
+            _seen_fixtures.add(fid)
+            pair = team_projections[team_projections['fixture_id'] == fid]
+            if len(pair) != 2:
+                continue
+            home_team_name = _fid_to_home_team.get(fid)
+            if not home_team_name:
+                continue
+            home_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] == home_team_name)
+            away_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] != home_team_name)
+
+            for stat_col, market in STAT_COLUMN_TO_MARKET.items():
+                if stat_col not in team_projections.columns:
+                    continue
+                try:
+                    mh = float(team_projections.loc[home_mask, stat_col].iloc[0])
+                    ma = float(team_projections.loc[away_mask, stat_col].iloc[0])
+                except (IndexError, KeyError, ValueError):
+                    continue
+                fh, fa = blend_team_stat(
+                    mh, ma,
+                    _odds_per_market.get(market, {}).get(fid, {}),
+                    market, odds_beta,
+                )
+                team_projections.loc[home_mask, stat_col] = round(fh, 2)
+                team_projections.loc[away_mask, stat_col] = round(fa, 2)
         
         # print(team_projections['Assists', 'Key Passes'])
         # In[ ]:

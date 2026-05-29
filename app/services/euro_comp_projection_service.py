@@ -627,6 +627,18 @@ class EuroCompProjectionService:
         finally:
             release_source_connection(_conn)
 
+        # Pre-build fixture → home_team_name map so we can identify
+        # which team_projections row is home regardless of Venue tag
+        # (neutral-venue finals tag both rows 'N', so we can't rely on
+        # Venue='H'/'A' alone).
+        _team_id_to_name = dict(zip(teams['id'], teams['name'])) if teams is not None else {}
+        _fid_to_home_team = {}
+        for _fid in _fix_ids:
+            _row = next_fix[next_fix['id'] == _fid]
+            if _row.empty:
+                continue
+            _fid_to_home_team[_fid] = _row['home_team'].iloc[0]
+
         # Apply per-fixture for each stat. One pass per fixture updates
         # both home+away rows for every stat column.
         _seen_fixtures = set()
@@ -640,10 +652,9 @@ class EuroCompProjectionService:
             if len(pair) != 2:
                 continue
 
-            fix_row = next_fix[next_fix['id'] == fid]
-            if fix_row.empty:
+            home_team_name = _fid_to_home_team.get(fid)
+            if not home_team_name:
                 continue
-            home_team_name = fix_row['home_team'].iloc[0]
             home_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] == home_team_name)
             away_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] != home_team_name)
 
