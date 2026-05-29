@@ -54,10 +54,12 @@ HOST_BONUS = 1.10
 HOST_PENALTY = 0.90   # opp playing in a host country: -10% expected goals
 HOSTS = {'United States', 'Mexico', 'Canada'}
 
-# Match domestic projection_service.py defaults. odds_beta=0.3 = bet365 1X2
-# blend weight; boost=1.0 = no draw inflation (international games don't
-# need the draw nudge that league football gets per-comp via projection_config).
-ODDS_BETA = 0.3
+# odds_beta = bet365 goal-line blend weight (0 = pure model, 1 = pure bookie).
+# Bumped to 0.5 alongside the goals odds-blend cascade rewrite 2026-05-29 —
+# matches euro_comp_projection_service. boost=1.0 = no draw inflation
+# (international games don't need the draw nudge that league football
+# gets per-comp via projection_config).
+ODDS_BETA = 0.5
 BOOST = 1.0
 
 
@@ -116,6 +118,16 @@ class WcProjectionService:
                 fixtures = await cur.fetchall()
                 logger.info(f"Loaded {len(fixtures)} upcoming WC fixtures")
 
+            # Pre-load bet365 goals over/under for these fixtures. The
+            # blend cascade (paths 1-3) uses per-team and match-total
+            # ladders directly; path 4 (legacy 1X2) is the fallback.
+            from app.services.odds_blend import (
+                load_goals_odds_for_fixtures,
+                compute_final_goals_and_probs,
+            )
+            wc_fixture_ids = [row[0] for row in fixtures]
+            goals_odds_map = await load_goals_odds_for_fixtures(conn, wc_fixture_ids)
+
             n_blended = 0
             n_skipped_unknown_team = 0
             inserts = []
@@ -136,33 +148,34 @@ class WcProjectionService:
                     away_goals *= HOST_BONUS
                     home_goals *= HOST_PENALTY
 
-                # === Score prediction — same code path as projection_service.py:947-980 ===
+                # Score prediction via the shared odds-blend cascade.
+                # Paths 1-3 consume bet365 goals over/under directly;
+                # path 4 (legacy 1X2 blend + reverse-solve) is the
+                # fallback; path 5 (no odds at all) leaves model output
+                # unchanged.
+                bookie_1x2_pct = None
                 if oh and od and oa:
-                    # Implied % (with vig), de-vig by dividing by overround
                     home_odds_pct = (1.0 / float(oh)) * 100
                     draw_odds_pct = (1.0 / float(od)) * 100
                     away_odds_pct = (1.0 / float(oa)) * 100
                     bookie_margin = 1 + (home_odds_pct + draw_odds_pct + away_odds_pct - 100) / 100
-                    home_odds_pct /= bookie_margin
-                    draw_odds_pct /= bookie_margin
-                    away_odds_pct /= bookie_margin
-
-                    home_win_prob, draw_prob, away_win_prob = get_result_probs(home_goals, away_goals, BOOST)
-                    adjusted_home_win_prob = home_win_prob + ((home_odds_pct - home_win_prob) * ODDS_BETA)
-                    adjusted_draw_prob = draw_prob + ((draw_odds_pct - draw_prob) * ODDS_BETA)
-                    adjusted_away_win_prob = away_win_prob + ((away_odds_pct - away_win_prob) * ODDS_BETA)
-                    new_home_goals, new_away_goals = find_inputs_for_probs(
-                        home_goals, away_goals,
-                        adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob,
-                        BOOST,
+                    bookie_1x2_pct = (
+                        home_odds_pct / bookie_margin / 100.0,
+                        draw_odds_pct / bookie_margin / 100.0,
+                        away_odds_pct / bookie_margin / 100.0,
                     )
                     n_blended += 1
-                else:
-                    new_home_goals = home_goals
-                    new_away_goals = away_goals
-                    adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = get_result_probs(
-                        home_goals, away_goals, BOOST
+
+                new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
+                    compute_final_goals_and_probs(
+                        fid,
+                        float(home_goals), float(away_goals),
+                        bookie_1x2_pct,
+                        goals_odds_map.get(fid, {}),
+                        ODDS_BETA,
+                        BOOST,
                     )
+                )
 
                 home_clean_sheet = poisson.pmf(0, new_away_goals)
                 away_clean_sheet = poisson.pmf(0, new_home_goals)

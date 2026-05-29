@@ -904,6 +904,23 @@ class ProjectionService:
         over_1 = []
         over_2 = []
         btts = []
+
+        # Pre-load bet365 goals over/under for the upcoming fixtures.
+        # The cascade in compute_final_goals_and_probs (paths 1-3) uses
+        # per-team + match-total ladders directly; path 4 (legacy 1X2
+        # reverse-solve) is the fallback when those markets are absent.
+        from app.services.odds_blend import (
+            load_goals_odds_for_fixtures,
+            compute_final_goals_and_probs,
+        )
+        _odds_conn = await get_source_connection()
+        try:
+            goals_odds_map = await load_goals_odds_for_fixtures(
+                _odds_conn, next_fix['id'].tolist(),
+            )
+        finally:
+            release_source_connection(_odds_conn)
+
         for i in range(len(score_preds)):
             bookie_margin = 1 + (
                         score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
@@ -913,25 +930,28 @@ class ProjectionService:
             score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
-            if pd.isna(score_preds['Home Odds %'][i]) == False:
-                home_win_prob, draw_prob, away_win_prob = get_result_probs(home_goals, away_goals, boost)
-                adjusted_home_win_prob = home_win_prob + ((score_preds['Home Odds %'][i] - home_win_prob) * odds_beta)
-                adjusted_draw_prob = draw_prob + ((score_preds['Draw Odds %'][i] - draw_prob) * odds_beta)
-                adjusted_away_win_prob = away_win_prob + ((score_preds['Away Odds %'][i] - away_win_prob) * odds_beta)
-                new_home_goals, new_away_goals = find_inputs_for_probs(home_goals, away_goals, adjusted_home_win_prob,
-                                                                       adjusted_draw_prob, adjusted_away_win_prob,
-                                                                       boost)
-                score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
-                score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
-            else:
-                new_home_goals = home_goals
-                new_away_goals = away_goals
-                adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = get_result_probs(home_goals,
-                                                                                                      away_goals, boost)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
+            bookie_1x2_pct = None
+            if not pd.isna(score_preds['Home Odds %'][i]):
+                bookie_1x2_pct = (
+                    float(score_preds['Home Odds %'][i]) / 100.0,
+                    float(score_preds['Draw Odds %'][i]) / 100.0,
+                    float(score_preds['Away Odds %'][i]) / 100.0,
+                )
+            fixture_id = int(next_fix['id'].iloc[i])
+            new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
+                compute_final_goals_and_probs(
+                    fixture_id,
+                    float(home_goals), float(away_goals),
+                    bookie_1x2_pct,
+                    goals_odds_map.get(fixture_id, {}),
+                    odds_beta,
+                    boost,
+                )
+            )
+            score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
+            score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
+            home_clean_sheet = poisson.pmf(0, new_away_goals)
+            away_clean_sheet = poisson.pmf(0, new_home_goals)
             x = np.arange(0, 9)
             y = np.arange(0, 9)
             X, Y = np.meshgrid(x, y)
@@ -2047,6 +2067,23 @@ class ProjectionService:
         over_1 = []
         over_2 = []
         btts = []
+
+        # Pre-load bet365 goals over/under for the upcoming fixtures.
+        # The cascade in compute_final_goals_and_probs (paths 1-3) uses
+        # per-team + match-total ladders directly; path 4 (legacy 1X2
+        # reverse-solve) is the fallback when those markets are absent.
+        from app.services.odds_blend import (
+            load_goals_odds_for_fixtures,
+            compute_final_goals_and_probs,
+        )
+        _odds_conn = await get_source_connection()
+        try:
+            goals_odds_map = await load_goals_odds_for_fixtures(
+                _odds_conn, next_fix['id'].tolist(),
+            )
+        finally:
+            release_source_connection(_odds_conn)
+
         for i in range(len(score_preds)):
             bookie_margin = 1 + (
                     score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
@@ -2056,25 +2093,28 @@ class ProjectionService:
             score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
-            if pd.isna(score_preds['Home Odds %'][i]) == False:
-                home_win_prob, draw_prob, away_win_prob = get_result_probs(home_goals, away_goals, boost)
-                adjusted_home_win_prob = home_win_prob + ((score_preds['Home Odds %'][i] - home_win_prob) * odds_beta)
-                adjusted_draw_prob = draw_prob + ((score_preds['Draw Odds %'][i] - draw_prob) * odds_beta)
-                adjusted_away_win_prob = away_win_prob + ((score_preds['Away Odds %'][i] - away_win_prob) * odds_beta)
-                new_home_goals, new_away_goals = find_inputs_for_probs(home_goals, away_goals, adjusted_home_win_prob,
-                                                                       adjusted_draw_prob, adjusted_away_win_prob,
-                                                                       boost)
-                score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
-                score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
-            else:
-                new_home_goals = home_goals
-                new_away_goals = away_goals
-                adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = get_result_probs(home_goals,
-                                                                                                      away_goals, boost)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
+            bookie_1x2_pct = None
+            if not pd.isna(score_preds['Home Odds %'][i]):
+                bookie_1x2_pct = (
+                    float(score_preds['Home Odds %'][i]) / 100.0,
+                    float(score_preds['Draw Odds %'][i]) / 100.0,
+                    float(score_preds['Away Odds %'][i]) / 100.0,
+                )
+            fixture_id = int(next_fix['id'].iloc[i])
+            new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
+                compute_final_goals_and_probs(
+                    fixture_id,
+                    float(home_goals), float(away_goals),
+                    bookie_1x2_pct,
+                    goals_odds_map.get(fixture_id, {}),
+                    odds_beta,
+                    boost,
+                )
+            )
+            score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
+            score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
+            home_clean_sheet = poisson.pmf(0, new_away_goals)
+            away_clean_sheet = poisson.pmf(0, new_home_goals)
             x = np.arange(0, 9)
             y = np.arange(0, 9)
             X, Y = np.meshgrid(x, y)
@@ -2230,6 +2270,23 @@ class ProjectionService:
         over_1 = []
         over_2 = []
         btts = []
+
+        # Pre-load bet365 goals over/under for the upcoming fixtures.
+        # The cascade in compute_final_goals_and_probs (paths 1-3) uses
+        # per-team + match-total ladders directly; path 4 (legacy 1X2
+        # reverse-solve) is the fallback when those markets are absent.
+        from app.services.odds_blend import (
+            load_goals_odds_for_fixtures,
+            compute_final_goals_and_probs,
+        )
+        _odds_conn = await get_source_connection()
+        try:
+            goals_odds_map = await load_goals_odds_for_fixtures(
+                _odds_conn, next_fix['id'].tolist(),
+            )
+        finally:
+            release_source_connection(_odds_conn)
+
         for i in range(len(score_preds)):
             bookie_margin = 1 + (
                     score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
@@ -2239,25 +2296,28 @@ class ProjectionService:
             score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
-            if pd.isna(score_preds['Home Odds %'][i]) == False:
-                home_win_prob, draw_prob, away_win_prob = get_result_probs(home_goals, away_goals, boost)
-                adjusted_home_win_prob = home_win_prob + ((score_preds['Home Odds %'][i] - home_win_prob) * odds_beta)
-                adjusted_draw_prob = draw_prob + ((score_preds['Draw Odds %'][i] - draw_prob) * odds_beta)
-                adjusted_away_win_prob = away_win_prob + ((score_preds['Away Odds %'][i] - away_win_prob) * odds_beta)
-                new_home_goals, new_away_goals = find_inputs_for_probs(home_goals, away_goals, adjusted_home_win_prob,
-                                                                       adjusted_draw_prob, adjusted_away_win_prob,
-                                                                       boost)
-                score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
-                score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
-            else:
-                new_home_goals = home_goals
-                new_away_goals = away_goals
-                adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = get_result_probs(home_goals,
-                                                                                                      away_goals, boost)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
+            bookie_1x2_pct = None
+            if not pd.isna(score_preds['Home Odds %'][i]):
+                bookie_1x2_pct = (
+                    float(score_preds['Home Odds %'][i]) / 100.0,
+                    float(score_preds['Draw Odds %'][i]) / 100.0,
+                    float(score_preds['Away Odds %'][i]) / 100.0,
+                )
+            fixture_id = int(next_fix['id'].iloc[i])
+            new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
+                compute_final_goals_and_probs(
+                    fixture_id,
+                    float(home_goals), float(away_goals),
+                    bookie_1x2_pct,
+                    goals_odds_map.get(fixture_id, {}),
+                    odds_beta,
+                    boost,
+                )
+            )
+            score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
+            score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
+            home_clean_sheet = poisson.pmf(0, new_away_goals)
+            away_clean_sheet = poisson.pmf(0, new_home_goals)
             x = np.arange(0, 9)
             y = np.arange(0, 9)
             X, Y = np.meshgrid(x, y)
@@ -2583,6 +2643,23 @@ class ProjectionService:
         over_1 = []
         over_2 = []
         btts = []
+
+        # Pre-load bet365 goals over/under for the upcoming fixtures.
+        # The cascade in compute_final_goals_and_probs (paths 1-3) uses
+        # per-team + match-total ladders directly; path 4 (legacy 1X2
+        # reverse-solve) is the fallback when those markets are absent.
+        from app.services.odds_blend import (
+            load_goals_odds_for_fixtures,
+            compute_final_goals_and_probs,
+        )
+        _odds_conn = await get_source_connection()
+        try:
+            goals_odds_map = await load_goals_odds_for_fixtures(
+                _odds_conn, next_fix['id'].tolist(),
+            )
+        finally:
+            release_source_connection(_odds_conn)
+
         for i in range(len(score_preds)):
             bookie_margin = 1 + (
                     score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
@@ -2592,25 +2669,28 @@ class ProjectionService:
             score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
-            if pd.isna(score_preds['Home Odds %'][i]) == False:
-                home_win_prob, draw_prob, away_win_prob = get_result_probs(home_goals, away_goals, boost)
-                adjusted_home_win_prob = home_win_prob + ((score_preds['Home Odds %'][i] - home_win_prob) * odds_beta)
-                adjusted_draw_prob = draw_prob + ((score_preds['Draw Odds %'][i] - draw_prob) * odds_beta)
-                adjusted_away_win_prob = away_win_prob + ((score_preds['Away Odds %'][i] - away_win_prob) * odds_beta)
-                new_home_goals, new_away_goals = find_inputs_for_probs(home_goals, away_goals, adjusted_home_win_prob,
-                                                                       adjusted_draw_prob, adjusted_away_win_prob,
-                                                                       boost)
-                score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
-                score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
-            else:
-                new_home_goals = home_goals
-                new_away_goals = away_goals
-                adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = get_result_probs(home_goals,
-                                                                                                      away_goals, boost)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
+            bookie_1x2_pct = None
+            if not pd.isna(score_preds['Home Odds %'][i]):
+                bookie_1x2_pct = (
+                    float(score_preds['Home Odds %'][i]) / 100.0,
+                    float(score_preds['Draw Odds %'][i]) / 100.0,
+                    float(score_preds['Away Odds %'][i]) / 100.0,
+                )
+            fixture_id = int(next_fix['id'].iloc[i])
+            new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
+                compute_final_goals_and_probs(
+                    fixture_id,
+                    float(home_goals), float(away_goals),
+                    bookie_1x2_pct,
+                    goals_odds_map.get(fixture_id, {}),
+                    odds_beta,
+                    boost,
+                )
+            )
+            score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
+            score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
+            home_clean_sheet = poisson.pmf(0, new_away_goals)
+            away_clean_sheet = poisson.pmf(0, new_home_goals)
             x = np.arange(0, 9)
             y = np.arange(0, 9)
             X, Y = np.meshgrid(x, y)
@@ -3104,6 +3184,23 @@ class ProjectionService:
         over_1 = []
         over_2 = []
         btts = []
+
+        # Pre-load bet365 goals over/under for the upcoming fixtures.
+        # The cascade in compute_final_goals_and_probs (paths 1-3) uses
+        # per-team + match-total ladders directly; path 4 (legacy 1X2
+        # reverse-solve) is the fallback when those markets are absent.
+        from app.services.odds_blend import (
+            load_goals_odds_for_fixtures,
+            compute_final_goals_and_probs,
+        )
+        _odds_conn = await get_source_connection()
+        try:
+            goals_odds_map = await load_goals_odds_for_fixtures(
+                _odds_conn, next_fix['id'].tolist(),
+            )
+        finally:
+            release_source_connection(_odds_conn)
+
         for i in range(len(score_preds)):
             bookie_margin = 1 + (
                         score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
@@ -3113,25 +3210,28 @@ class ProjectionService:
             score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
-            if pd.isna(score_preds['Home Odds %'][i]) == False:
-                home_win_prob, draw_prob, away_win_prob = get_result_probs(home_goals, away_goals, boost)
-                adjusted_home_win_prob = home_win_prob + ((score_preds['Home Odds %'][i] - home_win_prob) * odds_beta)
-                adjusted_draw_prob = draw_prob + ((score_preds['Draw Odds %'][i] - draw_prob) * odds_beta)
-                adjusted_away_win_prob = away_win_prob + ((score_preds['Away Odds %'][i] - away_win_prob) * odds_beta)
-                new_home_goals, new_away_goals = find_inputs_for_probs(home_goals, away_goals, adjusted_home_win_prob,
-                                                                       adjusted_draw_prob, adjusted_away_win_prob,
-                                                                       boost)
-                score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
-                score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
-            else:
-                new_home_goals = home_goals
-                new_away_goals = away_goals
-                adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = get_result_probs(home_goals,
-                                                                                                      away_goals, boost)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
+            bookie_1x2_pct = None
+            if not pd.isna(score_preds['Home Odds %'][i]):
+                bookie_1x2_pct = (
+                    float(score_preds['Home Odds %'][i]) / 100.0,
+                    float(score_preds['Draw Odds %'][i]) / 100.0,
+                    float(score_preds['Away Odds %'][i]) / 100.0,
+                )
+            fixture_id = int(next_fix['id'].iloc[i])
+            new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
+                compute_final_goals_and_probs(
+                    fixture_id,
+                    float(home_goals), float(away_goals),
+                    bookie_1x2_pct,
+                    goals_odds_map.get(fixture_id, {}),
+                    odds_beta,
+                    boost,
+                )
+            )
+            score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
+            score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
+            home_clean_sheet = poisson.pmf(0, new_away_goals)
+            away_clean_sheet = poisson.pmf(0, new_home_goals)
             x = np.arange(0, 9)
             y = np.arange(0, 9)
             X, Y = np.meshgrid(x, y)
@@ -3822,6 +3922,23 @@ class ProjectionService:
         over_1 = []
         over_2 = []
         btts = []
+
+        # Pre-load bet365 goals over/under for the upcoming fixtures.
+        # The cascade in compute_final_goals_and_probs (paths 1-3) uses
+        # per-team + match-total ladders directly; path 4 (legacy 1X2
+        # reverse-solve) is the fallback when those markets are absent.
+        from app.services.odds_blend import (
+            load_goals_odds_for_fixtures,
+            compute_final_goals_and_probs,
+        )
+        _odds_conn = await get_source_connection()
+        try:
+            goals_odds_map = await load_goals_odds_for_fixtures(
+                _odds_conn, next_fix['id'].tolist(),
+            )
+        finally:
+            release_source_connection(_odds_conn)
+
         for i in range(len(score_preds)):
             bookie_margin = 1 + (
                     score_preds.loc[i, 'Home Odds %'] + score_preds.loc[i, 'Draw Odds %'] + score_preds.loc[
@@ -3831,25 +3948,28 @@ class ProjectionService:
             score_preds.loc[i, 'Away Odds %'] = (score_preds.loc[i, 'Away Odds %'] / bookie_margin).round(2)
             home_goals = score_preds['Home Goals'][i]
             away_goals = score_preds['Away Goals'][i]
-            if pd.isna(score_preds['Home Odds %'][i]) == False:
-                home_win_prob, draw_prob, away_win_prob = get_result_probs(home_goals, away_goals, boost)
-                adjusted_home_win_prob = home_win_prob + ((score_preds['Home Odds %'][i] - home_win_prob) * odds_beta)
-                adjusted_draw_prob = draw_prob + ((score_preds['Draw Odds %'][i] - draw_prob) * odds_beta)
-                adjusted_away_win_prob = away_win_prob + ((score_preds['Away Odds %'][i] - away_win_prob) * odds_beta)
-                new_home_goals, new_away_goals = find_inputs_for_probs(home_goals, away_goals, adjusted_home_win_prob,
-                                                                       adjusted_draw_prob, adjusted_away_win_prob,
-                                                                       boost)
-                score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
-                score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
-            else:
-                new_home_goals = home_goals
-                new_away_goals = away_goals
-                adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = get_result_probs(home_goals,
-                                                                                                      away_goals, boost)
-                home_clean_sheet = poisson.pmf(0, new_away_goals)
-                away_clean_sheet = poisson.pmf(0, new_home_goals)
+            bookie_1x2_pct = None
+            if not pd.isna(score_preds['Home Odds %'][i]):
+                bookie_1x2_pct = (
+                    float(score_preds['Home Odds %'][i]) / 100.0,
+                    float(score_preds['Draw Odds %'][i]) / 100.0,
+                    float(score_preds['Away Odds %'][i]) / 100.0,
+                )
+            fixture_id = int(next_fix['id'].iloc[i])
+            new_home_goals, new_away_goals, adjusted_home_win_prob, adjusted_draw_prob, adjusted_away_win_prob = (
+                compute_final_goals_and_probs(
+                    fixture_id,
+                    float(home_goals), float(away_goals),
+                    bookie_1x2_pct,
+                    goals_odds_map.get(fixture_id, {}),
+                    odds_beta,
+                    boost,
+                )
+            )
+            score_preds.loc[i, 'Home Goals'] = round(new_home_goals, 2)
+            score_preds.loc[i, 'Away Goals'] = round(new_away_goals, 2)
+            home_clean_sheet = poisson.pmf(0, new_away_goals)
+            away_clean_sheet = poisson.pmf(0, new_home_goals)
             x = np.arange(0, 9)
             y = np.arange(0, 9)
             X, Y = np.meshgrid(x, y)
