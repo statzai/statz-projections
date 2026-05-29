@@ -27,11 +27,13 @@ doesn't fully travel club↔country, so club-filled games import a little of
 the player's club role. Accepted for now; a rate-based rework is the v2.
 
 Pipeline:
-  1. Load tournament_squads (competition 732, status='active').
+  1. Load the FIFA-game player pool (wc_players JOIN wc_squads, linked
+     subset via WcAutoLinker). Position comes from wc_players.position
+     (GK/DEF/MID/FWD), which is what the fantasy game scores by.
   2. Build each player's 30-game main window + xG window, then load the
      player + team stats for those fixtures.
   3. Load the WC team_projections rows from step 4.
-  4. For each (WC fixture, team) with a confirmed squad, for each player:
+  4. For each (WC fixture, team) in the FIFA pool, for each player:
        share = Σ(w·player_stat) / Σ(w·team_stat) over the main window.
      Goals:   share blended 50/50 with the player's xG share — the xG share
               uses the SEPARATE xG window so a player with no xG in their
@@ -249,14 +251,29 @@ async def _load_data(conn) -> dict:
     await conn.rollback()
 
     async with conn.cursor() as cur:
-        # 1. Confirmed WC squads — the player universe.
+        # 1. FIFA-game player pool — the universe is whoever shows up in
+        #    the official FIFA WC fantasy game, joined to their Statz id
+        #    via the WcAutoLinker mapping. ~1,352 (player, team) rows
+        #    covering 48 nations after the 2026-05-29 mapping broadening.
+        #
+        #    Position comes straight from FIFA (GK/DEF/MID/FWD ENUM) —
+        #    this is the source of truth the fantasy game scores by, and
+        #    avoids the Sportmonks-position drift (club LW listed as DEF
+        #    for his country) that the Ali Abdi case surfaced in v1.5.
+        #
+        #    Skipped (player_id IS NULL): the 102 FIFA players we haven't
+        #    been able to link yet — mostly transliteration-heavy squads
+        #    (Iraq, Iran, Morocco, Saudi etc.). The nightly wc:link
+        #    retry will re-attempt as Statz ingests more international
+        #    fixtures.
         await cur.execute(
             """
-            SELECT team_id, player_id, position_group
-            FROM tournament_squads
-            WHERE competition_id = %s AND status = 'active'
+            SELECT s.team_id, p.player_id, p.position
+            FROM wc_players p
+            JOIN wc_squads s ON s.id = p.squad_id
+            WHERE p.player_id IS NOT NULL
+              AND s.team_id IS NOT NULL
             """,
-            (WC_COMP_ID,),
         )
         squad_rows = await cur.fetchall()
         squad_player_ids = sorted({r[1] for r in squad_rows})
@@ -633,7 +650,7 @@ class WcPlayerStatService:
             players = data['players']
 
             if not squads:
-                logger.warning("No confirmed WC squads in tournament_squads — nothing to project.")
+                logger.warning("No linked FIFA-game players in wc_players — nothing to project. Run `php artisan wc:link --players-only` on statz.")
                 return {'n_player_rows': 0, 'n_squads': 0, 'committed': False}
             if not team_projections:
                 logger.warning("No WC team_projections found — run WcTeamStatService first.")
