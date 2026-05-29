@@ -175,6 +175,76 @@ async def projections(request: LeagueRequest, background_tasks: BackgroundTasks)
     return {"status": "started", "league": request.league}
 
 
+class FixtureProjectionRequest(BaseModel):
+    fixture_id: int
+
+
+@router.post("/fixture")
+async def project_fixture(request: FixtureProjectionRequest, background_tasks: BackgroundTasks):
+    """Re-project a single fixture (typically triggered when a confirmed
+    lineup arrives). Reuses the standard projection pipeline with a
+    `fixture_ids` filter so all per-fixture rows (fixture_projections,
+    team_projections, player_projections, player_prop_projections, and
+    wc_fantasy_projections for WC) get refreshed with current odds and
+    the latest lineup data.
+
+    Guards:
+      - Fixture must be in our projection scope (row exists in
+        fixture_projections). Prevents re-projecting fixtures we don't
+        normally cover.
+      - Kickoff must be > 5 minutes in the future. Buffer accounts for
+        queue lag + projection runtime; closer to kickoff isn't worth
+        the race against the whistle.
+    """
+    from app.source_database import get_source_connection, release_source_connection
+
+    fid = request.fixture_id
+    conn = await get_source_connection()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT f.id, f.kickoff_datetime, c.name AS comp_name,
+                       EXISTS(SELECT 1 FROM fixture_projections WHERE fixture_id = f.id) AS already_projected
+                FROM fixtures f
+                JOIN competitions c ON c.id = f.competition_id
+                WHERE f.id = %s
+                """,
+                (fid,),
+            )
+            row = await cur.fetchone()
+    finally:
+        release_source_connection(conn)
+
+    if not row:
+        return {"status": "skipped", "reason": "fixture not found", "fixture_id": fid}
+
+    _, kickoff_dt, comp_name, already_projected = row
+    if not already_projected:
+        return {"status": "skipped", "reason": "fixture not previously projected", "fixture_id": fid}
+
+    now_utc = datetime.now(timezone.utc)
+    # kickoff_datetime stored UTC-naive in MySQL — attach UTC for the compare
+    if kickoff_dt.tzinfo is None:
+        kickoff_dt = kickoff_dt.replace(tzinfo=timezone.utc)
+    if (kickoff_dt - now_utc).total_seconds() < 300:
+        return {"status": "skipped", "reason": "kickoff within 5 minutes", "fixture_id": fid}
+
+    # WC per-fixture re-projection runs the whole orchestrator (rating
+    # refresh + tournament sim) which is slow + not strictly necessary
+    # for one fixture. Deferred to v2.
+    if WcProjectionService.is_wc_comp(comp_name):
+        return {"status": "skipped", "reason": "WC per-fixture re-projection not yet supported (v2)",
+                "fixture_id": fid, "competition": comp_name}
+
+    if not _try_acquire_lock():
+        return {"status": "busy", "message": "A projection is already running. Wait for it to finish."}
+
+    league_request = LeagueRequest(league=comp_name, fixture_ids=[fid])
+    background_tasks.add_task(_run_single_league, league_request)
+    return {"status": "started", "fixture_id": fid, "competition": comp_name}
+
+
 @router.post("/fixtures")
 async def fixtures(request: LeagueRequest):
     return await projection_service.fixtures(request)
