@@ -71,56 +71,58 @@ def _margin_stripped_over_prob(over_price: Optional[float], under_price: Optiona
 
 
 def fit_lambda_from_ladder(ladder: list) -> Optional[float]:
-    """Fit a single Poisson λ to a list of over/under lines.
+    """Fit a single Poisson λ to a list of over/under lines via
+    squared-error MLE in probability space.
 
     ladder = [(line: float, over_price: float|None, under_price: float|None), ...]
 
-    Picks the line nearest 50/50 (price closest to 2.0 on both sides),
-    converts to margin-stripped P(X > floor(line)), and inverts the
-    Poisson CDF to recover λ. Returns None if no usable line.
+    For each usable line, compute margin-stripped P(X > floor(line)) and
+    minimise the sum of squared errors over all lines:
 
-    Single-line fit is sufficient because the bet365 ladder is generated
-    from one internal λ — additional lines mostly confirm what the
-    midpoint already says.
+        λ* = argmin Σ_i (P_poisson(X ≥ k_i, λ) - p_i_bookie)^2
+
+    This automatically down-weights extreme lines: their margin-stripped
+    probabilities are tiny and barely change with λ, so they contribute
+    little to the fit. Near-50/50 lines, by contrast, are highly
+    λ-sensitive and dominate. No special tier logic needed.
+
+    Filters out lines with degenerate prices (≤ 1.05 or ≥ 30): those
+    are bet365 no-take stubs, not real prices — they carry no info.
+
+    Returns None if no usable line.
     """
     if not ladder:
         return None
 
-    # Score each line by how close its over/under prices are to 2.0
-    # (the 50/50 point where margin distortion is smallest). Lines with
-    # only one side available still usable; deprioritise vs paired.
-    best_score = float('inf')
-    best_line = None
-    best_p_over = None
+    # Build the list of (k, p_over) pairs we'll fit against.
+    rows = []
     for line, over_price, under_price in ladder:
-        p_over = _margin_stripped_over_prob(over_price, under_price)
+        # Drop no-take stubs — bet365 won't actually take action at
+        # these prices, they're placeholder odds carrying no signal.
+        op = over_price if (over_price and 1.05 < over_price < 30) else None
+        up = under_price if (under_price and 1.05 < under_price < 30) else None
+        if op is None and up is None:
+            continue
+        p_over = _margin_stripped_over_prob(op, up)
         if p_over is None or p_over <= 0 or p_over >= 1:
             continue
-        # Prefer lines near 50/50 (over_price near 2.0)
-        if over_price and under_price:
-            score = abs(over_price - 2.0) + abs(under_price - 2.0)
-        elif over_price:
-            score = abs(over_price - 2.0) + 1.0  # penalise single-side
-        else:
-            score = abs(under_price - 2.0) + 1.0
-        if score < best_score:
-            best_score = score
-            best_line = line
-            best_p_over = p_over
+        k = int(math.floor(line)) + 1
+        rows.append((k, p_over))
 
-    if best_line is None:
+    if not rows:
         return None
 
-    # Invert P(X > floor(line)) = P(X >= floor(line) + 1) = best_p_over
-    k = int(math.floor(best_line)) + 1
-
-    # Grid search λ ∈ (0.05, 6.0) step 0.01; refine around best.
+    # Grid search λ ∈ (0.05, 6.0) step 0.01; minimise sum-sq error
+    # across every line. With a typical 4-5 line ladder this is ~3000
+    # PMF calls per fit — instant.
     best_lam = None
     best_err = float('inf')
     lam_hundredths = 5
     while lam_hundredths <= 600:
         lam = lam_hundredths / 100.0
-        err = abs(_poisson_p_geq(k, lam) - best_p_over)
+        err = 0.0
+        for k, p_bookie in rows:
+            err += (_poisson_p_geq(k, lam) - p_bookie) ** 2
         if err < best_err:
             best_err = err
             best_lam = lam
