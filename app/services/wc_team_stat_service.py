@@ -742,8 +742,12 @@ class WcTeamStatService:
                         conn, _fix_ids, _market, _books,
                     )
 
-                # Build fixture → home_team_name map from wc_fixtures_rows.
-                _fid_to_home_name = {row[0]: row[4] for row in wc_fixtures_rows}
+                # Build fixture → home_team_name map from data['wc_fixtures'].
+                # (data['wc_fixtures'] is the list-of-dicts return from
+                # _load_data, with each item carrying 'fixture_id' +
+                # 'home_name'. wc_fixtures_rows was the raw SQL list
+                # local to _load_data — not available here.)
+                _fid_to_home_name = {wc['fixture_id']: wc['home_name'] for wc in data['wc_fixtures']}
 
                 _seen = set()
                 for _i in range(len(df)):
