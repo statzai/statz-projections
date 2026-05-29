@@ -34,6 +34,16 @@ logger = logging.getLogger("odds_blend")
 # confirmed to cover the goals market.
 BOOKIE_PRIORITY = ['bet365']
 
+# Per-stat bookmaker priority for team-stat blending. bet365 always
+# tried first per user rule (2026-05-29); rest ordered by per-team
+# coverage observed on UCL final + sample PL fixtures. See
+# [[goals_odds_blend_cascade]] memory for the data backing each
+# ordering decision.
+TEAM_STAT_BOOKIE_PRIORITY = {
+    'corners': ['bet365', 'boylesports', 'midnite', 'coral', 'ladbrokes'],
+    # Future: 'cards', 'shots', 'sot', 'fouls', 'tackles'
+}
+
 
 def _poisson_pmf(k: int, lam: float) -> float:
     if lam <= 0:
@@ -343,6 +353,160 @@ async def load_goals_odds_for_fixtures(conn, fixture_ids: list) -> dict:
         len(result), len(fixture_ids),
     )
     return result
+
+
+async def load_team_stat_odds(conn, fixture_ids: list, market: str, books: list) -> dict:
+    """Generalised totals-odds loader for any market across multiple
+    books. Same shape as load_goals_odds_for_fixtures but parameterised:
+
+        market ∈ {'goals', 'corners', 'cards', 'shots', 'sot', 'fouls', 'tackles', ...}
+        books  ⊆ {'bet365', 'ladbrokes', 'coral', 'midnite', 'boylesports'}
+
+    Returns nested dict keyed by fixture_id:
+        {fid: {book: {'match': [...], 'home': [...], 'away': [...]}}}
+
+    Each list element is (line, over_price, under_price). Books not
+    carrying the market for a fixture get an empty dict; downstream
+    cascade will fall through them.
+
+    Single SELECT per book — all schemas identical (fixture_id, team_id,
+    market, line, side, price). Rows deduped via MAX(price) per
+    (fixture, team, line, side) to handle the multi-fetch repeats.
+    """
+    if not fixture_ids or not books:
+        return {}
+
+    # Fixture → (home_team_id, away_team_id) map for tagging per-team rows.
+    fix_ph = ",".join(["%s"] * len(fixture_ids))
+    async with conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT id, home_team_id, away_team_id FROM fixtures WHERE id IN ({fix_ph})",
+            tuple(fixture_ids),
+        )
+        fixture_teams = {row[0]: (row[1], row[2]) for row in await cur.fetchall()}
+
+    result = {}
+    for book in books:
+        table = f"{book}_totals_odds"
+        async with conn.cursor() as cur:
+            await cur.execute(
+                f"""
+                SELECT fixture_id, team_id, line, side, MAX(price) AS price
+                FROM {table}
+                WHERE market = %s AND fixture_id IN ({fix_ph})
+                GROUP BY fixture_id, team_id, line, side
+                """,
+                (market,) + tuple(fixture_ids),
+            )
+            rows = await cur.fetchall()
+
+        buckets = {}  # buckets[(fid, role)][line] = {'over': p, 'under': p}
+        for fid, team_id, line, side, price in rows:
+            teams = fixture_teams.get(fid)
+            if not teams:
+                continue
+            home_tid, away_tid = teams
+            if team_id is None:
+                role = 'match'
+            elif team_id == home_tid:
+                role = 'home'
+            elif team_id == away_tid:
+                role = 'away'
+            else:
+                continue
+            buckets.setdefault((fid, role), {}).setdefault(float(line), {})[side] = float(price)
+
+        for (fid, role), by_line in buckets.items():
+            ladder = [(line, sides.get('over'), sides.get('under'))
+                      for line, sides in sorted(by_line.items())]
+            result.setdefault(fid, {}).setdefault(book, {})[role] = ladder
+
+    n_with_data = sum(1 for fid in fixture_ids if result.get(fid))
+    logger.info(
+        "Loaded %s odds for %d/%d fixtures across %s",
+        market, n_with_data, len(fixture_ids), ",".join(books),
+    )
+    return result
+
+
+def derive_team_stat_lambdas(
+    odds_for_fixture: dict,
+    model_home: float,
+    model_away: float,
+    books_priority: list,
+) -> Optional[Tuple[float, float]]:
+    """Cascade for team-stat (corners, cards, shots etc.) lambdas.
+
+    Per priority book: try per-team ladders first (full or partial),
+    then match-total split via model ratio. First book that returns a
+    usable result wins.
+
+    No 1X2 analog for team stats — cascade is shorter than goals:
+      Path 1   per-team ladders (both teams)     → fit each side
+      Path 1.5 one per-team + match total        → derive missing side
+      Path 2   match total only                  → split via model ratio
+      Path 3   nothing for this book             → fall through to next
+
+    Returns (lambda_home_bookie, lambda_away_bookie) or None.
+    """
+    for book in books_priority:
+        book_data = odds_for_fixture.get(book, {})
+        if not book_data:
+            continue
+
+        home_ladder = book_data.get('home', [])
+        away_ladder = book_data.get('away', [])
+        match_ladder = book_data.get('match', [])
+
+        lam_h = fit_lambda_from_ladder(home_ladder)
+        lam_a = fit_lambda_from_ladder(away_ladder)
+        lam_t = fit_lambda_from_ladder(match_ladder)
+
+        # Path 1 — both per-team ladders
+        if lam_h is not None and lam_a is not None:
+            return lam_h, lam_a
+
+        # Path 1.5 — one per-team + match total
+        if lam_h is not None and lam_t is not None:
+            return lam_h, max(0.01, lam_t - lam_h)
+        if lam_a is not None and lam_t is not None:
+            return max(0.01, lam_t - lam_a), lam_a
+
+        # Path 2 — match total only, split by model ratio
+        if lam_t is not None:
+            denom = model_home + model_away
+            if denom > 0:
+                share = model_home / denom
+                return lam_t * share, lam_t * (1.0 - share)
+
+        # This book has nothing usable — fall through.
+
+    return None
+
+
+def blend_team_stat(
+    model_home: float,
+    model_away: float,
+    odds_for_fixture: dict,
+    market: str,
+    blend_weight: float,
+) -> Tuple[float, float]:
+    """Blend a single team-stat (e.g. corners) per fixture in goal space.
+
+    Returns (final_home, final_away). Falls back to model unchanged
+    if no book in the priority list has usable data.
+    """
+    books = TEAM_STAT_BOOKIE_PRIORITY.get(market, ['bet365'])
+    bookie_lambdas = derive_team_stat_lambdas(
+        odds_for_fixture, model_home, model_away, books,
+    )
+    if bookie_lambdas is None:
+        return model_home, model_away
+
+    lh_b, la_b = bookie_lambdas
+    fh = (1.0 - blend_weight) * model_home + blend_weight * lh_b
+    fa = (1.0 - blend_weight) * model_away + blend_weight * la_b
+    return fh, fa
 
 
 def compute_final_goals_and_probs(

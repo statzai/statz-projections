@@ -605,6 +605,53 @@ class EuroCompProjectionService:
         ]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
 
+        # ── Corners odds-blend ──
+        # Reels each team's projected corners toward bookie expected
+        # corners via the same cascade pattern used for goals (Path 1
+        # per-team ladder, Path 1.5 partial+match, Path 2 match split).
+        # Per-stat bookmaker priority list in TEAM_STAT_BOOKIE_PRIORITY.
+        from app.services.odds_blend import load_team_stat_odds, blend_team_stat, TEAM_STAT_BOOKIE_PRIORITY
+        _conn = await get_source_connection()
+        try:
+            _corner_odds_map = await load_team_stat_odds(
+                _conn,
+                team_projections['fixture_id'].astype(int).unique().tolist(),
+                'corners',
+                TEAM_STAT_BOOKIE_PRIORITY['corners'],
+            )
+        finally:
+            release_source_connection(_conn)
+
+        # Apply per-fixture (one shared blend updates both home+away).
+        _seen_fixtures = set()
+        for _i in range(len(team_projections)):
+            fid = int(team_projections['fixture_id'].iloc[_i])
+            if fid in _seen_fixtures:
+                continue
+            _seen_fixtures.add(fid)
+
+            pair = team_projections[team_projections['fixture_id'] == fid]
+            if len(pair) != 2:
+                continue
+
+            # Identify which row is home / away via the fixture row.
+            fix_row = next_fix[next_fix['id'] == fid]
+            if fix_row.empty:
+                continue
+            home_team_name = fix_row['home_team'].iloc[0]
+            home_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] == home_team_name)
+            away_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] != home_team_name)
+
+            try:
+                mh = float(team_projections.loc[home_mask, 'Corners'].iloc[0])
+                ma = float(team_projections.loc[away_mask, 'Corners'].iloc[0])
+            except (IndexError, KeyError):
+                continue
+
+            fh, fa = blend_team_stat(mh, ma, _corner_odds_map.get(fid, {}), 'corners', odds_weight)
+            team_projections.loc[home_mask, 'Corners'] = round(fh, 2)
+            team_projections.loc[away_mask, 'Corners'] = round(fa, 2)
+
         # Save team projections
         team_projections_save = team_projections.copy()
         team_projections_save.drop(['Assists', 'Fouls Drawn', 'Saves', 'Key Passes'], axis=1, inplace=True)
