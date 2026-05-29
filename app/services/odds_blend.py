@@ -118,33 +118,48 @@ def fit_lambda_from_ladder(ladder: list) -> Optional[float]:
     if not ladder:
         return None
 
-    # Build the list of (k, p_over) pairs we'll fit against.
+    # Build the (k, p_over) pairs to fit. Drop lines where the
+    # margin-stripped over-probability is outside [0.10, 0.90] —
+    # outside that band three things go wrong simultaneously:
+    #   1. The Poisson tail is insensitive to λ → line carries no
+    #      real info anyway (squared error stays near 0 for any λ).
+    #   2. Bookmaker margins skew asymmetrically at the extremes
+    #      (long-shots carry wider margin than the lay side), so the
+    #      "margin-stripped" probability isn't actually stripped clean.
+    #   3. Most extreme-price lines are bookmaker stubs ("won't take
+    #      this bet" placeholder prices) rather than real markets.
+    # Filtering on the derived probability subsumes both "over @ 20.0"
+    # (P_over ~0.05) and "over @ 1.05" (P_over ~0.95) without
+    # hardcoding magic price thresholds. Works the same for over-only
+    # ladders (single-side raw 1/price still goes through the filter).
     rows = []
+    max_line_kept = 0.0
     for line, over_price, under_price in ladder:
-        # Drop no-take stubs — bet365 won't actually take action at
-        # these prices, they're placeholder odds carrying no signal.
-        op = over_price if (over_price and 1.05 < over_price < 30) else None
-        up = under_price if (under_price and 1.05 < under_price < 30) else None
-        if op is None and up is None:
+        p_over = _margin_stripped_over_prob(over_price, under_price)
+        if p_over is None:
             continue
-        p_over = _margin_stripped_over_prob(op, up)
-        if p_over is None or p_over <= 0 or p_over >= 1:
+        if p_over < 0.10 or p_over > 0.90:
             continue
         k = int(math.floor(line)) + 1
         rows.append((k, p_over))
+        if line > max_line_kept:
+            max_line_kept = line
 
     if not rows:
         return None
 
-    # Grid search λ ∈ (0.05, 40.0) step 0.01; minimise sum-sq error
-    # across every line. Upper bound covers team stats like tackles
-    # and passes (typical 15-30/team) plus comfortable headroom for
-    # high-volume international fixtures. Goals/corners/cards stay
-    # well below the cap. Still instant (~20k PMF calls per fit).
+    # Data-driven λ search cap: the deepest kept line + 5 buffer.
+    # True λ is essentially always below the deepest priced line —
+    # otherwise the bookmaker would offer further lines. +5 gives the
+    # grid headroom without slowing the fit. Self-scales to any stat:
+    # goals (line up to ~6.5 → cap ~12), corners (~16 → ~21), tackles
+    # (~22 → ~27), passes (~30 → ~35).
+    lambda_upper_hundredths = int((max_line_kept + 5.0) * 100)
+
     best_lam = None
     best_err = float('inf')
     lam_hundredths = 5
-    while lam_hundredths <= 4000:
+    while lam_hundredths <= lambda_upper_hundredths:
         lam = lam_hundredths / 100.0
         err = 0.0
         for k, p_bookie in rows:
