@@ -285,7 +285,7 @@ def _load_all_leagues_models() -> Dict[str, object]:
     return models
 
 
-async def _load_data(conn) -> dict:
+async def _load_data(conn, fixture_ids_filter=None) -> dict:
     """Pull everything in one round-trip set: international fixtures, team
     stats, team_ratings, upcoming WC fixtures (+ their fixture_projections
     goals lambdas)."""
@@ -338,9 +338,17 @@ async def _load_data(conn) -> dict:
         )
         ratings_rows = await cur.fetchall()
 
-        # 4. Upcoming WC fixtures (with both teams known — skip placeholders)
+        # 4. Upcoming WC fixtures (with both teams known — skip placeholders).
+        # Per-fixture mode scopes the query to fixture_ids_filter so only
+        # the requested fixture's row gets projected.
+        wc_fid_filter_sql = ""
+        wc_fid_filter_params: tuple = ()
+        if fixture_ids_filter:
+            ph_wcf = ",".join(["%s"] * len(fixture_ids_filter))
+            wc_fid_filter_sql = f" AND f.id IN ({ph_wcf})"
+            wc_fid_filter_params = tuple(fixture_ids_filter)
         await cur.execute(
-            """
+            f"""
             SELECT f.id, f.kickoff_datetime, f.home_team_id, f.away_team_id,
                    th.name AS home_name, ta.name AS away_name,
                    fp.home_goals, fp.away_goals
@@ -351,9 +359,10 @@ async def _load_data(conn) -> dict:
             WHERE f.competition_id = %s
               AND f.kickoff_datetime > NOW()
               AND f.state_id = 1
+              {wc_fid_filter_sql}
             ORDER BY f.kickoff_datetime
             """,
-            (WC_COMP_ID,),
+            (WC_COMP_ID,) + wc_fid_filter_params,
         )
         wc_fixtures_rows = await cur.fetchall()
 
@@ -543,10 +552,14 @@ def _compute_avg_shots_per_goal(fixtures_df: pd.DataFrame, stats_df: pd.DataFram
 class WcTeamStatService:
     """Compute + write per-team stat projections for upcoming WC fixtures."""
 
-    async def project(self, commit: bool = True) -> dict:
+    async def project(self, commit: bool = True, fixture_ids: list = None) -> dict:
+        """fixture_ids: optional list — when set, scope the projection
+        to just those WC fixtures (used by per-fixture re-projection
+        triggered on confirmed-lineup arrival)."""
         logger.info(
             f"WC team-stat projection start — commit={commit}, "
-            f"opp_adj_strength={OPP_ADJ_STRENGTH} (no game cap)"
+            f"opp_adj_strength={OPP_ADJ_STRENGTH} (no game cap), "
+            f"fixture_ids={fixture_ids}"
         )
 
         models = _load_all_leagues_models()
@@ -558,7 +571,7 @@ class WcTeamStatService:
 
         conn = await get_source_connection()
         try:
-            data = await _load_data(conn)
+            data = await _load_data(conn, fixture_ids_filter=fixture_ids)
             n_fixtures = len(data['fixtures_df'])
             n_stats_rows = len(data['stats_df'])
             n_ratings = len(data['ratings_df'])
@@ -764,14 +777,23 @@ class WcTeamStatService:
                         df.loc[away_mask, stat_col] = round(fa, 2)
 
                 # Delete existing WC rows before insert (idempotent — mirrors
-                # the wc_projection_service pattern).
+                # the wc_projection_service pattern). Per-fixture mode
+                # scopes the delete to the requested fixtures only so we
+                # don't wipe other WC team projections.
                 async with conn.cursor() as cur:
-                    await cur.execute(
-                        """DELETE tp FROM team_projections tp
-                           JOIN fixtures f ON f.id = tp.fixture_id
-                           WHERE f.competition_id = %s""",
-                        (WC_COMP_ID,),
-                    )
+                    if fixture_ids:
+                        del_ph = ",".join(["%s"] * len(fixture_ids))
+                        await cur.execute(
+                            f"DELETE FROM team_projections WHERE fixture_id IN ({del_ph})",
+                            tuple(fixture_ids),
+                        )
+                    else:
+                        await cur.execute(
+                            """DELETE tp FROM team_projections tp
+                               JOIN fixtures f ON f.id = tp.fixture_id
+                               WHERE f.competition_id = %s""",
+                            (WC_COMP_ID,),
+                        )
                 await conn.commit()
 
                 # Use the existing insert helper — no teams/comp_teams since

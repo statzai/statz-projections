@@ -84,23 +84,71 @@ class WcProjectionService:
           {n_total, n_projected, n_blended, n_skipped_unknown_team,
            n_ratings, ratings_snapshot_date, committed}
         """
-        logger.info(f"WC projection start — commit={commit}, odds_beta={ODDS_BETA}, boost={BOOST}")
+        # Per-fixture mode (set via LeagueRequest.fixture_ids) skips
+        # the slow fixture-independent / bracket-wide steps:
+        #   - Step 1 (rating refresh): uses last nightly snapshot from
+        #     team_ratings instead of recomputing
+        #   - Step 3 (tournament simulator): bracket-wide, not per-fixture
+        # Steps 2/4/5/6 each filter SQL by the supplied fixture_ids.
+        fixture_ids_filter = None
+        if league_request is not None and getattr(league_request, 'fixture_ids', None):
+            fixture_ids_filter = [int(x) for x in league_request.fixture_ids]
 
-        # Step 1: refresh Statz ratings inline.
-        ratings_date = date.today()
-        statz_df, _ = await compute_international_ratings(ratings_date, commit=commit)
-        ratings = {
-            row['team_name']: (float(row['attack']), float(row['defense']))
-            for _, row in statz_df.iterrows()
-        } if not statz_df.empty else {}
-        logger.info(f"Refreshed {len(ratings)} Statz ratings for {ratings_date}")
+        logger.info(
+            f"WC projection start — commit={commit}, odds_beta={ODDS_BETA}, "
+            f"boost={BOOST}, fixture_ids={fixture_ids_filter}"
+        )
+
+        # Step 1: refresh Statz ratings inline (skipped in per-fixture mode).
+        ratings: dict
+        if fixture_ids_filter:
+            # Read latest cached team_ratings rows from team_ratings table
+            # without recomputing. Fast — single SQL query.
+            _r_conn = await get_source_connection()
+            try:
+                async with _r_conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        SELECT t.name, tr.attack, tr.defense
+                        FROM team_ratings tr
+                        JOIN teams t ON t.id = tr.team_id
+                        WHERE tr.competition_id = %s
+                          AND tr.date = (
+                              SELECT MAX(date) FROM team_ratings
+                              WHERE competition_id = %s AND team_id = tr.team_id
+                          )
+                        """,
+                        (WC_COMP_ID, WC_COMP_ID),
+                    )
+                    rows = await cur.fetchall()
+                ratings = {r[0]: (float(r[1]), float(r[2])) for r in rows}
+            finally:
+                release_source_connection(_r_conn)
+            logger.info(f"Per-fixture mode: loaded {len(ratings)} ratings from cache (skipped recompute)")
+        else:
+            ratings_date = date.today()
+            statz_df, _ = await compute_international_ratings(ratings_date, commit=commit)
+            ratings = {
+                row['team_name']: (float(row['attack']), float(row['defense']))
+                for _, row in statz_df.iterrows()
+            } if not statz_df.empty else {}
+            logger.info(f"Refreshed {len(ratings)} Statz ratings for {ratings_date}")
 
         conn = await get_source_connection()
         try:
             async with conn.cursor() as cur:
-                # Upcoming WC fixtures + bet365 1X2 odds (LEFT JOIN, null-safe)
+                # Upcoming WC fixtures + bet365 1X2 odds (LEFT JOIN, null-safe).
+                # When fixture_ids_filter is set, scope the SELECT to that
+                # list — typically exactly one fixture for the per-fixture
+                # re-projection trigger.
+                fid_filter_sql = ""
+                fid_filter_params: tuple = ()
+                if fixture_ids_filter:
+                    placeholders = ",".join(["%s"] * len(fixture_ids_filter))
+                    fid_filter_sql = f" AND f.id IN ({placeholders})"
+                    fid_filter_params = tuple(fixture_ids_filter)
                 await cur.execute(
-                    """
+                    f"""
                     SELECT f.id, f.home_team_id, f.away_team_id, f.kickoff_datetime,
                            th.name AS h, ta.name AS a,
                            bo.home_win_odd, bo.draw_odd, bo.away_win_odd
@@ -111,9 +159,10 @@ class WcProjectionService:
                     WHERE f.competition_id = %s
                       AND f.kickoff_datetime > NOW()
                       AND f.state_id = 1
+                      {fid_filter_sql}
                     ORDER BY f.kickoff_datetime
                     """,
-                    (WC_COMP_ID,),
+                    (WC_COMP_ID,) + fid_filter_params,
                 )
                 fixtures = await cur.fetchall()
                 logger.info(f"Loaded {len(fixtures)} upcoming WC fixtures")
@@ -209,14 +258,25 @@ class WcProjectionService:
 
             if commit and inserts:
                 async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        DELETE fp FROM fixture_projections fp
-                        JOIN fixtures f ON f.id = fp.fixture_id
-                        WHERE f.competition_id = %s
-                        """,
-                        (WC_COMP_ID,),
-                    )
+                    # Per-fixture mode scopes the DELETE to the requested
+                    # fixture_ids so we don't wipe the rest of the WC
+                    # projection rows. Full-comp mode keeps the original
+                    # "delete-all-WC-then-reinsert" idempotent pattern.
+                    if fixture_ids_filter:
+                        del_ph = ",".join(["%s"] * len(fixture_ids_filter))
+                        await cur.execute(
+                            f"DELETE FROM fixture_projections WHERE fixture_id IN ({del_ph})",
+                            tuple(fixture_ids_filter),
+                        )
+                    else:
+                        await cur.execute(
+                            """
+                            DELETE fp FROM fixture_projections fp
+                            JOIN fixtures f ON f.id = fp.fixture_id
+                            WHERE f.competition_id = %s
+                            """,
+                            (WC_COMP_ID,),
+                        )
                     deleted = cur.rowcount
                     now = datetime.now()
                     rows = [(
@@ -242,48 +302,47 @@ class WcProjectionService:
         finally:
             release_source_connection(conn)
 
-        # Step 3: Run the Monte Carlo tournament simulator. Reads the
-        # fixture-projection lambdas we just wrote, walks the bracket,
-        # outputs per-team probabilities to tournament_projections.
+        # Step 3: Monte Carlo tournament simulator (bracket-wide).
+        # Skipped in per-fixture mode — the sim reads the entire WC
+        # fixture projection set and walks the bracket; a single-fixture
+        # change doesn't shift bracket outcomes enough to be worth a full
+        # 10k-sim rerun. The next nightly full pass will refresh it.
         sim_result = None
-        if commit:
+        if commit and not fixture_ids_filter:
             sim_result = await TournamentSimulator().run(WC_2026, num_sims=10_000)
             logger.info(f"WC tournament simulation: {sim_result}")
 
-        # Step 4: Per-team stat projections (shots, corners, fouls, cards, etc.)
-        # Reads fixture_projections.home_goals/away_goals from step 2 to anchor
-        # Shots/SoT via adjust_shots_projection.
+        # Step 4: Per-team stat projections.
         team_stat_result = None
         if commit:
             try:
-                team_stat_result = await WcTeamStatService().project(commit=commit)
+                team_stat_result = await WcTeamStatService().project(
+                    commit=commit, fixture_ids=fixture_ids_filter,
+                )
                 logger.info(f"WC team-stat projection: {team_stat_result}")
             except Exception as e:
                 logger.exception(f"WC team-stat projection failed: {e}")
                 team_stat_result = {'error': str(e)}
 
-        # Step 5: Per-player stat projections — distributes the team-stat
-        # projections from step 4 to each confirmed WC squad's players.
-        # Scoped to nations with a tournament_squads entry, so it grows as
-        # more squads are announced.
+        # Step 5: Per-player stat projections.
         player_stat_result = None
         if commit:
             try:
-                player_stat_result = await WcPlayerStatService().project(commit=commit)
+                player_stat_result = await WcPlayerStatService().project(
+                    commit=commit, fixture_ids=fixture_ids_filter,
+                )
                 logger.info(f"WC player-stat projection: {player_stat_result}")
             except Exception as e:
                 logger.exception(f"WC player-stat projection failed: {e}")
                 player_stat_result = {'error': str(e)}
 
-        # Step 6: Per-(fixture, player) WC Fantasy point projections — feeds
-        # the WC Fantasy planner at /wc/my-team. Reads the long-format
-        # player_projections rows from step 5 + fixture_projections from
-        # step 2 (for clean-sheet probabilities) and applies the 2026 FIFA
-        # WC Fantasy scoring rules.
+        # Step 6: Per-(fixture, player) WC Fantasy point projections.
         fantasy_points_result = None
         if commit:
             try:
-                fantasy_points_result = await WcFantasyPointsService().project(commit=commit)
+                fantasy_points_result = await WcFantasyPointsService().project(
+                    commit=commit, fixture_ids=fixture_ids_filter,
+                )
                 logger.info(f"WC fantasy points projection: {fantasy_points_result}")
             except Exception as e:
                 logger.exception(f"WC fantasy points projection failed: {e}")
@@ -295,7 +354,8 @@ class WcProjectionService:
             'n_blended': n_blended,
             'n_skipped_unknown_team': n_skipped_unknown_team,
             'n_ratings': len(ratings),
-            'ratings_snapshot_date': str(ratings_date),
+            'ratings_snapshot_date': 'cached' if fixture_ids_filter else str(ratings_date),
+            'fixture_ids': fixture_ids_filter,
             'committed': commit,
             'tournament_simulation': sim_result,
             'team_stat_projection': team_stat_result,

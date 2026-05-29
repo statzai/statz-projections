@@ -134,20 +134,30 @@ def _fantasy_points(stats: Dict[int, float], position: str, opp_goals: float) ->
     return round(pts, 2)
 
 
-async def _load_data(conn) -> dict:
+async def _load_data(conn, fixture_ids_filter=None) -> dict:
     """Pull everything in one go.
 
     - long-format `player_projections` rows for WC (filtered to future fixtures)
     - fixture-level opponent goals for clean sheet (from `fixture_projections`)
     - wc_rounds windows for fixture → round_id mapping (uses kickoff in [start, end))
+
+    fixture_ids_filter: optional list — narrows SELECTs to those fixtures.
     """
     # Pooled conn might carry a stale snapshot from the prior step.
     await conn.rollback()
 
+    # Build the optional fixture-id filter once.
+    fp_fid_filter_sql = ""
+    fp_fid_filter_params: tuple = ()
+    if fixture_ids_filter:
+        ph_fp = ",".join(["%s"] * len(fixture_ids_filter))
+        fp_fid_filter_sql = f" AND f.id IN ({ph_fp})"
+        fp_fid_filter_params = tuple(fixture_ids_filter)
+
     async with conn.cursor() as cur:
         # Long-format player projection rows (future fixtures only).
         await cur.execute(
-            """
+            f"""
             SELECT pp.fixture_id, pp.player_id, pp.position, pp.team_id,
                    pp.opponent_id, pp.venue, pp.kickoff_datetime,
                    pp.stats_type_id, pp.stats_value
@@ -155,8 +165,9 @@ async def _load_data(conn) -> dict:
             JOIN fixtures f ON f.id = pp.fixture_id
             WHERE f.competition_id = %s
               AND f.kickoff_datetime > NOW()
+              {fp_fid_filter_sql}
             """,
-            (WC_COMP_ID,),
+            (WC_COMP_ID,) + fp_fid_filter_params,
         )
         pp_rows = await cur.fetchall()
 
@@ -164,15 +175,16 @@ async def _load_data(conn) -> dict:
         # OPPONENT's expected goals (which is home_goals when player is away,
         # away_goals when player is home).
         await cur.execute(
-            """
+            f"""
             SELECT fp.fixture_id, fp.home_team_id, fp.away_team_id,
                    fp.home_goals, fp.away_goals
             FROM fixture_projections fp
             JOIN fixtures f ON f.id = fp.fixture_id
             WHERE f.competition_id = %s
               AND f.kickoff_datetime > NOW()
+              {fp_fid_filter_sql}
             """,
-            (WC_COMP_ID,),
+            (WC_COMP_ID,) + fp_fid_filter_params,
         )
         fp_rows = await cur.fetchall()
 
@@ -292,12 +304,13 @@ def _build_rows(data: dict) -> list:
 class WcFantasyPointsService:
     """Compute + write per-(fixture, player) WC Fantasy point projections."""
 
-    async def project(self, commit: bool = True) -> dict:
-        logger.info(f"WC fantasy points start — commit={commit}")
+    async def project(self, commit: bool = True, fixture_ids: list = None) -> dict:
+        """fixture_ids: optional — when set, scope projection + DELETE to those WC fixtures only."""
+        logger.info(f"WC fantasy points start — commit={commit}, fixture_ids={fixture_ids}")
 
         conn = await get_source_connection()
         try:
-            data = await _load_data(conn)
+            data = await _load_data(conn, fixture_ids_filter=fixture_ids)
             n_players = len(data['players'])
             n_fixtures = len(data['fixtures'])
             n_rounds = len(data['rounds'])
@@ -321,14 +334,22 @@ class WcFantasyPointsService:
             logger.info(f"WC fantasy points ready: {len(rows)} rows")
 
             if commit and rows:
-                # Idempotent: clear existing comp-732 rows, then bulk insert.
+                # Idempotent: clear existing rows, then bulk insert.
+                # Per-fixture mode scopes the DELETE to those fixtures.
                 async with conn.cursor() as cur:
-                    await cur.execute(
-                        """DELETE wfp FROM wc_fantasy_projections wfp
-                           JOIN fixtures f ON f.id = wfp.fixture_id
-                           WHERE f.competition_id = %s""",
-                        (WC_COMP_ID,),
-                    )
+                    if fixture_ids:
+                        del_ph = ",".join(["%s"] * len(fixture_ids))
+                        await cur.execute(
+                            f"DELETE FROM wc_fantasy_projections WHERE fixture_id IN ({del_ph})",
+                            tuple(fixture_ids),
+                        )
+                    else:
+                        await cur.execute(
+                            """DELETE wfp FROM wc_fantasy_projections wfp
+                               JOIN fixtures f ON f.id = wfp.fixture_id
+                               WHERE f.competition_id = %s""",
+                            (WC_COMP_ID,),
+                        )
                 await conn.commit()
 
                 await insert_wc_fantasy_projections_async(rows)

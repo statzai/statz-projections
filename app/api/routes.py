@@ -230,13 +230,6 @@ async def project_fixture(request: FixtureProjectionRequest, background_tasks: B
     if (kickoff_dt - now_utc).total_seconds() < 300:
         return {"status": "skipped", "reason": "kickoff within 5 minutes", "fixture_id": fid}
 
-    # WC per-fixture re-projection runs the whole orchestrator (rating
-    # refresh + tournament sim) which is slow + not strictly necessary
-    # for one fixture. Deferred to v2.
-    if WcProjectionService.is_wc_comp(comp_name):
-        return {"status": "skipped", "reason": "WC per-fixture re-projection not yet supported (v2)",
-                "fixture_id": fid, "competition": comp_name}
-
     if not _try_acquire_lock():
         return {"status": "busy", "message": "A projection is already running. Wait for it to finish."}
 

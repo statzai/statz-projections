@@ -240,7 +240,7 @@ def _weighted_share(
     return share, n
 
 
-async def _load_data(conn) -> dict:
+async def _load_data(conn, fixture_ids_filter=None) -> dict:
     """Pull everything: confirmed WC squads, each player's main 30-game
     window + xG window, the player/team stats for those fixtures, the WC
     team_projections to distribute, and name lookups."""
@@ -393,8 +393,15 @@ async def _load_data(conn) -> dict:
             team_stat_rows = await cur.fetchall()
 
         # 5. WC team_projections written by the team-stat step.
+        # Per-fixture mode narrows to just the requested fixtures.
+        tp_fid_filter_sql = ""
+        tp_fid_filter_params: tuple = ()
+        if fixture_ids_filter:
+            ph_tp = ",".join(["%s"] * len(fixture_ids_filter))
+            tp_fid_filter_sql = f" AND tp.fixture_id IN ({ph_tp})"
+            tp_fid_filter_params = tuple(fixture_ids_filter)
         await cur.execute(
-            """
+            f"""
             SELECT tp.fixture_id, tp.team_id, tp.opponent_id, tp.venue,
                    tp.kickoff_datetime, tp.goals, tp.shots_total,
                    tp.shots_on_target, tp.fouls, tp.yellowcards, tp.tackles,
@@ -403,8 +410,9 @@ async def _load_data(conn) -> dict:
             FROM team_projections tp
             JOIN fixtures f ON f.id = tp.fixture_id
             WHERE f.competition_id = %s
+              {tp_fid_filter_sql}
             """,
-            (WC_COMP_ID,),
+            (WC_COMP_ID,) + tp_fid_filter_params,
         )
         team_proj_rows = await cur.fetchall()
 
@@ -635,12 +643,13 @@ def _build_prop_rows(player_df: pd.DataFrame) -> pd.DataFrame:
 class WcPlayerStatService:
     """Compute + write per-player stat projections for upcoming WC fixtures."""
 
-    async def project(self, commit: bool = True) -> dict:
-        logger.info(f"WC player-stat projection start — commit={commit}")
+    async def project(self, commit: bool = True, fixture_ids: list = None) -> dict:
+        """fixture_ids: optional — when set, scope projection + DELETE to those WC fixtures only."""
+        logger.info(f"WC player-stat projection start — commit={commit}, fixture_ids={fixture_ids}")
 
         conn = await get_source_connection()
         try:
-            data = await _load_data(conn)
+            data = await _load_data(conn, fixture_ids_filter=fixture_ids)
             squads = data['squads']
             player_windows = data['player_windows']
             player_xg_windows = data['player_xg_windows']
@@ -698,19 +707,32 @@ class WcPlayerStatService:
                 n_prop_rows = len(prop_df)
 
                 # Idempotent: clear existing WC player + prop rows first.
+                # Per-fixture mode scopes the DELETE to those fixtures
+                # only — don't wipe other WC fixtures' player rows.
                 async with conn.cursor() as cur:
-                    await cur.execute(
-                        """DELETE pp FROM player_projections pp
-                           JOIN fixtures f ON f.id = pp.fixture_id
-                           WHERE f.competition_id = %s""",
-                        (WC_COMP_ID,),
-                    )
-                    await cur.execute(
-                        """DELETE ppp FROM player_prop_projections ppp
-                           JOIN fixtures f ON f.id = ppp.fixture_id
-                           WHERE f.competition_id = %s""",
-                        (WC_COMP_ID,),
-                    )
+                    if fixture_ids:
+                        del_ph = ",".join(["%s"] * len(fixture_ids))
+                        await cur.execute(
+                            f"DELETE FROM player_projections WHERE fixture_id IN ({del_ph})",
+                            tuple(fixture_ids),
+                        )
+                        await cur.execute(
+                            f"DELETE FROM player_prop_projections WHERE fixture_id IN ({del_ph})",
+                            tuple(fixture_ids),
+                        )
+                    else:
+                        await cur.execute(
+                            """DELETE pp FROM player_projections pp
+                               JOIN fixtures f ON f.id = pp.fixture_id
+                               WHERE f.competition_id = %s""",
+                            (WC_COMP_ID,),
+                        )
+                        await cur.execute(
+                            """DELETE ppp FROM player_prop_projections ppp
+                               JOIN fixtures f ON f.id = ppp.fixture_id
+                               WHERE f.competition_id = %s""",
+                            (WC_COMP_ID,),
+                        )
                 await conn.commit()
 
                 teams_df = pd.DataFrame(
