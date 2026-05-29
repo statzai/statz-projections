@@ -36,12 +36,26 @@ BOOKIE_PRIORITY = ['bet365']
 
 # Per-stat bookmaker priority for team-stat blending. bet365 always
 # tried first per user rule (2026-05-29); rest ordered by per-team
-# coverage observed on UCL final + sample PL fixtures. See
-# [[goals_odds_blend_cascade]] memory for the data backing each
-# ordering decision.
+# coverage observed on UCL final. Maps the bookie market name (column
+# `market` in *_totals_odds) to the priority list.
 TEAM_STAT_BOOKIE_PRIORITY = {
-    'corners': ['bet365', 'boylesports', 'midnite', 'coral', 'ladbrokes'],
-    # Future: 'cards', 'shots', 'sot', 'fouls', 'tackles'
+    'corners': ['bet365', 'midnite', 'boylesports', 'coral', 'ladbrokes'],
+    'cards':   ['bet365', 'midnite', 'boylesports', 'coral'],
+    'shots':   ['midnite', 'boylesports', 'coral'],     # no bet365 coverage
+    'sot':     ['midnite', 'boylesports', 'coral'],     # no bet365 coverage
+    'fouls':   ['midnite'],                              # midnite only
+    'tackles': ['boylesports'],                          # boyle only
+}
+
+# Mapping from the team_projections column (statz internal stat name)
+# to the bookie market key in TEAM_STAT_BOOKIE_PRIORITY.
+STAT_COLUMN_TO_MARKET = {
+    'Corners':         'corners',
+    'Yellowcards':     'cards',
+    'Shots Total':     'shots',
+    'Shots On Target': 'sot',
+    'Fouls':           'fouls',
+    'Tackles':         'tackles',
 }
 
 

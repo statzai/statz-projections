@@ -605,24 +605,30 @@ class EuroCompProjectionService:
         ]
         team_projections.rename(columns={'Successful Passes': 'Accurate Passes'}, inplace=True)
 
-        # ── Corners odds-blend ──
-        # Reels each team's projected corners toward bookie expected
-        # corners via the same cascade pattern used for goals (Path 1
-        # per-team ladder, Path 1.5 partial+match, Path 2 match split).
-        # Per-stat bookmaker priority list in TEAM_STAT_BOOKIE_PRIORITY.
-        from app.services.odds_blend import load_team_stat_odds, blend_team_stat, TEAM_STAT_BOOKIE_PRIORITY
+        # ── Team-stat odds-blend ──
+        # Reels each team's projected stat toward bookie expected via
+        # the cascade (Path 1 per-team ladder → Path 1.5 partial+match
+        # → Path 2 match-split via model ratio → fall through). Per
+        # stat, books tried in TEAM_STAT_BOOKIE_PRIORITY order; first
+        # to return usable λs wins. Six stats covered in v1: corners,
+        # cards, shots, SoT, fouls, tackles.
+        from app.services.odds_blend import (
+            load_team_stat_odds, blend_team_stat,
+            TEAM_STAT_BOOKIE_PRIORITY, STAT_COLUMN_TO_MARKET,
+        )
+        _fix_ids = team_projections['fixture_id'].astype(int).unique().tolist()
+        _odds_per_market = {}
         _conn = await get_source_connection()
         try:
-            _corner_odds_map = await load_team_stat_odds(
-                _conn,
-                team_projections['fixture_id'].astype(int).unique().tolist(),
-                'corners',
-                TEAM_STAT_BOOKIE_PRIORITY['corners'],
-            )
+            for _market, _books in TEAM_STAT_BOOKIE_PRIORITY.items():
+                _odds_per_market[_market] = await load_team_stat_odds(
+                    _conn, _fix_ids, _market, _books,
+                )
         finally:
             release_source_connection(_conn)
 
-        # Apply per-fixture (one shared blend updates both home+away).
+        # Apply per-fixture for each stat. One pass per fixture updates
+        # both home+away rows for every stat column.
         _seen_fixtures = set()
         for _i in range(len(team_projections)):
             fid = int(team_projections['fixture_id'].iloc[_i])
@@ -634,7 +640,6 @@ class EuroCompProjectionService:
             if len(pair) != 2:
                 continue
 
-            # Identify which row is home / away via the fixture row.
             fix_row = next_fix[next_fix['id'] == fid]
             if fix_row.empty:
                 continue
@@ -642,15 +647,22 @@ class EuroCompProjectionService:
             home_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] == home_team_name)
             away_mask = (team_projections['fixture_id'] == fid) & (team_projections['Team'] != home_team_name)
 
-            try:
-                mh = float(team_projections.loc[home_mask, 'Corners'].iloc[0])
-                ma = float(team_projections.loc[away_mask, 'Corners'].iloc[0])
-            except (IndexError, KeyError):
-                continue
+            for stat_col, market in STAT_COLUMN_TO_MARKET.items():
+                if stat_col not in team_projections.columns:
+                    continue
+                try:
+                    mh = float(team_projections.loc[home_mask, stat_col].iloc[0])
+                    ma = float(team_projections.loc[away_mask, stat_col].iloc[0])
+                except (IndexError, KeyError, ValueError):
+                    continue
 
-            fh, fa = blend_team_stat(mh, ma, _corner_odds_map.get(fid, {}), 'corners', odds_weight)
-            team_projections.loc[home_mask, 'Corners'] = round(fh, 2)
-            team_projections.loc[away_mask, 'Corners'] = round(fa, 2)
+                fh, fa = blend_team_stat(
+                    mh, ma,
+                    _odds_per_market.get(market, {}).get(fid, {}),
+                    market, odds_weight,
+                )
+                team_projections.loc[home_mask, stat_col] = round(fh, 2)
+                team_projections.loc[away_mask, stat_col] = round(fa, 2)
 
         # Save team projections
         team_projections_save = team_projections.copy()
