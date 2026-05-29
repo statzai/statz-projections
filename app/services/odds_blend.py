@@ -136,13 +136,15 @@ def fit_lambda_from_ladder(ladder: list) -> Optional[float]:
     if not rows:
         return None
 
-    # Grid search λ ∈ (0.05, 6.0) step 0.01; minimise sum-sq error
-    # across every line. With a typical 4-5 line ladder this is ~3000
-    # PMF calls per fit — instant.
+    # Grid search λ ∈ (0.05, 40.0) step 0.01; minimise sum-sq error
+    # across every line. Upper bound covers team stats like tackles
+    # and passes (typical 15-30/team) plus comfortable headroom for
+    # high-volume international fixtures. Goals/corners/cards stay
+    # well below the cap. Still instant (~20k PMF calls per fit).
     best_lam = None
     best_err = float('inf')
     lam_hundredths = 5
-    while lam_hundredths <= 600:
+    while lam_hundredths <= 4000:
         lam = lam_hundredths / 100.0
         err = 0.0
         for k, p_bookie in rows:
