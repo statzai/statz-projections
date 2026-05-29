@@ -747,7 +747,7 @@ class WcTeamStatService:
                 # _load_data, with each item carrying 'fixture_id' +
                 # 'home_name'. wc_fixtures_rows was the raw SQL list
                 # local to _load_data — not available here.)
-                _fid_to_home_name = {wc['fixture_id']: wc['home_name'] for wc in data['wc_fixtures']}
+                _fid_to_home_name = {wc['fixture_id']: wc['home_team_name'] for wc in data['wc_fixtures']}
 
                 _seen = set()
                 for _i in range(len(df)):
