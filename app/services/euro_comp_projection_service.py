@@ -687,9 +687,24 @@ class EuroCompProjectionService:
 
         logger.info(f'[{league}] Building player projections...')
 
+        # Pre-load confirmed XI per (fixture, team). When present, the
+        # distribute call drops bench players from the iteration — speeds
+        # up per-fixture re-projections triggered on lineup arrival, and
+        # also catches league runs where one upcoming fixture has had its
+        # lineup confirmed.
+        from app.services.odds_blend import load_confirmed_lineups
+        _conn = await get_source_connection()
+        try:
+            _confirmed_lineups = await load_confirmed_lineups(
+                _conn, next_fix['id'].astype(int).unique().tolist(),
+            )
+        finally:
+            release_source_connection(_conn)
+
         pl_projections = distribute_team_predictions_to_players(
             player_stats, team_stats, team_projections, stats_types, fixtures_df, players, teams, comps, 0.97,
             competition_id=comp_id, comp_teams=comp_teams,
+            confirmed_lineups=_confirmed_lineups,
         )
 
         player_pos = []

@@ -1530,12 +1530,25 @@ class ProjectionService:
 
         logger.info(f"[{league}] Starting player projections...")
         _t = time.time()
+        # Pre-load confirmed XI per (fixture, team). distribute drops
+        # bench rows when a key matches — fires for per-fixture lineup
+        # reruns AND for league runs where one upcoming fixture has
+        # had its XI confirmed.
+        from app.services.odds_blend import load_confirmed_lineups
+        _ll_conn = await get_source_connection()
+        try:
+            _confirmed_lineups = await load_confirmed_lineups(
+                _ll_conn, next_fix['id'].astype(int).unique().tolist(),
+            )
+        finally:
+            release_source_connection(_ll_conn)
         pl_projections = distribute_team_predictions_to_players(player_stats, team_stats, team_projections, stats_types,
                                                                 fixtures_df, players, teams, comps, 0.97,
                                                                 season_id=[current_season_id, previous_season_id,
                                                                            previous_season_id_above,
                                                                            previous_season_id_below],
-                                                                competition_id=league_id, comp_teams=comp_teams)
+                                                                competition_id=league_id, comp_teams=comp_teams,
+                                                                confirmed_lineups=_confirmed_lineups)
         logger.info(f"[{league}] Player projections computed - {len(pl_projections)} players ({time.time()-_t:.1f}s)")
 
         # Vectorized: build player lookup, merge, derive Position/Saves AND Start? in one pass
@@ -3890,12 +3903,25 @@ class ProjectionService:
         # In[ ]:
 
         # UPDATED: Removed xG parameter, added comps parameter and added season_id paramter
+        # Pre-load confirmed XI per (fixture, team). distribute drops
+        # bench rows when a key matches — fires for per-fixture lineup
+        # reruns AND for league runs where one upcoming fixture has
+        # had its XI confirmed.
+        from app.services.odds_blend import load_confirmed_lineups
+        _ll_conn = await get_source_connection()
+        try:
+            _confirmed_lineups = await load_confirmed_lineups(
+                _ll_conn, next_fix['id'].astype(int).unique().tolist(),
+            )
+        finally:
+            release_source_connection(_ll_conn)
         pl_projections = distribute_team_predictions_to_players(player_stats, team_stats, team_projections, stats_types,
                                                                 fixtures_df, players, teams, comps, 0.97,
                                                                 season_id=[current_season_id, previous_season_id,
                                                                            previous_season_id_above,
                                                                            previous_season_id_below],
-                                                                competition_id=league_id, comp_teams=comp_teams)
+                                                                competition_id=league_id, comp_teams=comp_teams,
+                                                                confirmed_lineups=_confirmed_lineups)
 
         # Vectorized: build player lookup, merge, derive Position/Saves AND Start? in one pass
         _team_names = teams[['id', 'name']].rename(columns={'id': '_team_id', 'name': 'Team'})
@@ -4684,12 +4710,25 @@ class ProjectionService:
         # In[ ]:
 
         # UPDATED: Removed xG parameter, added comps parameter and added season_id paramter
+        # Pre-load confirmed XI per (fixture, team). distribute drops
+        # bench rows when a key matches — fires for per-fixture lineup
+        # reruns AND for league runs where one upcoming fixture has
+        # had its XI confirmed.
+        from app.services.odds_blend import load_confirmed_lineups
+        _ll_conn = await get_source_connection()
+        try:
+            _confirmed_lineups = await load_confirmed_lineups(
+                _ll_conn, next_fix['id'].astype(int).unique().tolist(),
+            )
+        finally:
+            release_source_connection(_ll_conn)
         pl_projections = distribute_team_predictions_to_players(player_stats, team_stats, team_projections, stats_types,
                                                                 fixtures_df, players, teams, comps, 0.97,
                                                                 season_id=[current_season_id, previous_season_id,
                                                                            previous_season_id_above,
                                                                            previous_season_id_below],
-                                                                competition_id=league_id, comp_teams=comp_teams)
+                                                                competition_id=league_id, comp_teams=comp_teams,
+                                                                confirmed_lineups=_confirmed_lineups)
 
         # Vectorized: player_lookup merge + Position + Start? in one pass.
         # Saves=0 always in player_props (no GK lookup needed here).

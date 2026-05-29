@@ -386,6 +386,40 @@ async def load_goals_odds_for_fixtures(conn, fixture_ids: list) -> dict:
     return result
 
 
+async def load_confirmed_lineups(conn, fixture_ids: list) -> dict:
+    """Return {(fixture_id, team_id): set(player_id)} for confirmed=1
+    rows in fixture_player_lineup. Caller passes this to
+    distribute_team_predictions_to_players so the player iteration
+    drops bench players for any (fixture, team) with a confirmed XI.
+
+    Empty dict if no confirmed lineups exist for the supplied fixtures
+    — the distribute function then falls back to full squad (current
+    behaviour for league-wide nightly runs).
+    """
+    if not fixture_ids:
+        return {}
+    ph = ",".join(["%s"] * len(fixture_ids))
+    result = {}
+    async with conn.cursor() as cur:
+        await cur.execute(
+            f"""
+            SELECT fixture_id, team_id, player_id
+            FROM fixture_player_lineup
+            WHERE fixture_id IN ({ph}) AND confirmed = 1
+            """,
+            tuple(fixture_ids),
+        )
+        rows = await cur.fetchall()
+    for fid, tid, pid in rows:
+        result.setdefault((int(fid), int(tid)), set()).add(int(pid))
+    if result:
+        logger.info(
+            "Loaded confirmed lineups for %d (fixture, team) pairs",
+            len(result),
+        )
+    return result
+
+
 async def load_team_stat_odds(conn, fixture_ids: list, market: str, books: list) -> dict:
     """Generalised totals-odds loader for any market across multiple
     books. Same shape as load_goals_odds_for_fixtures but parameterised:

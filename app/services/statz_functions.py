@@ -1656,7 +1656,16 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
 
 # UPDATED - New Parameters: season_id and comps, Removed xG parameter
 def distribute_team_predictions_to_players(player_stats, team_df, team_predictions, stats_types, fixtures, players,
-                                           teams, comps, weight, season_id=None, competition_id=None, comp_teams=None):
+                                           teams, comps, weight, season_id=None, competition_id=None, comp_teams=None,
+                                           confirmed_lineups=None):
+    """
+    confirmed_lineups: optional {(fixture_id, team_id): set(player_id)} — when
+    a key exists for the (fixture, team) being projected, restrict the
+    player iteration to those IDs only. Used by per-fixture re-projections
+    triggered on confirmed-lineup arrival (Phase 1 of the lineup-aware
+    rerun work). Bench / non-XI players just get dropped from this run's
+    output — share renormalization is deferred to v2.
+    """
     import numpy as np
     import pandas as pd
     # Reset per-run accumulators. Stat-coverage warnings dedup across all
@@ -1677,6 +1686,20 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
         team_id = get_team_id(team, teams, competition_id, comp_teams)
         # team_stat_values = row[1].values
         team_players = players[players['current_team_id'] == team_id]  # UPDATED - use team_id
+
+        # Lineup-aware restriction (Phase 1 of confirmed-lineup rerun).
+        # When a confirmed XI exists for this (fixture, team), drop the
+        # bench rows from the iteration. No share renormalization yet —
+        # v2 — so projected per-starter values still sum to less than
+        # the team total. Acceptable for v1 since bench shares are
+        # typically small. Falls back to full squad when no confirmed
+        # lineup is provided.
+        if confirmed_lineups:
+            for _fid in specific_team_predictions['fixture_id'].unique():
+                _lineup_ids = confirmed_lineups.get((int(_fid), int(team_id)))
+                if _lineup_ids:
+                    team_players = team_players[team_players['id'].isin(_lineup_ids)]
+                    break  # one fixture per call in per-fixture path
         for name, id in team_players[['display_name', 'id']].values:
             # player_pred_stats = {}
             # UPDATED - New Parameter: season_id and we can now use team
