@@ -496,6 +496,13 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
     team_projections = data['team_projections']
     teams = data['teams']
     players = data['players']
+    player_odds = data.get('player_odds', {}) or {}
+    odds_blend_weight = float(data.get('odds_blend_weight', 0.3))
+
+    # Player-prop blend helpers hoisted out of the per-row hot loop.
+    # PLAYER_BLEND_STAT_NAMES is the single source of truth for the
+    # stat-name → stats_type_id map (shared with statz_functions.py).
+    from app.services.odds_blend import blend_player_stat, PLAYER_BLEND_STAT_NAMES
 
     # team Saves = opponent's (SoT − Goals) — look up the other row in fixture.
     tp_by_fixture: Dict[int, Dict[int, dict]] = {}
@@ -612,6 +619,32 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
             # Saves — keepers get the team total; outfielders 0.
             row['Saves'] = round(team_saves, 2) if position_group == 'GK' else 0.0
 
+            # Player-prop blend (v1: Goals / Shots Total / Shots On Target).
+            # Mutates row[stat] in place; missing-ladder rows fall through
+            # untouched. Skipped entirely for GKs on Shots Total / Shots
+            # On Target — model produces ~0 (no GK shot history) and any
+            # non-bet365 book that prices keepers indiscriminately would
+            # blend a non-trivial bookie λ over a zero model λ, producing
+            # absurd GK shot projections. Goals stays blendable for GKs
+            # (rare set-piece scorer markets are legitimate).
+            if player_odds:
+                for _stat_name, _stat_type_id in PLAYER_BLEND_STAT_NAMES.items():
+                    if _stat_name not in row:
+                        continue
+                    if position_group == 'GK' and _stat_name in ('Shots Total', 'Shots On Target'):
+                        continue
+                    _ladders = (player_odds
+                                .get(int(tp['fixture_id']), {})
+                                .get(int(player_id), {})
+                                .get(_stat_type_id, {}))
+                    row[_stat_name] = round(
+                        blend_player_stat(
+                            float(row[_stat_name]), _ladders,
+                            _stat_type_id, odds_blend_weight,
+                        ),
+                        2,
+                    )
+
             output_rows.append(row)
 
     return output_rows, n_skipped_no_squad
@@ -664,6 +697,21 @@ class WcPlayerStatService:
             if not team_projections:
                 logger.warning("No WC team_projections found — run WcTeamStatService first.")
                 return {'n_player_rows': 0, 'n_squads': len(squads), 'committed': False}
+
+            # Pre-load player-prop odds (Goals/Shots Total/SoT v1) and
+            # stash on data dict so _build_player_rows stays pure. Same
+            # cascade + α=0.3 as domestic. WC has no pre-tournament
+            # confirmed lineups, so no load_confirmed_lineups call here.
+            # Run AFTER the empty-squad / empty-team_projections early
+            # returns so we don't fire 5 per-book SELECTs on a degenerate run.
+            from app.services.odds_blend import (
+                load_player_odds, PLAYER_BLEND_BOOKS, PLAYER_BLEND_STAT_IDS,
+            )
+            _wc_fix_ids = sorted({tp['fixture_id'] for tp in team_projections})
+            data['player_odds'] = await load_player_odds(
+                conn, _wc_fix_ids, PLAYER_BLEND_STAT_IDS, PLAYER_BLEND_BOOKS,
+            )
+            data['odds_blend_weight'] = 0.3
 
             # Flag squad players with no usable history at all — skipped from
             # projection. A data gap to chase (uncovered league / missing

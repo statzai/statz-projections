@@ -1351,7 +1351,8 @@ def adjust_shots_projection(projected_goals, projected_shots, projected_shots_on
 
 
 # UPDATED - New Parameter: season_id
-def player_criteria(player, team, fixtures, player_stats, players, teams, season_id=None, competition_id=None, comp_teams=None):
+def player_criteria(player, team, fixtures, player_stats, players, teams, season_id=None, competition_id=None, comp_teams=None,
+                    in_confirmed_xi=False):
     import pandas as pd
     fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])  # NEW - ensure datetime format
     # Pre-filter comp_teams for disambiguation only. Do NOT pass comp_id to
@@ -1387,10 +1388,19 @@ def player_criteria(player, team, fixtures, player_stats, players, teams, season
         player_stats_df['fixture_id'].isin(last5_fixture_ids)]  # NEW - filter last 5 fixtures
     player_stats_df_last_5 = player_stats_df_last_5[
         player_stats_df_last_5['value'] > 45]  # NEW - filter out very low minutes
-    if len(player_stats_df_last_5) > 0 and len(
-            player_stats_df) > 5:  # NEW - ensure at least 5 total games and played in last 5 fixtures
-        return True  # NEW
-    return False
+    # Total-games gate (>5 historical appearances ≥45 min in last 40wk) is
+    # non-negotiable — genuine no-data players still filter out.
+    if len(player_stats_df) <= 5:
+        return False
+    # Confirmed-XI players bypass the team's-last-5 appearance gate: a
+    # manager rotating starters out of the run-up to a cup final / play-off
+    # is exactly the case where the player_criteria default silently dropped
+    # them (e.g. Hakimi rested for PSG's last 5 Ligue 1 before the UCL final).
+    # Lineup confirmation overrides that gate; total-games gate above still
+    # protects against zero-history XI selections.
+    if in_confirmed_xi:
+        return True
+    return len(player_stats_df_last_5) > 0
 
 
 def get_player_id(player_name, player_df, team, teams, competition_id=None, comp_teams=None):
@@ -1657,7 +1667,8 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
 # UPDATED - New Parameters: season_id and comps, Removed xG parameter
 def distribute_team_predictions_to_players(player_stats, team_df, team_predictions, stats_types, fixtures, players,
                                            teams, comps, weight, season_id=None, competition_id=None, comp_teams=None,
-                                           confirmed_lineups=None):
+                                           confirmed_lineups=None,
+                                           odds_for_fixture_players=None, odds_blend_weight=0.3):
     """
     confirmed_lineups: optional {(fixture_id, team_id): set(player_id)} — when
     a key exists for the (fixture, team) being projected, restrict the
@@ -1665,7 +1676,22 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
     triggered on confirmed-lineup arrival (Phase 1 of the lineup-aware
     rerun work). Bench / non-XI players just get dropped from this run's
     output — share renormalization is deferred to v2.
+
+    odds_for_fixture_players: optional pre-loaded player-prop odds in the
+    shape returned by load_player_odds:
+        {fixture_id: {player_id: {stats_type_id: {book: ladder}}}}
+    When set, the per-(player, fixture, stat) λ is blended toward the
+    bookmaker-implied λ for the 3 v1 markets (Goals/Shots Total/SoT).
+    Other stats pass through unchanged.
+
+    odds_blend_weight: α applied to the bookie λ when blending. Caller
+    passes its service-level weight (0.3 domestic, 0.5 euro_comp, 0.3 WC).
     """
+    # Player-prop blend helpers hoisted out of the per-row hot loop —
+    # PLAYER_BLEND_STAT_NAMES maps DataFrame stat column name to
+    # stats_type_id for the 3 v1 markets (Goals/Shots Total/SoT).
+    # v1.5+ stats added in odds_blend.py propagate here automatically.
+    from app.services.odds_blend import blend_player_stat, PLAYER_BLEND_STAT_NAMES
     import numpy as np
     import pandas as pd
     # Reset per-run accumulators. Stat-coverage warnings dedup across all
@@ -1688,22 +1714,32 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
         team_players = players[players['current_team_id'] == team_id]  # UPDATED - use team_id
 
         # Lineup-aware restriction (Phase 1 of confirmed-lineup rerun).
-        # When a confirmed XI exists for this (fixture, team), drop the
-        # bench rows from the iteration. No share renormalization yet —
-        # v2 — so projected per-starter values still sum to less than
-        # the team total. Acceptable for v1 since bench shares are
-        # typically small. Falls back to full squad when no confirmed
-        # lineup is provided.
+        # Build a per-fixture XI map for THIS team. Each fixture independently
+        # gates bench rows in the inner loop below — earlier single-fixture
+        # design captured a team-wide set + restricted team_players upfront,
+        # which silently dropped bench rows from OTHER fixtures (the league
+        # nightly batch covers ~7 upcoming gameweeks). Now: fixtures without
+        # a confirmed XI keep their full squad; fixtures with a confirmed XI
+        # only emit rows for those 11 starters.
+        #
+        # _player_in_any_xi flows into player_criteria's in_confirmed_xi
+        # kwarg — when a player is confirmed for ANY upcoming fixture they
+        # bypass the team's-last-5 appearance gate (manager has signalled
+        # match availability, rotation rest is no longer disqualifying).
+        # Matches the Hakimi case: confirmed for UCL final overrides his
+        # 5-fixture absence in PSG's Ligue 1 run-up.
+        _confirmed_xi_per_fix = {}    # {fixture_id: set(player_id)}
         if confirmed_lineups:
             for _fid in specific_team_predictions['fixture_id'].unique():
                 _lineup_ids = confirmed_lineups.get((int(_fid), int(team_id)))
                 if _lineup_ids:
-                    team_players = team_players[team_players['id'].isin(_lineup_ids)]
-                    break  # one fixture per call in per-fixture path
+                    _confirmed_xi_per_fix[int(_fid)] = _lineup_ids
+        _player_in_any_xi = set().union(*_confirmed_xi_per_fix.values()) if _confirmed_xi_per_fix else set()
         for name, id in team_players[['display_name', 'id']].values:
             # player_pred_stats = {}
             # UPDATED - New Parameter: season_id and we can now use team
-            if player_criteria(name, team, fixtures, player_stats, players, teams, season_id, competition_id, comp_teams):
+            if player_criteria(name, team, fixtures, player_stats, players, teams, season_id, competition_id, comp_teams,
+                               in_confirmed_xi=int(id) in _player_in_any_xi):
                 for stat in range(len(stat_list)):  # UPDATED - use stat instead of i
                     if stat_list[stat] == 'Goals':  # UPDATED - use stat_list[stat] instead of i
                         try:
@@ -1773,6 +1809,16 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
 
                     ## NEW - Loop through specific team predictions to create entries for each fixture
                     for i in range(len(specific_team_predictions)):
+                        _fid = int(specific_team_predictions['fixture_id'].iloc[i])
+                        # Per-fixture XI gate: when THIS fixture has a confirmed
+                        # XI and the player isn't in it, skip writing this row.
+                        # Fixtures without a confirmed XI fall through (full
+                        # squad iterated). Replaces the old team-wide
+                        # team_players restriction that silently leaked into
+                        # other fixtures in multi-fixture batches.
+                        _xi_for_fix = _confirmed_xi_per_fix.get(_fid)
+                        if _xi_for_fix is not None and int(id) not in _xi_for_fix:
+                            continue
                         player_pred_stats = {}
                         player_pred_stats['player_id'] = id
                         player_pred_stats['Player'] = name
@@ -1782,7 +1828,17 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
                         player_pred_stats['fixture_id'] = specific_team_predictions['fixture_id'].iloc[i]
                         player_pred_stats['kickoff_datetime'] = specific_team_predictions['kickoff_datetime'].iloc[i]
                         player_pred_stats['stat_name'] = stat_list[stat]
-                        player_pred_stats['value'] = specific_team_predictions[stat_list[stat]].iloc[i] * stat_prop
+                        _value = specific_team_predictions[stat_list[stat]].iloc[i] * stat_prop
+                        _blend_st = PLAYER_BLEND_STAT_NAMES.get(stat_list[stat])
+                        if odds_for_fixture_players and _blend_st is not None:
+                            _ladders = (odds_for_fixture_players
+                                        .get(_fid, {})
+                                        .get(int(id), {})
+                                        .get(_blend_st, {}))
+                            _value = blend_player_stat(
+                                float(_value), _ladders, _blend_st, odds_blend_weight,
+                            )
+                        player_pred_stats['value'] = _value
                         full_predicted_stats.append(player_pred_stats)
 
                         # if sum(player_pred_stats.values()) == 0:

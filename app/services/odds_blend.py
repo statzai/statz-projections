@@ -59,6 +59,36 @@ STAT_COLUMN_TO_MARKET = {
 }
 
 
+# Per-stat bookmaker priority for PLAYER-PROP blending. bet365 always
+# leads regardless of aggregate coverage — cascade falls through per
+# (player, fixture) row when bet365 has no quote. Rest ordered by
+# observed coverage. Keys are stats_types.id (52=Goals, 42=Shots Total,
+# 86=Shots On Target). v1 is these three; extend in v1.5 with Tackles
+# (78), Fouls (56), Fouls Drawn (96), Yellow Cards (84), Assists (79).
+PLAYER_STAT_BOOKIE_PRIORITY = {
+    52: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Goals
+    42: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Shots Total
+    86: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Shots On Target
+}
+
+# Derived constants — callers import these directly rather than
+# recomputing the union per call site.
+PLAYER_BLEND_STAT_IDS = list(PLAYER_STAT_BOOKIE_PRIORITY.keys())
+PLAYER_BLEND_BOOKS = sorted({b for lst in PLAYER_STAT_BOOKIE_PRIORITY.values() for b in lst})
+
+# DataFrame column / row-dict key → stats_type_id for the v1 blend.
+# Used by callers (statz_functions.distribute_team_predictions_to_players
+# and wc_player_stat_service._build_player_rows) to translate the stat
+# name they're iterating over to the integer key in
+# PLAYER_STAT_BOOKIE_PRIORITY. v1.5+ stats added here propagate to both
+# call sites automatically.
+PLAYER_BLEND_STAT_NAMES = {
+    'Goals':           52,
+    'Shots Total':     42,
+    'Shots On Target': 86,
+}
+
+
 def _poisson_pmf(k: int, lam: float) -> float:
     if lam <= 0:
         return 1.0 if k == 0 else 0.0
@@ -94,7 +124,10 @@ def _margin_stripped_over_prob(over_price: Optional[float], under_price: Optiona
     return None
 
 
-def fit_lambda_from_ladder(ladder: list) -> Optional[float]:
+def fit_lambda_from_ladder(
+    ladder: list,
+    prob_filter: Tuple[float, float] = (0.10, 0.90),
+) -> Optional[float]:
     """Fit a single Poisson λ to a list of over/under lines via
     squared-error MLE in probability space.
 
@@ -113,13 +146,22 @@ def fit_lambda_from_ladder(ladder: list) -> Optional[float]:
     Filters out lines with degenerate prices (≤ 1.05 or ≥ 30): those
     are bet365 no-take stubs, not real prices — they carry no info.
 
+    prob_filter: (lo, hi) bounds on the derived over-probability. Lines
+    outside the band are dropped. Default (0.10, 0.90) for team-stat
+    ladders (corners 8.5/9.5/10.5/.. , cards 3.5/4.5/.. — deep enough
+    that the band has plenty of rungs left). Player-prop callers pass
+    (0.02, 0.90) because typical player ladders are shallow (1+/2+/3+),
+    so even a 0.04-probability rung carries meaningful signal.
+
     Returns None if no usable line.
     """
     if not ladder:
         return None
 
+    lo, hi = prob_filter
+
     # Build the (k, p_over) pairs to fit. Drop lines where the
-    # margin-stripped over-probability is outside [0.10, 0.90] —
+    # margin-stripped over-probability is outside [lo, hi] —
     # outside that band three things go wrong simultaneously:
     #   1. The Poisson tail is insensitive to λ → line carries no
     #      real info anyway (squared error stays near 0 for any λ).
@@ -138,7 +180,7 @@ def fit_lambda_from_ladder(ladder: list) -> Optional[float]:
         p_over = _margin_stripped_over_prob(over_price, under_price)
         if p_over is None:
             continue
-        if p_over < 0.10 or p_over > 0.90:
+        if p_over < lo or p_over > hi:
             continue
         k = int(math.floor(line)) + 1
         rows.append((k, p_over))
@@ -572,6 +614,175 @@ def blend_team_stat(
     fh = (1.0 - blend_weight) * model_home + blend_weight * lh_b
     fa = (1.0 - blend_weight) * model_away + blend_weight * la_b
     return fh, fa
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Player-prop blend
+# ─────────────────────────────────────────────────────────────────────
+#
+# Mirrors the team-stat blend in shape but operates per (fixture, player,
+# stats_type). Schema-level differences from team stats:
+#
+#   - Player odds are stored per book in `{book}_player_odds` tables
+#     with columns (fixture_id, player_id, stats_type_id, stat_min,
+#     price). All 5 books use the same column names.
+#   - All player ladders are OVER-ONLY (no paired under). v1 uses raw
+#     1/price as the implied probability — no margin stripping.
+#   - Ladders are typically shallow (1+/2+/3+) so the probability filter
+#     widens to (0.02, 0.90) — see fit_lambda_from_ladder.
+#   - bet365 always leads the priority cascade per the global rule; the
+#     cascade falls through per (fixture, player) row when bet365 has
+#     no quote for that specific player.
+
+# Player-prop ladders are over-only; this is the wider filter band
+# passed to fit_lambda_from_ladder. Player ladders are shallow (1+/2+/3+)
+# so the [0.10, 0.90] team-stat band drops most rungs; [0.02, 0.90]
+# keeps "3+ goals for a striker" (~0.04) and "5+ tackles for a CDM"
+# (~0.03) while still rejecting bookmaker stubs.
+PLAYER_PROB_FILTER = (0.02, 0.90)
+
+
+async def load_player_odds(
+    conn,
+    fixture_ids: list,
+    stats_type_ids: list,
+    books: list,
+) -> dict:
+    """Pre-load per-book player-prop odds for a batch of fixtures.
+
+    Returns a nested dict:
+        {fixture_id: {player_id: {stats_type_id: {book: [(line, over_price, None), ...sorted asc]}}}}
+
+    Each ladder element matches the (line, over_price, under_price)
+    shape expected by fit_lambda_from_ladder — under_price is always
+    None because player props are over-only. `line = stat_min - 0.5` so
+    fit_lambda_from_ladder's `k = floor(line) + 1 = stat_min`, i.e. an
+    "X+" market maps to P(value ≥ X).
+
+    Rows deduped via MAX(price) per (fixture, player, stats_type,
+    stat_min). bet365 has a unique constraint on this tuple as of
+    2026-05-25 + ladbrokes/coral use updateOrCreate → no-op for them.
+    Midnite + BoyleSports use raw insert() with no unique key, so the
+    MAX() is the canonical dedupe for those two.
+
+    Rows with NULL player_id (midnite/boyle ~4-9% unmatched scrape
+    rows) and NULL stat_min are filtered out — they carry no usable
+    signal until the ingest-side player-id backfill ships.
+    """
+    if not fixture_ids or not stats_type_ids or not books:
+        return {}
+
+    fix_ph = ",".join(["%s"] * len(fixture_ids))
+    st_ph = ",".join(["%s"] * len(stats_type_ids))
+    params = tuple(fixture_ids) + tuple(stats_type_ids)
+
+    result = {}
+    for book in books:
+        table = f"{book}_player_odds"
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    SELECT fixture_id, player_id, stats_type_id, stat_min,
+                           MAX(price) AS price
+                    FROM {table}
+                    WHERE fixture_id IN ({fix_ph})
+                      AND stats_type_id IN ({st_ph})
+                      AND player_id IS NOT NULL
+                      AND stat_min IS NOT NULL
+                      AND stat_min > 0
+                    GROUP BY fixture_id, player_id, stats_type_id, stat_min
+                    """,
+                    params,
+                )
+                rows = await cur.fetchall()
+        except Exception as e:
+            # Only swallow the "table doesn't exist" path (MySQL errno
+            # 1146) — anything else (lost connection, syntax break,
+            # schema drift) must surface so it gets investigated rather
+            # than silently demoting the cascade for that book.
+            if getattr(e, 'args', None) and e.args[0] == 1146:
+                logger.warning("load_player_odds: table %s missing — skipping book", table)
+                continue
+            raise
+
+        # Group rows into [(line, over, None)] ladders per
+        # (fid, pid, stat_type, book). stat_min → line = stat_min - 0.5.
+        buckets = {}  # buckets[(fid, pid, st)][stat_min] = price
+        for fid, pid, st, stat_min, price in rows:
+            buckets.setdefault((int(fid), int(pid), int(st)), {})[int(stat_min)] = float(price)
+
+        for (fid, pid, st), by_min in buckets.items():
+            ladder = [(float(sm) - 0.5, price, None)
+                      for sm, price in sorted(by_min.items())]
+            (result.setdefault(fid, {})
+                   .setdefault(pid, {})
+                   .setdefault(st, {})[book]) = ladder
+
+    n_fix_with_data = len(result)
+    logger.info(
+        "Loaded player odds for %d/%d fixtures across %s (stats_type_ids=%s)",
+        n_fix_with_data, len(fixture_ids),
+        ",".join(books), stats_type_ids,
+    )
+    return result
+
+
+def derive_player_lambdas(
+    ladders_by_book: dict,
+    books_priority: list,
+) -> Optional[float]:
+    """First-book-wins cascade for a single (player, fixture, stats_type).
+
+    ladders_by_book: {book: [(line, over_price, None), ...]} — the
+        innermost dict from load_player_odds, keyed by book.
+    books_priority: ordered list of book names to try.
+
+    Returns the first usable λ produced by fit_lambda_from_ladder on
+    any book's ladder, or None if no book has data.
+
+    Single-stat (not per-team like the team-stat equivalent) because a
+    player prop is one λ, not a pair.
+    """
+    for book in books_priority:
+        ladder = ladders_by_book.get(book)
+        if not ladder:
+            continue
+        lam = fit_lambda_from_ladder(ladder, prob_filter=PLAYER_PROB_FILTER)
+        if lam is not None:
+            return lam
+    return None
+
+
+def blend_player_stat(
+    model_lambda: float,
+    ladders_by_book: dict,
+    stats_type_id: int,
+    blend_weight: float,
+) -> float:
+    """Blend a single (player, fixture, stats_type) λ in lambda space.
+
+    ladders_by_book: {book: ladder} — pre-loaded by load_player_odds,
+        already scoped to this (fixture, player, stats_type). Pass {}
+        when no book has data; this returns model_lambda unchanged.
+
+    stats_type_id: drives the per-stat bookmaker priority lookup
+        via PLAYER_STAT_BOOKIE_PRIORITY.
+
+    blend_weight: service-level α (0.3 domestic/WC, 0.5 euro).
+    """
+    if not ladders_by_book:
+        return model_lambda
+
+    books = PLAYER_STAT_BOOKIE_PRIORITY.get(stats_type_id)
+    if not books:
+        return model_lambda
+
+    lam_bookie = derive_player_lambdas(ladders_by_book, books)
+    if lam_bookie is None:
+        return model_lambda
+
+    return (1.0 - blend_weight) * model_lambda + blend_weight * lam_bookie
 
 
 def compute_final_goals_and_probs(

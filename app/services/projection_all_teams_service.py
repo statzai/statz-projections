@@ -21,6 +21,7 @@ from app.repository.fanteam_repo import insert_fanteam_projections_async
 from app.repository.opta_repo import insert_opta_projections_async
 from app.repository.draftkings_repo import insert_draftkings_projections_async
 from app.repository.dream11_repo import insert_dream11_projections_async
+from app.source_database import get_source_connection, release_source_connection
 warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
 import numpy as np
@@ -1298,12 +1299,32 @@ class ProjectionAllTeams:
 
                 logger.info(f"[{league}] Starting player projections...")
                 _t = time.time()
+                # Pre-load confirmed XI + player-prop odds (Goals/Shots/SoT v1).
+                # Same wiring as projection_service.py — this all-leagues
+                # batch produces the canonical nightly rows, so it MUST
+                # blend or per-league re-runs end up diverging.
+                from app.services.odds_blend import (
+                    load_confirmed_lineups, load_player_odds,
+                    PLAYER_BLEND_BOOKS, PLAYER_BLEND_STAT_IDS,
+                )
+                _pl_fix_ids = next_fix['id'].astype(int).unique().tolist()
+                _ll_conn = await get_source_connection()
+                try:
+                    _confirmed_lineups = await load_confirmed_lineups(_ll_conn, _pl_fix_ids)
+                    _odds_for_fixture_players = await load_player_odds(
+                        _ll_conn, _pl_fix_ids, PLAYER_BLEND_STAT_IDS, PLAYER_BLEND_BOOKS,
+                    )
+                finally:
+                    release_source_connection(_ll_conn)
                 pl_projections = distribute_team_predictions_to_players(player_stats, team_stats, team_projections, stats_types,
                                                                         fixtures_df, players, teams, comps, 0.97,
                                                                         season_id=[current_season_id, previous_season_id,
                                                                                    previous_season_id_above,
                                                                                    previous_season_id_below],
-                                                                        competition_id=league_id, comp_teams=comp_teams)
+                                                                        competition_id=league_id, comp_teams=comp_teams,
+                                                                        confirmed_lineups=_confirmed_lineups,
+                                                                        odds_for_fixture_players=_odds_for_fixture_players,
+                                                                        odds_blend_weight=odds_beta)
                 logger.info(f"[{league}] Player projections computed - {len(pl_projections)} players ({time.time()-_t:.1f}s)")
 
                 player_pos = []
