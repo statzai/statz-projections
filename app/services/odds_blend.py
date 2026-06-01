@@ -143,8 +143,13 @@ def fit_lambda_from_ladder(
     little to the fit. Near-50/50 lines, by contrast, are highly
     λ-sensitive and dominate. No special tier logic needed.
 
-    Filters out lines with degenerate prices (≤ 1.05 or ≥ 30): those
-    are bet365 no-take stubs, not real prices — they carry no info.
+    Stub-line rejection is band-relative via prob_filter, not a fixed
+    price cutoff: the (lo, hi) bounds on the derived over-probability
+    implicitly reject prices outside [1/hi, 1/lo]. Default (0.10, 0.90)
+    means prices ≤ ~1.11 and ≥ 10 are dropped — that's where bookmaker
+    no-take stubs cluster on deep team-stat ladders. Player-prop callers
+    pass (0.02, 0.90) → keeps prices up to ~50 (a legitimate "3+ goals
+    for a striker" rung) while still rejecting ≤ ~1.11 near-cert stubs.
 
     prob_filter: (lo, hi) bounds on the derived over-probability. Lines
     outside the band are dropped. Default (0.10, 0.90) for team-stat
