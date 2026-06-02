@@ -60,8 +60,6 @@ from app.source_database import get_source_connection, release_source_connection
 
 logger = logging.getLogger("wc_player_stats")
 
-WC_COMP_ID = 732
-
 # --- Game window -----------------------------------------------------------
 GAME_WINDOW = 30             # last N appearances per player (intl-first, club-filled)
 CLUB_LOOKBACK_MONTHS = 18    # how far back to pull club games from (load bound)
@@ -240,10 +238,10 @@ def _weighted_share(
     return share, n
 
 
-async def _load_data(conn, fixture_ids_filter=None) -> dict:
-    """Pull everything: confirmed WC squads, each player's main 30-game
-    window + xG window, the player/team stats for those fixtures, the WC
-    team_projections to distribute, and name lookups."""
+async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict:
+    """Pull everything: WC-game squads, each player's main 30-game window +
+    xG window, the player/team stats for those fixtures, the team_projections
+    rows to distribute (filtered to competition_id), and name lookups."""
     # End any transaction inherited on this pooled connection so the reads
     # below get a FRESH snapshot — a pooled connection can carry a stale
     # InnoDB REPEATABLE READ snapshot taken before InternationalTeamStatService (the
@@ -412,7 +410,7 @@ async def _load_data(conn, fixture_ids_filter=None) -> dict:
             WHERE f.competition_id = %s
               {tp_fid_filter_sql}
             """,
-            (WC_COMP_ID,) + tp_fid_filter_params,
+            (competition_id,) + tp_fid_filter_params,
         )
         team_proj_rows = await cur.fetchall()
 
@@ -674,15 +672,36 @@ def _build_prop_rows(player_df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 class WcPlayerStatService:
-    """Compute + write per-player stat projections for upcoming WC fixtures."""
+    """Compute + write per-player stat projections for upcoming international
+    fixtures. Defaults to WC scope when called without an IntlProjectionScope.
+
+    NOTE: file still named wc_player_stat_service.py because the default
+    squad source (wc_squads JOIN wc_players) is WC-specific. Non-WC scopes
+    will route through a different squad provider in commit 3 (intl_squad_provider).
+    """
+
+    def __init__(self, scope=None):
+        # Lazy import — international_projection_service imports this class
+        # at module-load.
+        if scope is None:
+            from app.services.international_projection_service import INTL_SCOPES
+            scope = INTL_SCOPES['World Cup']
+        self.scope = scope
 
     async def project(self, commit: bool = True, fixture_ids: list = None) -> dict:
-        """fixture_ids: optional — when set, scope projection + DELETE to those WC fixtures only."""
-        logger.info(f"WC player-stat projection start — commit={commit}, fixture_ids={fixture_ids}")
+        """fixture_ids: optional — when set, scope projection + DELETE to those fixtures only."""
+        logger.info(
+            f"{self.scope.competition_name} player-stat projection start — "
+            f"commit={commit}, fixture_ids={fixture_ids}"
+        )
 
         conn = await get_source_connection()
         try:
-            data = await _load_data(conn, fixture_ids_filter=fixture_ids)
+            data = await _load_data(
+                conn,
+                competition_id=self.scope.competition_id,
+                fixture_ids_filter=fixture_ids,
+            )
             squads = data['squads']
             player_windows = data['player_windows']
             player_xg_windows = data['player_xg_windows']
@@ -773,26 +792,30 @@ class WcPlayerStatService:
                             """DELETE pp FROM player_projections pp
                                JOIN fixtures f ON f.id = pp.fixture_id
                                WHERE f.competition_id = %s""",
-                            (WC_COMP_ID,),
+                            (self.scope.competition_id,),
                         )
                         await cur.execute(
                             """DELETE ppp FROM player_prop_projections ppp
                                JOIN fixtures f ON f.id = ppp.fixture_id
                                WHERE f.competition_id = %s""",
-                            (WC_COMP_ID,),
+                            (self.scope.competition_id,),
                         )
                 await conn.commit()
 
                 teams_df = pd.DataFrame(
                     list(data['teams'].items()), columns=['id', 'name']
                 )
-                await insert_player_async(df, teams=teams_df, competition_id=WC_COMP_ID)
-                logger.info(f"WC player-stat projections written: {len(df)} rows")
+                await insert_player_async(df, teams=teams_df, competition_id=self.scope.competition_id)
+                logger.info(
+                    f"{self.scope.competition_name} player-stat projections written: {len(df)} rows"
+                )
 
                 await insert_players_stats_async(
-                    prop_df, teams=teams_df, competition_id=WC_COMP_ID
+                    prop_df, teams=teams_df, competition_id=self.scope.competition_id
                 )
-                logger.info(f"WC player-prop projections written: {n_prop_rows} rows")
+                logger.info(
+                    f"{self.scope.competition_name} player-prop projections written: {n_prop_rows} rows"
+                )
 
             return {
                 'n_player_rows': len(output_rows),

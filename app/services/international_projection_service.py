@@ -32,6 +32,7 @@ per-player stat projections (WcPlayerStatService → player_projections,
 scoped to nations with a confirmed tournament_squads entry).
 """
 import logging
+from dataclasses import dataclass, field
 from datetime import date, datetime
 
 import numpy as np
@@ -48,11 +49,13 @@ from app.source_database import get_source_connection, release_source_connection
 
 logger = logging.getLogger("international_projection")
 
-WC_COMP_ID = 732
+# team_ratings storage bucket for international football. All 211 national
+# teams' ratings live under this single competition_id regardless of which
+# intl comp is being projected — friendlies, qualifiers, WC all read from
+# the same pool. Distinct from `scope.competition_id` which is the comp
+# whose FIXTURES are being projected.
+INTL_RATINGS_BUCKET_COMP_ID = 732
 AVG_GOALS = 1.3
-HOST_BONUS = 1.10
-HOST_PENALTY = 0.90   # opp playing in a host country: -10% expected goals
-HOSTS = {'United States', 'Mexico', 'Canada'}
 
 # odds_beta = bet365 goal-line blend weight (0 = pure model, 1 = pure bookie).
 # Bumped to 0.5 alongside the goals odds-blend cascade rewrite 2026-05-29 —
@@ -63,33 +66,92 @@ ODDS_BETA = 0.5
 BOOST = 1.0
 
 
+@dataclass(frozen=True)
+class IntlProjectionScope:
+    """Per-comp configuration for the international projection pipeline.
+
+    competition_id    — the comp whose fixtures are being projected
+    competition_name  — human-readable name (matches competitions.name)
+    hosts             — host nation names (only WC has these); empty for
+                        non-tournament intl comps
+    host_bonus/penalty — λ multipliers when a host plays at home / opp
+                        plays in a host country
+    bracket_config    — TournamentConfig for tournaments with a knockout
+                        bracket (WC, Euros, Copa, AFCON). None for
+                        friendlies / qualifiers / Nations League group
+                        stage etc. — those skip Step 3.
+    has_squad_source  — True when wc_squads/wc_players (or future Euros
+                        equivalent) carries the named squad. False routes
+                        the player-stat service through the recent-caps
+                        provider in intl_squad_provider.py.
+    fantasy_rules     — 'fifa_wc_2026' enables Step 6 (WC fantasy points).
+                        None for non-WC comps; future Euros fantasy keys
+                        would be added here.
+    """
+    competition_id: int
+    competition_name: str
+    hosts: frozenset = field(default_factory=frozenset)
+    host_bonus: float = 1.0
+    host_penalty: float = 1.0
+    bracket_config: object = None
+    has_squad_source: bool = False
+    fantasy_rules: object = None
+
+
+# Registry of every comp the international projection pipeline knows about.
+# Adding a comp = adding an entry here + flipping competitions.is_projected
+# = 1 in the DB. Renamed comps trip the name lookup; keys must match
+# competitions.name exactly.
+INTL_SCOPES = {
+    'World Cup': IntlProjectionScope(
+        competition_id=732,
+        competition_name='World Cup',
+        hosts=frozenset({'United States', 'Mexico', 'Canada'}),
+        host_bonus=1.10,
+        host_penalty=0.90,
+        bracket_config=WC_2026,
+        has_squad_source=True,
+        fantasy_rules='fifa_wc_2026',
+    ),
+}
+
+
 class InternationalProjectionService:
     """Routes any international fixture (national-team comp) through the
     same pipeline. WC is one comp among several — friendlies, qualifiers,
-    Euros etc. will be added by registering scopes in INTL_SCOPES (see
-    below, introduced in the IntlProjectionScope refactor).
+    Euros etc. are added by registering scopes in INTL_SCOPES.
 
     Stateless — instance method only for parity with EuroCompProjectionService.
     """
 
-    INTERNATIONAL_COMPS = ['World Cup']
-
     @staticmethod
     def is_international_comp(league: str) -> bool:
-        return league in InternationalProjectionService.INTERNATIONAL_COMPS
+        return league in INTL_SCOPES
 
     async def projections(self, league_request=None, commit: bool = True) -> dict:
-        """Compute + (optionally) write WC fixture projections.
+        """Compute + (optionally) write international fixture projections.
 
         Self-contained: refreshes Statz international ratings inline
         (committing to team_ratings) before computing fixture projections.
         Score prediction uses the same shared helpers as domestic
         (get_result_probs + find_inputs_for_probs).
 
+        Per-comp behaviour is driven by the IntlProjectionScope looked up
+        from INTL_SCOPES by request.league. Hosts/host_bonus, bracket
+        config, squad source, fantasy rules all flow from the scope.
+
         Returns a stats dict:
           {n_total, n_projected, n_blended, n_skipped_unknown_team,
-           n_ratings, ratings_snapshot_date, committed}
+           n_ratings, ratings_snapshot_date, committed, competition_id, ...}
         """
+        league_name = league_request.league if league_request else 'World Cup'
+        if league_name not in INTL_SCOPES:
+            raise ValueError(
+                f"InternationalProjectionService called for unknown league {league_name!r}. "
+                f"Known: {sorted(INTL_SCOPES.keys())}"
+            )
+        scope = INTL_SCOPES[league_name]
+
         # Per-fixture mode (set via LeagueRequest.fixture_ids) skips
         # the slow fixture-independent / bracket-wide steps:
         #   - Step 1 (rating refresh): uses last nightly snapshot from
@@ -101,7 +163,8 @@ class InternationalProjectionService:
             fixture_ids_filter = [int(x) for x in league_request.fixture_ids]
 
         logger.info(
-            f"International projection start — commit={commit}, odds_beta={ODDS_BETA}, "
+            f"International projection start — comp={scope.competition_name} "
+            f"(id={scope.competition_id}), commit={commit}, odds_beta={ODDS_BETA}, "
             f"boost={BOOST}, fixture_ids={fixture_ids_filter}"
         )
 
@@ -124,7 +187,7 @@ class InternationalProjectionService:
                               WHERE competition_id = %s AND team_id = tr.team_id
                           )
                         """,
-                        (WC_COMP_ID, WC_COMP_ID),
+                        (INTL_RATINGS_BUCKET_COMP_ID, INTL_RATINGS_BUCKET_COMP_ID),
                     )
                     rows = await cur.fetchall()
                 ratings = {r[0]: (float(r[1]), float(r[2])) for r in rows}
@@ -168,10 +231,12 @@ class InternationalProjectionService:
                       {fid_filter_sql}
                     ORDER BY f.kickoff_datetime
                     """,
-                    (WC_COMP_ID,) + fid_filter_params,
+                    (scope.competition_id,) + fid_filter_params,
                 )
                 fixtures = await cur.fetchall()
-                logger.info(f"Loaded {len(fixtures)} upcoming WC fixtures")
+                logger.info(
+                    f"Loaded {len(fixtures)} upcoming {scope.competition_name} fixtures"
+                )
 
             # Pre-load bet365 goals over/under for these fixtures. The
             # blend cascade (paths 1-3) uses per-team and match-total
@@ -196,12 +261,12 @@ class InternationalProjectionService:
                 a_atk, a_def = ratings[away]
                 home_goals = (h_atk / 100) * (a_def / 100) * AVG_GOALS
                 away_goals = (a_atk / 100) * (h_def / 100) * AVG_GOALS
-                if home in HOSTS:
-                    home_goals *= HOST_BONUS
-                    away_goals *= HOST_PENALTY
-                elif away in HOSTS:
-                    away_goals *= HOST_BONUS
-                    home_goals *= HOST_PENALTY
+                if home in scope.hosts:
+                    home_goals *= scope.host_bonus
+                    away_goals *= scope.host_penalty
+                elif away in scope.hosts:
+                    away_goals *= scope.host_bonus
+                    home_goals *= scope.host_penalty
 
                 # Score prediction via the shared odds-blend cascade.
                 # Paths 1-3 consume bet365 goals over/under directly;
@@ -258,8 +323,9 @@ class InternationalProjectionService:
                 ))
 
             logger.info(
-                f"International projection ready: total={len(fixtures)} projected={len(inserts)} "
-                f"blended={n_blended} skipped_unknown_team={n_skipped_unknown_team}"
+                f"{scope.competition_name} projection ready: total={len(fixtures)} "
+                f"projected={len(inserts)} blended={n_blended} "
+                f"skipped_unknown_team={n_skipped_unknown_team}"
             )
 
             if commit and inserts:
@@ -281,7 +347,7 @@ class InternationalProjectionService:
                             JOIN fixtures f ON f.id = fp.fixture_id
                             WHERE f.competition_id = %s
                             """,
-                            (WC_COMP_ID,),
+                            (scope.competition_id,),
                         )
                     deleted = cur.rowcount
                     now = datetime.now()
@@ -322,36 +388,39 @@ class InternationalProjectionService:
         team_stat_result = None
         if commit:
             try:
-                team_stat_result = await InternationalTeamStatService().project(
+                team_stat_result = await InternationalTeamStatService(scope=scope).project(
                     commit=commit, fixture_ids=fixture_ids_filter,
                 )
-                logger.info(f"WC team-stat projection: {team_stat_result}")
+                logger.info(f"{scope.competition_name} team-stat projection: {team_stat_result}")
             except Exception as e:
-                logger.exception(f"WC team-stat projection failed: {e}")
+                logger.exception(f"{scope.competition_name} team-stat projection failed: {e}")
                 team_stat_result = {'error': str(e)}
 
         # Step 5: Per-player stat projections.
         player_stat_result = None
         if commit:
             try:
-                player_stat_result = await WcPlayerStatService().project(
+                player_stat_result = await WcPlayerStatService(scope=scope).project(
                     commit=commit, fixture_ids=fixture_ids_filter,
                 )
-                logger.info(f"WC player-stat projection: {player_stat_result}")
+                logger.info(f"{scope.competition_name} player-stat projection: {player_stat_result}")
             except Exception as e:
-                logger.exception(f"WC player-stat projection failed: {e}")
+                logger.exception(f"{scope.competition_name} player-stat projection failed: {e}")
                 player_stat_result = {'error': str(e)}
 
-        # Step 6: Per-(fixture, player) WC Fantasy point projections.
+        # Step 6: Per-(fixture, player) Fantasy point projections.
+        # FIFA WC fantasy scoring is the only ruleset wired today. Other
+        # comps (Euros / Copa / AFCON) will need their own scoring-rule
+        # configs before opting in via scope.fantasy_rules.
         fantasy_points_result = None
-        if commit:
+        if commit and scope.fantasy_rules == 'fifa_wc_2026':
             try:
-                fantasy_points_result = await WcFantasyPointsService().project(
+                fantasy_points_result = await WcFantasyPointsService(scope=scope).project(
                     commit=commit, fixture_ids=fixture_ids_filter,
                 )
-                logger.info(f"WC fantasy points projection: {fantasy_points_result}")
+                logger.info(f"{scope.competition_name} fantasy points projection: {fantasy_points_result}")
             except Exception as e:
-                logger.exception(f"WC fantasy points projection failed: {e}")
+                logger.exception(f"{scope.competition_name} fantasy points projection failed: {e}")
                 fantasy_points_result = {'error': str(e)}
 
         return {
@@ -362,6 +431,8 @@ class InternationalProjectionService:
             'n_ratings': len(ratings),
             'ratings_snapshot_date': 'cached' if fixture_ids_filter else str(ratings_date),
             'fixture_ids': fixture_ids_filter,
+            'competition_id': scope.competition_id,
+            'competition_name': scope.competition_name,
             'committed': commit,
             'tournament_simulation': sim_result,
             'team_stat_projection': team_stat_result,

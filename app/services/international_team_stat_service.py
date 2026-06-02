@@ -50,7 +50,10 @@ from app.source_database import get_source_connection, release_source_connection
 
 logger = logging.getLogger("international_team_stats")
 
-WC_COMP_ID = 732
+# Comp-agnostic constant — team_ratings storage bucket for all
+# international football (211 national teams' ratings live under this id).
+# Distinct from the comp being projected, which comes from scope.competition_id.
+INTL_RATINGS_BUCKET_COMP_ID = 732
 
 # Mirror the rating pipeline's pool of international comps.
 INTERNATIONAL_COMP_IDS = [
@@ -285,10 +288,14 @@ def _load_all_leagues_models() -> Dict[str, object]:
     return models
 
 
-async def _load_data(conn, fixture_ids_filter=None) -> dict:
+async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict:
     """Pull everything in one round-trip set: international fixtures, team
-    stats, team_ratings, upcoming WC fixtures (+ their fixture_projections
-    goals lambdas)."""
+    stats, team_ratings, upcoming fixtures for the requested competition_id
+    (+ their fixture_projections goals lambdas).
+
+    team_ratings always reads from INTL_RATINGS_BUCKET_COMP_ID (732) — the
+    rating-storage bucket is comp-agnostic across international football.
+    """
     placeholders_comp = ",".join(["%s"] * len(INTERNATIONAL_COMP_IDS))
     placeholders_stat = ",".join(["%s"] * len(STAT_TYPE_IDS))
 
@@ -334,7 +341,7 @@ async def _load_data(conn, fixture_ids_filter=None) -> dict:
             FROM team_ratings WHERE competition_id = %s
             ORDER BY team_id, date
             """,
-            (WC_COMP_ID,),
+            (INTL_RATINGS_BUCKET_COMP_ID,),
         )
         ratings_rows = await cur.fetchall()
 
@@ -362,7 +369,7 @@ async def _load_data(conn, fixture_ids_filter=None) -> dict:
               {wc_fid_filter_sql}
             ORDER BY f.kickoff_datetime
             """,
-            (WC_COMP_ID,) + wc_fid_filter_params,
+            (competition_id,) + wc_fid_filter_params,
         )
         wc_fixtures_rows = await cur.fetchall()
 
@@ -550,16 +557,27 @@ def _compute_avg_shots_per_goal(fixtures_df: pd.DataFrame, stats_df: pd.DataFram
 # ---------------------------------------------------------------------------
 
 class InternationalTeamStatService:
-    """Compute + write per-team stat projections for upcoming WC fixtures."""
+    """Compute + write per-team stat projections for upcoming international
+    fixtures. Scope (which comp, which hosts, which bracket-config) is
+    driven by the IntlProjectionScope passed at construction.
+    """
+
+    def __init__(self, scope=None):
+        # Lazy import to avoid the natural circular: international_projection_service
+        # imports this class at module-load time.
+        if scope is None:
+            from app.services.international_projection_service import INTL_SCOPES
+            scope = INTL_SCOPES['World Cup']
+        self.scope = scope
 
     async def project(self, commit: bool = True, fixture_ids: list = None) -> dict:
         """fixture_ids: optional list — when set, scope the projection
-        to just those WC fixtures (used by per-fixture re-projection
+        to just those fixtures (used by per-fixture re-projection
         triggered on confirmed-lineup arrival)."""
         logger.info(
-            f"WC team-stat projection start — commit={commit}, "
-            f"opp_adj_strength={OPP_ADJ_STRENGTH} (no game cap), "
-            f"fixture_ids={fixture_ids}"
+            f"{self.scope.competition_name} team-stat projection start — "
+            f"commit={commit}, opp_adj_strength={OPP_ADJ_STRENGTH} "
+            f"(no game cap), fixture_ids={fixture_ids}"
         )
 
         models = _load_all_leagues_models()
@@ -571,7 +589,11 @@ class InternationalTeamStatService:
 
         conn = await get_source_connection()
         try:
-            data = await _load_data(conn, fixture_ids_filter=fixture_ids)
+            data = await _load_data(
+                conn,
+                competition_id=self.scope.competition_id,
+                fixture_ids_filter=fixture_ids,
+            )
             n_fixtures = len(data['fixtures_df'])
             n_stats_rows = len(data['stats_df'])
             n_ratings = len(data['ratings_df'])
@@ -780,10 +802,10 @@ class InternationalTeamStatService:
                         df.loc[home_mask, stat_col] = round(fh, 2)
                         df.loc[away_mask, stat_col] = round(fa, 2)
 
-                # Delete existing WC rows before insert (idempotent — mirrors
-                # the international_projection_service pattern). Per-fixture mode
-                # scopes the delete to the requested fixtures only so we
-                # don't wipe other WC team projections.
+                # Delete existing rows before insert (idempotent — mirrors
+                # the international_projection_service pattern). Per-fixture
+                # mode scopes the delete to the requested fixtures only so
+                # we don't wipe other team_projections rows for this comp.
                 async with conn.cursor() as cur:
                     if fixture_ids:
                         del_ph = ",".join(["%s"] * len(fixture_ids))
@@ -796,7 +818,7 @@ class InternationalTeamStatService:
                             """DELETE tp FROM team_projections tp
                                JOIN fixtures f ON f.id = tp.fixture_id
                                WHERE f.competition_id = %s""",
-                            (WC_COMP_ID,),
+                            (self.scope.competition_id,),
                         )
                 await conn.commit()
 
@@ -809,8 +831,10 @@ class InternationalTeamStatService:
                     await cur.execute("SELECT id, name FROM teams")
                     teams_rows = await cur.fetchall()
                 teams_df = pd.DataFrame(teams_rows, columns=['id', 'name'])
-                await insert_teams_async(df, teams=teams_df, competition_id=WC_COMP_ID)
-                logger.info(f"WC team-stat projections written: {len(df)} rows")
+                await insert_teams_async(df, teams=teams_df, competition_id=self.scope.competition_id)
+                logger.info(
+                    f"{self.scope.competition_name} team-stat projections written: {len(df)} rows"
+                )
 
             return {
                 'n_team_fixture_rows': len(output_rows),

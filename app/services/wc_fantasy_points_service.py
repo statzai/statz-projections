@@ -51,8 +51,6 @@ from app.source_database import get_source_connection, release_source_connection
 
 logger = logging.getLogger("wc_fantasy_points")
 
-WC_COMP_ID = 732
-
 # fixture_player_stats stats_type_ids we read out of player_projections.
 # Mirrors player_repo.STATUS_TYPES — only the ones we need to score.
 STAT_GOALS = 52
@@ -134,7 +132,7 @@ def _fantasy_points(stats: Dict[int, float], position: str, opp_goals: float) ->
     return round(pts, 2)
 
 
-async def _load_data(conn, fixture_ids_filter=None) -> dict:
+async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict:
     """Pull everything in one go.
 
     - long-format `player_projections` rows for WC (filtered to future fixtures)
@@ -167,7 +165,7 @@ async def _load_data(conn, fixture_ids_filter=None) -> dict:
               AND f.kickoff_datetime > NOW()
               {fp_fid_filter_sql}
             """,
-            (WC_COMP_ID,) + fp_fid_filter_params,
+            (competition_id,) + fp_fid_filter_params,
         )
         pp_rows = await cur.fetchall()
 
@@ -184,7 +182,7 @@ async def _load_data(conn, fixture_ids_filter=None) -> dict:
               AND f.kickoff_datetime > NOW()
               {fp_fid_filter_sql}
             """,
-            (WC_COMP_ID,) + fp_fid_filter_params,
+            (competition_id,) + fp_fid_filter_params,
         )
         fp_rows = await cur.fetchall()
 
@@ -302,15 +300,34 @@ def _build_rows(data: dict) -> list:
 
 
 class WcFantasyPointsService:
-    """Compute + write per-(fixture, player) WC Fantasy point projections."""
+    """Compute + write per-(fixture, player) WC Fantasy point projections.
+
+    FIFA-WC-2026-specific scoring rules. Gated by `scope.fantasy_rules ==
+    'fifa_wc_2026'` in the orchestrator — non-WC scopes don't reach this
+    service. Takes a scope for symmetry with the other sub-services; only
+    scope.competition_id is consumed (drives the comp filter in SQL).
+    """
+
+    def __init__(self, scope=None):
+        if scope is None:
+            from app.services.international_projection_service import INTL_SCOPES
+            scope = INTL_SCOPES['World Cup']
+        self.scope = scope
 
     async def project(self, commit: bool = True, fixture_ids: list = None) -> dict:
-        """fixture_ids: optional — when set, scope projection + DELETE to those WC fixtures only."""
-        logger.info(f"WC fantasy points start — commit={commit}, fixture_ids={fixture_ids}")
+        """fixture_ids: optional — when set, scope projection + DELETE to those fixtures only."""
+        logger.info(
+            f"{self.scope.competition_name} fantasy points start — "
+            f"commit={commit}, fixture_ids={fixture_ids}"
+        )
 
         conn = await get_source_connection()
         try:
-            data = await _load_data(conn, fixture_ids_filter=fixture_ids)
+            data = await _load_data(
+                conn,
+                competition_id=self.scope.competition_id,
+                fixture_ids_filter=fixture_ids,
+            )
             n_players = len(data['players'])
             n_fixtures = len(data['fixtures'])
             n_rounds = len(data['rounds'])
@@ -348,7 +365,7 @@ class WcFantasyPointsService:
                             """DELETE wfp FROM wc_fantasy_projections wfp
                                JOIN fixtures f ON f.id = wfp.fixture_id
                                WHERE f.competition_id = %s""",
-                            (WC_COMP_ID,),
+                            (self.scope.competition_id,),
                         )
                 await conn.commit()
 
