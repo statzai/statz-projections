@@ -375,14 +375,20 @@ class InternationalProjectionService:
             release_source_connection(conn)
 
         # Step 3: Monte Carlo tournament simulator (bracket-wide).
-        # Skipped in per-fixture mode — the sim reads the entire WC
+        # Skipped in per-fixture mode — the sim reads the entire bracket
         # fixture projection set and walks the bracket; a single-fixture
         # change doesn't shift bracket outcomes enough to be worth a full
         # 10k-sim rerun. The next nightly full pass will refresh it.
+        # Also skipped for non-bracket comps (friendlies, quals, Nations
+        # League group stage) — their scope.bracket_config is None.
         sim_result = None
-        if commit and not fixture_ids_filter:
-            sim_result = await TournamentSimulator().run(WC_2026, num_sims=10_000)
-            logger.info(f"WC tournament simulation: {sim_result}")
+        if commit and not fixture_ids_filter and scope.bracket_config is not None:
+            sim_result = await TournamentSimulator().run(scope.bracket_config, num_sims=10_000)
+            logger.info(f"{scope.competition_name} tournament simulation: {sim_result}")
+        elif scope.bracket_config is None:
+            logger.info(
+                f"Step 3: skipped (no bracket config for {scope.competition_name})"
+            )
 
         # Step 4: Per-team stat projections.
         team_stat_result = None

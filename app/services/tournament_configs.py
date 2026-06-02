@@ -84,3 +84,30 @@ WC_2026 = TournamentConfig(
 #     knockout_rounds=['r16', 'qf', 'sf', 'final'],
 #     has_third_place_playoff=False,
 # )
+
+
+# ---------------------------------------------------------------------------
+# Registry: which comps have a bracket worth simulating, and what config.
+# Read by InternationalProjectionService at scope-construction time (or by
+# any code that needs to ask "does this comp have a bracket?").
+# Friendlies / qualifiers / Nations League group stage have no bracket and
+# are deliberately absent here — their scope.bracket_config stays None, so
+# Step 3 (tournament simulator) skips for them.
+# ---------------------------------------------------------------------------
+BRACKET_CONFIGS = {
+    732: WC_2026,
+    # 1326: EURO_2028,             # uncomment when bracket drawn
+    # 1114: COPA_2026,
+    # 1117: AFCON_2025,
+    # 1538: NATIONS_LEAGUE_FINALS, # if/when modelled
+}
+
+
+def get_config_for_comp(competition_id: int) -> Optional[TournamentConfig]:
+    """Return the TournamentConfig for the given comp, or None if the comp
+    has no bracket to simulate."""
+    return BRACKET_CONFIGS.get(competition_id)
+
+
+def has_bracket(competition_id: int) -> bool:
+    return competition_id in BRACKET_CONFIGS
