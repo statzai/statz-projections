@@ -89,7 +89,8 @@ SHOTS_GOAL_ANCHOR_WEIGHT = 0.5
 
 # Host nations get domestic-style venue effect on team stats; their opp gets
 # the inverse effect. Non-host fixtures get no venue effect (neutral).
-HOSTS = {'United States', 'Mexico', 'Canada'}
+# Resolved per-scope from scope.hosts at call time — empty frozenset for
+# non-host scopes (friendlies, qualifiers etc.) yields no venue effect.
 
 # Main tournaments are at neutral venues (except for the host nation, whose
 # group games are at home). Exclude these from a team's H/A venue split.
@@ -633,8 +634,12 @@ class InternationalTeamStatService:
                 away_id = wc['away_team_id']
 
                 # Host-involved fixture? Determines whether venue effect applies.
-                home_is_host = wc['home_team_name'] in HOSTS
-                away_is_host = wc['away_team_name'] in HOSTS
+                # scope.hosts is the per-comp host set — empty for friendlies /
+                # qualifiers / Nations League etc., so host_fixture is always
+                # False and venue effect is skipped (matches the orchestrator's
+                # λ logic which also no-ops on empty scope.hosts).
+                home_is_host = wc['home_team_name'] in self.scope.hosts
+                away_is_host = wc['away_team_name'] in self.scope.hosts
                 host_fixture = home_is_host or away_is_host
                 if host_fixture:
                     n_host_fixtures += 1
@@ -651,7 +656,7 @@ class InternationalTeamStatService:
                     #   - the host's opponent plays at A
                     # Non-host fixtures get no venue effect (treated as neutral).
                     if host_fixture:
-                        team_is_host = team_name in HOSTS
+                        team_is_host = team_name in self.scope.hosts
                         team_v = 'H' if team_is_host else 'A'
                         opp_v = 'A' if team_is_host else 'H'
                     else:
@@ -730,7 +735,8 @@ class InternationalTeamStatService:
                         row[stat] = round(float(row[stat]), 2)
 
             logger.info(
-                f"WC team-stat projection ready: {len(output_rows)} team-fixture rows, "
+                f"{self.scope.competition_name} team-stat projection ready: "
+                f"{len(output_rows)} team-fixture rows, "
                 f"skipped {n_skipped_placeholder} placeholder fixtures, "
                 f"{n_host_fixtures} host-involved fixtures (venue-effect applied)"
             )

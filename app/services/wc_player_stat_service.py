@@ -710,10 +710,24 @@ class WcPlayerStatService:
             players = data['players']
 
             if not squads:
-                logger.warning("No linked FIFA-game players in wc_players — nothing to project. Run `php artisan wc:link --players-only` on statz.")
+                if self.scope.has_squad_source:
+                    logger.warning(
+                        f"No linked FIFA-game players in wc_players for {self.scope.competition_name} "
+                        f"— nothing to project. Run `php artisan wc:link --players-only` on statz."
+                    )
+                else:
+                    logger.warning(
+                        f"No squads loaded for {self.scope.competition_name} — "
+                        f"RecentCapsSquadProvider returned an empty pool. Likely no "
+                        f"upcoming fixtures, or every selected nation has zero "
+                        f"recent caps in international comps."
+                    )
                 return {'n_player_rows': 0, 'n_squads': 0, 'committed': False}
             if not team_projections:
-                logger.warning("No WC team_projections found — run InternationalTeamStatService first.")
+                logger.warning(
+                    f"No team_projections found for {self.scope.competition_name} "
+                    f"— run InternationalTeamStatService first."
+                )
                 return {'n_player_rows': 0, 'n_squads': len(squads), 'committed': False}
 
             # Pre-load player-prop odds (Goals/Shots Total/SoT v1) and
@@ -743,8 +757,9 @@ class WcPlayerStatService:
                     for pid in skipped_no_data
                 )
                 logger.warning(
-                    f"WC player-stat: SKIPPING {len(skipped_no_data)} squad players with "
-                    f"no international or club history — investigate: {detail}"
+                    f"{self.scope.competition_name} player-stat: SKIPPING "
+                    f"{len(skipped_no_data)} squad players with no international "
+                    f"or club history — investigate: {detail}"
                 )
 
             logger.info(
@@ -757,9 +772,10 @@ class WcPlayerStatService:
             output_rows, n_skipped_no_squad = _build_player_rows(data)
 
             logger.info(
-                f"WC player-stat projection ready: {len(output_rows)} player-fixture "
-                f"rows across {len({r['Team'] for r in output_rows})} nations, "
-                f"skipped {n_skipped_no_squad} team-fixtures with no confirmed squad, "
+                f"{self.scope.competition_name} player-stat projection ready: "
+                f"{len(output_rows)} player-fixture rows across "
+                f"{len({r['Team'] for r in output_rows})} nations, "
+                f"skipped {n_skipped_no_squad} team-fixtures with no squad, "
                 f"{len(skipped_no_data)} players skipped (no history)"
             )
 
