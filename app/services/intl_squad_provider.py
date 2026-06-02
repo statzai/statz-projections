@@ -221,6 +221,8 @@ async def resolve_player_position(conn, player_ids: list) -> dict:
                 out[int(pid)] = pos
 
         # Step 2: players.position string (Sportmonks profile).
+        # Column is varchar but Sportmonks data sometimes returns NULL or
+        # surprise values — defensive isinstance guard.
         missing = [p for p in player_ids if p not in out]
         if missing:
             ph2 = ",".join(["%s"] * len(missing))
@@ -236,16 +238,18 @@ async def resolve_player_position(conn, player_ids: list) -> dict:
                 'forward': 'FWD',
             }
             for pid, pos_str in await cur.fetchall():
-                if pos_str and pos_str.lower() in STR_MAP:
+                if isinstance(pos_str, str) and pos_str.lower() in STR_MAP:
                     out[int(pid)] = STR_MAP[pos_str.lower()]
 
         # Step 3: fixture_player_lineup — most recent finished fixture.
+        # Reads detailed_position_code (varchar) NOT position (int — formation
+        # slot number, useless for position-group resolution).
         missing = [p for p in player_ids if p not in out]
         if missing:
             ph3 = ",".join(["%s"] * len(missing))
             await cur.execute(
                 f"""
-                SELECT fpl.player_id, fpl.position
+                SELECT fpl.player_id, fpl.detailed_position_code
                 FROM fixture_player_lineup fpl
                 JOIN fixtures f ON f.id = fpl.fixture_id
                 WHERE fpl.player_id IN ({ph3})
@@ -254,28 +258,28 @@ async def resolve_player_position(conn, player_ids: list) -> dict:
                 """,
                 tuple(missing),
             )
-            # fixture_player_lineup.position is a string like 'goalkeeper' /
-            # 'defender' / 'midfielder' / 'attacker' / 'forward'. Reuse the
-            # same STR_MAP keyed lookup. Single-letter codes ('G','D','M','A','F')
-            # also tolerated to be defensive.
-            LINEUP_STR = {
-                'goalkeeper': 'GK',
-                'defender': 'DEF',
-                'midfielder': 'MID',
-                'attacker': 'FWD',
-                'forward': 'FWD',
-                'g': 'GK', 'd': 'DEF', 'm': 'MID', 'a': 'FWD', 'f': 'FWD',
-            }
-            for pid, lpos in await cur.fetchall():
+            # detailed_position_code is a Sportmonks slug like 'right-back',
+            # 'central-midfielder', 'striker', 'goalkeeper'. Map by infix
+            # match — covers all variants without an exhaustive enum.
+            for pid, code in await cur.fetchall():
                 if int(pid) in out:
                     continue
-                if not lpos:
+                if not isinstance(code, str):
                     continue
-                key = lpos.lower()
-                if key in LINEUP_STR:
-                    out[int(pid)] = LINEUP_STR[key]
-                elif key[:1] in LINEUP_STR:
-                    out[int(pid)] = LINEUP_STR[key[:1]]
+                low = code.lower()
+                if 'keeper' in low:
+                    out[int(pid)] = 'GK'
+                elif 'back' in low or 'defender' in low or 'centre-back' in low or 'center-back' in low:
+                    out[int(pid)] = 'DEF'
+                elif 'midfield' in low:
+                    out[int(pid)] = 'MID'
+                elif (
+                    'forward' in low
+                    or 'striker' in low
+                    or 'attacker' in low
+                    or 'winger' in low
+                ):
+                    out[int(pid)] = 'FWD'
 
     # Step 4: default to MID for anyone still unresolved.
     for pid in player_ids:
