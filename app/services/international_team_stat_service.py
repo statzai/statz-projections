@@ -2,7 +2,7 @@
 World Cup team-stat projections — per-fixture, per-team rolling-avg
 regression with half-strength opp adjustment for production volume stats.
 
-Pipeline per upcoming WC fixture (called by WcProjectionService.projections()
+Pipeline per upcoming WC fixture (called by InternationalProjectionService.projections()
 after the existing fixture-projection + tournament-simulation steps):
 
   For each team in the fixture:
@@ -48,7 +48,7 @@ from app.repository.team_repo import insert_teams_async
 from app.services.statz_functions import adjust_shots_projection
 from app.source_database import get_source_connection, release_source_connection
 
-logger = logging.getLogger("wc_team_stats")
+logger = logging.getLogger("international_team_stats")
 
 WC_COMP_ID = 732
 
@@ -549,7 +549,7 @@ def _compute_avg_shots_per_goal(fixtures_df: pd.DataFrame, stats_df: pd.DataFram
 # Service
 # ---------------------------------------------------------------------------
 
-class WcTeamStatService:
+class InternationalTeamStatService:
     """Compute + write per-team stat projections for upcoming WC fixtures."""
 
     async def project(self, commit: bool = True, fixture_ids: list = None) -> dict:
@@ -734,7 +734,7 @@ class WcTeamStatService:
                     load_team_stat_odds, blend_team_stat,
                     TEAM_STAT_BOOKIE_PRIORITY, STAT_COLUMN_TO_MARKET,
                 )
-                from app.services.wc_projection_service import ODDS_BETA as _WC_ODDS_BETA
+                from app.services.international_projection_service import ODDS_BETA as _WC_ODDS_BETA
                 _fix_ids = df['fixture_id'].astype(int).unique().tolist()
                 _odds_per_market = {}
                 for _market, _books in TEAM_STAT_BOOKIE_PRIORITY.items():
@@ -781,7 +781,7 @@ class WcTeamStatService:
                         df.loc[away_mask, stat_col] = round(fa, 2)
 
                 # Delete existing WC rows before insert (idempotent — mirrors
-                # the wc_projection_service pattern). Per-fixture mode
+                # the international_projection_service pattern). Per-fixture mode
                 # scopes the delete to the requested fixtures only so we
                 # don't wipe other WC team projections.
                 async with conn.cursor() as cur:

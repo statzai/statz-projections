@@ -27,7 +27,7 @@ Skipped: fixtures with unknown team rating (knockout bracket placeholders
 like "1st Group A vs 3rd Group C/E/F/H/I").
 
 After the fixture markets: a Monte Carlo tournament simulation, then
-per-team stat projections (WcTeamStatService → team_projections), then
+per-team stat projections (InternationalTeamStatService → team_projections), then
 per-player stat projections (WcPlayerStatService → player_projections,
 scoped to nations with a confirmed tournament_squads entry).
 """
@@ -41,12 +41,12 @@ from app.services.international_ratings import compute_international_ratings
 from app.services.statz_functions import get_result_probs, find_inputs_for_probs
 from app.services.tournament_configs import WC_2026
 from app.services.tournament_simulation_service import TournamentSimulator
-from app.services.wc_team_stat_service import WcTeamStatService
+from app.services.international_team_stat_service import InternationalTeamStatService
 from app.services.wc_player_stat_service import WcPlayerStatService
 from app.services.wc_fantasy_points_service import WcFantasyPointsService
 from app.source_database import get_source_connection, release_source_connection
 
-logger = logging.getLogger("wc_projection")
+logger = logging.getLogger("international_projection")
 
 WC_COMP_ID = 732
 AVG_GOALS = 1.3
@@ -63,14 +63,20 @@ ODDS_BETA = 0.5
 BOOST = 1.0
 
 
-class WcProjectionService:
-    """Stateless — instance method only for parity with EuroCompProjectionService."""
+class InternationalProjectionService:
+    """Routes any international fixture (national-team comp) through the
+    same pipeline. WC is one comp among several — friendlies, qualifiers,
+    Euros etc. will be added by registering scopes in INTL_SCOPES (see
+    below, introduced in the IntlProjectionScope refactor).
 
-    WC_COMPS = ['World Cup']
+    Stateless — instance method only for parity with EuroCompProjectionService.
+    """
+
+    INTERNATIONAL_COMPS = ['World Cup']
 
     @staticmethod
-    def is_wc_comp(league: str) -> bool:
-        return league in WcProjectionService.WC_COMPS
+    def is_international_comp(league: str) -> bool:
+        return league in InternationalProjectionService.INTERNATIONAL_COMPS
 
     async def projections(self, league_request=None, commit: bool = True) -> dict:
         """Compute + (optionally) write WC fixture projections.
@@ -95,7 +101,7 @@ class WcProjectionService:
             fixture_ids_filter = [int(x) for x in league_request.fixture_ids]
 
         logger.info(
-            f"WC projection start — commit={commit}, odds_beta={ODDS_BETA}, "
+            f"International projection start — commit={commit}, odds_beta={ODDS_BETA}, "
             f"boost={BOOST}, fixture_ids={fixture_ids_filter}"
         )
 
@@ -252,7 +258,7 @@ class WcProjectionService:
                 ))
 
             logger.info(
-                f"WC projection ready: total={len(fixtures)} projected={len(inserts)} "
+                f"International projection ready: total={len(fixtures)} projected={len(inserts)} "
                 f"blended={n_blended} skipped_unknown_team={n_skipped_unknown_team}"
             )
 
@@ -316,7 +322,7 @@ class WcProjectionService:
         team_stat_result = None
         if commit:
             try:
-                team_stat_result = await WcTeamStatService().project(
+                team_stat_result = await InternationalTeamStatService().project(
                     commit=commit, fixture_ids=fixture_ids_filter,
                 )
                 logger.info(f"WC team-stat projection: {team_stat_result}")

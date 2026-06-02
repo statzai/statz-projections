@@ -1,4 +1,4 @@
-"""WC Fantasy point projections — Step 6 of WcProjectionService.
+"""WC Fantasy point projections — Step 6 of InternationalProjectionService.
 
 Reads the per-stat WC player projections that wc_player_stat_service.py
 wrote (in long format, into `player_projections` for competition 732),
@@ -321,7 +321,7 @@ class WcFantasyPointsService:
 
             if n_players == 0 or n_fixtures == 0:
                 logger.warning(
-                    "Empty input — run WcTeamStatService + WcPlayerStatService first."
+                    "Empty input — run InternationalTeamStatService + WcPlayerStatService first."
                 )
                 return {
                     'n_rows': 0,

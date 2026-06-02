@@ -1,7 +1,7 @@
 """
 World Cup player-stat projections.
 
-Distributes each WC team-stat projection (written by WcTeamStatService into
+Distributes each WC team-stat projection (written by InternationalTeamStatService into
 team_projections) down to the nation's confirmed squad players, by each
 player's recency-weighted share of that stat across a 30-game history.
 
@@ -55,7 +55,7 @@ import pandas as pd
 from app.repository.player_repo import insert_player_async
 from app.repository.player_stat_repo import insert_players_stats_async
 from app.services.statz_functions import get_poisson_probs
-from app.services.wc_team_stat_service import INTERNATIONAL_COMP_IDS
+from app.services.international_team_stat_service import INTERNATIONAL_COMP_IDS
 from app.source_database import get_source_connection, release_source_connection
 
 logger = logging.getLogger("wc_player_stats")
@@ -246,7 +246,7 @@ async def _load_data(conn, fixture_ids_filter=None) -> dict:
     team_projections to distribute, and name lookups."""
     # End any transaction inherited on this pooled connection so the reads
     # below get a FRESH snapshot — a pooled connection can carry a stale
-    # InnoDB REPEATABLE READ snapshot taken before WcTeamStatService (the
+    # InnoDB REPEATABLE READ snapshot taken before InternationalTeamStatService (the
     # immediately-prior step) committed its team_projections rows.
     await conn.rollback()
 
@@ -695,7 +695,7 @@ class WcPlayerStatService:
                 logger.warning("No linked FIFA-game players in wc_players — nothing to project. Run `php artisan wc:link --players-only` on statz.")
                 return {'n_player_rows': 0, 'n_squads': 0, 'committed': False}
             if not team_projections:
-                logger.warning("No WC team_projections found — run WcTeamStatService first.")
+                logger.warning("No WC team_projections found — run InternationalTeamStatService first.")
                 return {'n_player_rows': 0, 'n_squads': len(squads), 'committed': False}
 
             # Pre-load player-prop odds (Goals/Shots Total/SoT v1) and

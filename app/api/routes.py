@@ -36,7 +36,7 @@ class RetrainRequest(BaseModel):
 
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
-from app.services.wc_projection_service import WcProjectionService
+from app.services.international_projection_service import InternationalProjectionService
 from app.models.requests.league_request import LeagueRequest
 from app.services.projection_all_teams_service import ProjectionAllTeams
 
@@ -45,7 +45,7 @@ logger = logging.getLogger("routes")
 
 projection_service = ProjectionService()
 euro_comp_service = EuroCompProjectionService()
-wc_projection_service = WcProjectionService()
+international_projection_service = InternationalProjectionService()
 projection_all_teams_service = ProjectionAllTeams()
 
 # Two-tier lock: an OS file-lock for cross-worker serialisation + an
@@ -149,8 +149,8 @@ async def _run_single_league(request):
     competition_id = _league_to_competition_id(request.league)
     started_at = datetime.now(timezone.utc).isoformat()
     try:
-        if WcProjectionService.is_wc_comp(request.league):
-            await wc_projection_service.projections(request)
+        if InternationalProjectionService.is_international_comp(request.league):
+            await international_projection_service.projections(request)
         elif EuroCompProjectionService.is_euro_comp(request.league):
             await euro_comp_service.projections(request)
         else:
