@@ -28,11 +28,13 @@ from typing import Optional, Tuple
 import logging
 logger = logging.getLogger("odds_blend")
 
-# Bookmakers tried in order. Each entry maps to the column names / source
-# in bet365_totals_odds and the equivalents for the other books. v1 is
-# bet365-only; fallback books wired in once their totals tables are
-# confirmed to cover the goals market.
-BOOKIE_PRIORITY = ['bet365']
+# Per-book priority for the goals-blend cascade. bet365 always first
+# (it covers ~50K upcoming fixtures vs 2-3K for each fallback), but the
+# fallback books DO carry meaningful coverage for fixtures bet365 is
+# dark on — primarily international friendlies and the lower divisions
+# of La Liga / Serie B / Eredivisie etc.. derive_bookie_lambdas
+# iterates this list and falls through book-by-book per fixture.
+GOALS_BOOKIE_PRIORITY = ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports']
 
 # Per-stat bookmaker priority for team-stat blending. bet365 always
 # tried first per user rule (2026-05-29); rest ordered by per-team
@@ -294,9 +296,9 @@ def derive_bookie_lambdas(
         'home':   list[(line, over, under)]    # team_id = home_team_id
         'away':   list[(line, over, under)]    # team_id = away_team_id
 
-    Order of fallback through bookmakers controlled by BOOKIE_PRIORITY.
+    Order of fallback through bookmakers controlled by GOALS_BOOKIE_PRIORITY.
     """
-    for bookie in BOOKIE_PRIORITY:
+    for bookie in GOALS_BOOKIE_PRIORITY:
         result = _try_paths_for_bookie(
             goals_odds.get(bookie, {}),
             lambda_h_model, lambda_a_model,
@@ -363,74 +365,32 @@ def blend_lambdas(
 
 
 async def load_goals_odds_for_fixtures(conn, fixture_ids: list) -> dict:
-    """Pre-load bet365 goals over/under for a batch of fixtures.
+    """Pre-load goals over/under odds across all 5 books for a batch.
 
     Returns dict keyed by fixture_id:
-        {fid: {'bet365': {'match': [...], 'home': [...], 'away': [...]}}}
+        {fid: {book: {'match': [...], 'home': [...], 'away': [...]}}}
 
-    Each list element is (line: float, over_price: float|None, under_price: float|None).
-    Rows deduped via MAX(price) per (fixture, team_id, line, side) — the
-    underlying table can carry multiples from repeated fetch cycles.
+    where `book` is one of bet365 / coral / ladbrokes / midnite /
+    boylesports — the cascade in derive_bookie_lambdas iterates them in
+    GOALS_BOOKIE_PRIORITY order and falls through per fixture when the
+    leading book has no usable ladder.
 
-    Multi-bookie fallback (Ladbrokes/Coral/Midnite/BoyleSports) will
-    layer in alongside the bet365 query once their totals tables are
-    confirmed to cover the goals market with comparable depth.
+    Each list element is (line: float, over_price: float|None,
+    under_price: float|None). Rows deduped via MAX(price) per (fixture,
+    team_id, line, side).
+
+    Delegates to load_team_stat_odds with market='goals' — same SQL
+    shape, same per-book schema, same dedupe. Keeps the goals path on
+    one implementation path with team-stat / corners / cards / etc..
+
+    Coverage as of 2026-06-01: bet365 ~52K upcoming fixtures, others
+    ~2-3K each. The fallback meaningfully fires on bet365-dark fixtures
+    (international friendlies, lower-division mid-week games — ~12
+    such fixtures in any given 14-day window).
     """
-    if not fixture_ids:
-        return {}
-
-    # Map fixture → (home_team_id, away_team_id) so we can tag per-team rows.
-    fix_ph = ",".join(["%s"] * len(fixture_ids))
-    async with conn.cursor() as cur:
-        await cur.execute(
-            f"SELECT id, home_team_id, away_team_id FROM fixtures WHERE id IN ({fix_ph})",
-            tuple(fixture_ids),
-        )
-        fixture_teams = {row[0]: (row[1], row[2]) for row in await cur.fetchall()}
-
-    async with conn.cursor() as cur:
-        await cur.execute(
-            f"""
-            SELECT fixture_id, team_id, line, side, MAX(price) AS price
-            FROM bet365_totals_odds
-            WHERE market = 'goals' AND fixture_id IN ({fix_ph})
-            GROUP BY fixture_id, team_id, line, side
-            """,
-            tuple(fixture_ids),
-        )
-        rows = await cur.fetchall()
-
-    # Build per-fixture, per-role line→(over,under) dicts then flatten.
-    # Roles: 'match' (team_id IS NULL), 'home' / 'away' by mapping team_id.
-    buckets = {}  # buckets[(fid, role)][line] = {'over': p, 'under': p}
-    for fid, team_id, line, side, price in rows:
-        teams = fixture_teams.get(fid)
-        if not teams:
-            continue
-        home_tid, away_tid = teams
-        if team_id is None:
-            role = 'match'
-        elif team_id == home_tid:
-            role = 'home'
-        elif team_id == away_tid:
-            role = 'away'
-        else:
-            continue  # team_id we don't recognise for this fixture
-        key = (fid, role)
-        buckets.setdefault(key, {}).setdefault(float(line), {})[side] = float(price)
-
-    result = {}
-    for (fid, role), by_line in buckets.items():
-        ladder = []
-        for line, sides in sorted(by_line.items()):
-            ladder.append((line, sides.get('over'), sides.get('under')))
-        result.setdefault(fid, {}).setdefault('bet365', {})[role] = ladder
-
-    logger.info(
-        "Loaded bet365 goals O/U for %d/%d fixtures",
-        len(result), len(fixture_ids),
+    return await load_team_stat_odds(
+        conn, fixture_ids, market='goals', books=GOALS_BOOKIE_PRIORITY,
     )
-    return result
 
 
 async def load_confirmed_lineups(conn, fixture_ids: list) -> dict:
