@@ -108,12 +108,18 @@ class RecentCapsSquadProvider:
     def __init__(
         self,
         *,
+        team_ids: Optional[Sequence[int]] = None,
         lookback_months: int = 24,
         min_minutes: int = 45,
         min_caps: int = 1,
         limit_per_team: int = 30,
         intl_comp_ids: Optional[list] = None,
     ):
+        # team_ids stashed at construction so the orchestrator can
+        # pre-compute the upcoming-fixture roster once and inject it.
+        # load() also accepts team_ids and overrides this default if
+        # passed.
+        self.team_ids = list(team_ids) if team_ids else []
         self.lookback_months = lookback_months
         self.min_minutes = min_minutes
         self.min_caps = min_caps
@@ -134,6 +140,9 @@ class RecentCapsSquadProvider:
         *,
         as_of: Optional[datetime] = None,
     ) -> SquadPool:
+        # Fall back to the team_ids stashed at construction time.
+        if not team_ids:
+            team_ids = self.team_ids
         if not team_ids:
             logger.warning("RecentCapsSquadProvider called with empty team_ids — returning empty pool")
             return {}

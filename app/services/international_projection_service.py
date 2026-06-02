@@ -113,6 +113,16 @@ INTL_SCOPES = {
         has_squad_source=True,
         fantasy_rules='fifa_wc_2026',
     ),
+    'Friendly International': IntlProjectionScope(
+        competition_id=1082,
+        competition_name='Friendly International',
+        hosts=frozenset(),       # no host nation
+        host_bonus=1.0,          # → no λ adjustment
+        host_penalty=1.0,
+        bracket_config=None,     # no bracket → Step 3 skipped
+        has_squad_source=False,  # no tournament_squads entry → RecentCapsSquadProvider
+        fantasy_rules=None,      # no FIFA fantasy → Step 6 skipped
+    ),
 }
 
 
@@ -127,6 +137,47 @@ class InternationalProjectionService:
     @staticmethod
     def is_international_comp(league: str) -> bool:
         return league in INTL_SCOPES
+
+    async def _fetch_upcoming_team_ids(
+        self,
+        competition_id: int,
+        fixture_ids_filter,
+    ) -> list:
+        """Return the distinct team_ids playing in upcoming fixtures of
+        competition_id (optionally narrowed by fixture_ids_filter).
+        Used to scope RecentCapsSquadProvider for non-WC intl comps."""
+        fid_sql = ""
+        fid_params: tuple = ()
+        if fixture_ids_filter:
+            ph = ",".join(["%s"] * len(fixture_ids_filter))
+            fid_sql = f" AND id IN ({ph})"
+            fid_params = tuple(fixture_ids_filter)
+        conn = await get_source_connection()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    SELECT DISTINCT team_id FROM (
+                        SELECT home_team_id AS team_id FROM fixtures
+                        WHERE competition_id = %s
+                          AND kickoff_datetime > NOW()
+                          AND state_id = 1
+                          {fid_sql}
+                        UNION
+                        SELECT away_team_id AS team_id FROM fixtures
+                        WHERE competition_id = %s
+                          AND kickoff_datetime > NOW()
+                          AND state_id = 1
+                          {fid_sql}
+                    ) t
+                    WHERE team_id IS NOT NULL
+                    """,
+                    (competition_id,) + fid_params + (competition_id,) + fid_params,
+                )
+                rows = await cur.fetchall()
+            return sorted({int(r[0]) for r in rows})
+        finally:
+            release_source_connection(conn)
 
     async def projections(self, league_request=None, commit: bool = True) -> dict:
         """Compute + (optionally) write international fixture projections.
@@ -403,10 +454,37 @@ class InternationalProjectionService:
                 team_stat_result = {'error': str(e)}
 
         # Step 5: Per-player stat projections.
+        #
+        # Squad-source strategy depends on the scope:
+        #   - WC scope (has_squad_source=True) → WcSquadProvider, reads
+        #     wc_squads (the FIFA fantasy roster).
+        #   - Non-WC scopes (friendlies / quals / Nations League — no
+        #     formal roster) → RecentCapsSquadProvider, derives from
+        #     fixture_player_stats minutes played in the last 24 months
+        #     for each nation in the upcoming fixture batch.
         player_stat_result = None
         if commit:
             try:
-                player_stat_result = await WcPlayerStatService(scope=scope).project(
+                from app.services.intl_squad_provider import (
+                    WcSquadProvider, RecentCapsSquadProvider,
+                )
+                if scope.has_squad_source:
+                    squad_provider = WcSquadProvider()
+                else:
+                    # Pre-fetch the team_ids playing in the upcoming
+                    # fixture batch for this scope. RecentCapsSquadProvider
+                    # uses them to know which nations to source squads for.
+                    team_ids_in_scope = await self._fetch_upcoming_team_ids(
+                        scope.competition_id, fixture_ids_filter,
+                    )
+                    squad_provider = RecentCapsSquadProvider(team_ids=team_ids_in_scope)
+                    logger.info(
+                        f"{scope.competition_name} player-stat squad source: "
+                        f"recent-caps for {len(team_ids_in_scope)} nations"
+                    )
+                player_stat_result = await WcPlayerStatService(
+                    scope=scope, squad_provider=squad_provider,
+                ).project(
                     commit=commit, fixture_ids=fixture_ids_filter,
                 )
                 logger.info(f"{scope.competition_name} player-stat projection: {player_stat_result}")
