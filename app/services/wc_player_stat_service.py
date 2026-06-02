@@ -238,43 +238,37 @@ def _weighted_share(
     return share, n
 
 
-async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict:
-    """Pull everything: WC-game squads, each player's main 30-game window +
-    xG window, the player/team stats for those fixtures, the team_projections
-    rows to distribute (filtered to competition_id), and name lookups."""
+async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filter=None) -> dict:
+    """Pull everything: per-nation squad pool (via squad_provider strategy),
+    each player's main 30-game window + xG window, the player/team stats
+    for those fixtures, the team_projections rows to distribute (filtered
+    to competition_id), and name lookups.
+
+    The squad_provider returns {team_id: [(player_id, position), ...]}.
+    For WC scope it reads wc_squads; for non-WC scopes (friendlies / quals)
+    it derives from recent intl appearances — see intl_squad_provider.py.
+    """
     # End any transaction inherited on this pooled connection so the reads
     # below get a FRESH snapshot — a pooled connection can carry a stale
     # InnoDB REPEATABLE READ snapshot taken before InternationalTeamStatService (the
     # immediately-prior step) committed its team_projections rows.
     await conn.rollback()
 
+    # 1. Squad pool — delegated to a SquadProvider. WC scope uses
+    # WcSquadProvider (wc_players JOIN wc_squads); non-WC scopes inject
+    # RecentCapsSquadProvider via WcPlayerStatService.__init__.
+    # Returns {team_id: [(player_id, position_group), ...]}.
+    #
+    # The WC-only docstring on the previous inline SQL covered:
+    #   - ~1,352 player rows across 48 nations from FIFA WC fantasy
+    #   - position comes straight from FIFA (no Sportmonks drift)
+    #   - 102 unlinked FIFA players (player_id NULL) excluded
+    # All of that is preserved by WcSquadProvider; the provider call
+    # is the same query.
+    squads = await squad_provider.load(conn)
+    squad_player_ids = sorted({pid for members in squads.values() for pid, _pos in members})
+
     async with conn.cursor() as cur:
-        # 1. FIFA-game player pool — the universe is whoever shows up in
-        #    the official FIFA WC fantasy game, joined to their Statz id
-        #    via the WcAutoLinker mapping. ~1,352 (player, team) rows
-        #    covering 48 nations after the 2026-05-29 mapping broadening.
-        #
-        #    Position comes straight from FIFA (GK/DEF/MID/FWD ENUM) —
-        #    this is the source of truth the fantasy game scores by, and
-        #    avoids the Sportmonks-position drift (club LW listed as DEF
-        #    for his country) that the Ali Abdi case surfaced in v1.5.
-        #
-        #    Skipped (player_id IS NULL): the 102 FIFA players we haven't
-        #    been able to link yet — mostly transliteration-heavy squads
-        #    (Iraq, Iran, Morocco, Saudi etc.). The nightly wc:link
-        #    retry will re-attempt as Statz ingests more international
-        #    fixtures.
-        await cur.execute(
-            """
-            SELECT s.team_id, p.player_id, p.position
-            FROM wc_players p
-            JOIN wc_squads s ON s.id = p.squad_id
-            WHERE p.player_id IS NOT NULL
-              AND s.team_id IS NOT NULL
-            """,
-        )
-        squad_rows = await cur.fetchall()
-        squad_player_ids = sorted({r[1] for r in squad_rows})
 
         # 2. Appearances — every finished game each squad player featured in:
         #    all international caps + club games within the lookback window.
@@ -428,9 +422,8 @@ async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict
             players_rows = await cur.fetchall()
 
     # --- assemble ---
-    squads: Dict[int, List[Tuple[int, str]]] = {}
-    for team_id, player_id, position_group in squad_rows:
-        squads.setdefault(team_id, []).append((player_id, position_group))
+    # squads already comes shaped {team_id: [(player_id, position), ...]}
+    # from squad_provider.load() above — no further reshape required.
 
     # pstats[(player_id, fixture_id, stat_id)] = value
     pstats: Dict[Tuple[int, int, int], float] = {}
@@ -675,18 +668,23 @@ class WcPlayerStatService:
     """Compute + write per-player stat projections for upcoming international
     fixtures. Defaults to WC scope when called without an IntlProjectionScope.
 
-    NOTE: file still named wc_player_stat_service.py because the default
-    squad source (wc_squads JOIN wc_players) is WC-specific. Non-WC scopes
-    will route through a different squad provider in commit 3 (intl_squad_provider).
+    File still named wc_player_stat_service.py because the *historic*
+    squad source (wc_squads JOIN wc_players) is FIFA-WC-specific. Non-WC
+    scopes inject a different SquadProvider — see intl_squad_provider.py
+    for the WcSquadProvider / RecentCapsSquadProvider strategies.
     """
 
-    def __init__(self, scope=None):
+    def __init__(self, scope=None, squad_provider=None):
         # Lazy import — international_projection_service imports this class
         # at module-load.
         if scope is None:
             from app.services.international_projection_service import INTL_SCOPES
             scope = INTL_SCOPES['World Cup']
         self.scope = scope
+        if squad_provider is None:
+            from app.services.intl_squad_provider import WcSquadProvider
+            squad_provider = WcSquadProvider()
+        self.squad_provider = squad_provider
 
     async def project(self, commit: bool = True, fixture_ids: list = None) -> dict:
         """fixture_ids: optional — when set, scope projection + DELETE to those fixtures only."""
@@ -700,6 +698,7 @@ class WcPlayerStatService:
             data = await _load_data(
                 conn,
                 competition_id=self.scope.competition_id,
+                squad_provider=self.squad_provider,
                 fixture_ids_filter=fixture_ids,
             )
             squads = data['squads']
