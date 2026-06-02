@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from app.repository.projection_run_repo import touch_all_running, upsert_run_complete
 from app.services.projection_service import ProjectionService
 from app.services.euro_comp_projection_service import EuroCompProjectionService
+from app.services.international_projection_service import InternationalProjectionService
 from app.data_loader import LeagueDataLoader
 from app.models.requests.league_request import LeagueRequest
 from scipy.stats import poisson
@@ -93,6 +94,7 @@ class ProjectionAllTeams:
         data_folder_path = ProjectionService.DATA_FOLDER_PATH
 
         _euro_comp_service = EuroCompProjectionService()
+        _intl_service = InternationalProjectionService()
 
         for league in leagues:
             # Slug and start-time for projections_runs status write.
@@ -117,6 +119,27 @@ class ProjectionAllTeams:
                     _start_time = time.time()
                     request = LeagueRequest(league=league)
                     await _euro_comp_service.projections(request)
+                    _league_times[league] = round(time.time() - _start_time, 1)
+                    logger.info(f"[{league}] DONE in {_league_times[league]}s")
+                    await upsert_run_complete(
+                        competition_id=_league_slug,
+                        status='success',
+                        started_at=_league_started_iso,
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        exit_code=0,
+                    )
+                    continue
+
+                # Delegate international comps (WC, Friendly Intl, future
+                # Euros / Copa / AFCON / Nations League etc.) to the
+                # dedicated international projection pipeline. These don't
+                # fit the domestic league-table mental model and have
+                # their own rating / squad / fixture flow.
+                if InternationalProjectionService.is_international_comp(league):
+                    logger.info(f"[{league}] Delegating to InternationalProjectionService")
+                    _start_time = time.time()
+                    request = LeagueRequest(league=league)
+                    await _intl_service.projections(request)
                     _league_times[league] = round(time.time() - _start_time, 1)
                     logger.info(f"[{league}] DONE in {_league_times[league]}s")
                     await upsert_run_complete(
