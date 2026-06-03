@@ -355,6 +355,11 @@ async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict
             ph_wcf = ",".join(["%s"] * len(fixture_ids_filter))
             wc_fid_filter_sql = f" AND f.id IN ({ph_wcf})"
             wc_fid_filter_params = tuple(fixture_ids_filter)
+        # INNER JOIN on fixture_projections — inherits every gate the
+        # orchestrator's fixture loop applied (odds presence, Statz
+        # rating, venue classification, FIFA-carry-forward exclusion).
+        # If we didn't project the fixture itself, we shouldn't emit
+        # team-stat projections for it either.
         await cur.execute(
             f"""
             SELECT f.id, f.kickoff_datetime, f.home_team_id, f.away_team_id,
@@ -363,7 +368,7 @@ async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict
             FROM fixtures f
             JOIN teams th ON th.id = f.home_team_id
             JOIN teams ta ON ta.id = f.away_team_id
-            LEFT JOIN fixture_projections fp ON fp.fixture_id = f.id
+            INNER JOIN fixture_projections fp ON fp.fixture_id = f.id
             WHERE f.competition_id = %s
               AND f.kickoff_datetime > NOW()
               AND f.state_id = 1
