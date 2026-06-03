@@ -57,6 +57,27 @@ logger = logging.getLogger("international_projection")
 INTL_RATINGS_BUCKET_COMP_ID = 732
 AVG_GOALS = 1.3
 
+# Per-fixture neutral-venue path constants (friendlies and any future
+# intl comp that opts in via scope.use_per_fixture_neutral_venue).
+#
+# DECAY_BASE / DECAY_CLAMP_WEEKS — mirror the get_home_goal_avg shape
+#   (`base^(weeks - (clamp-1))`, clamped to 1 for weeks < clamp), tuned
+#   for intl windows that only recur Mar/Jun/Sep/Oct/Nov:
+#     - domestic 0.9^(w-5) → ~10% weight at 6mo; too aggressive for intl
+#     - intl    0.98^(w-26) → ~80% at 6mo, ~60% at 1y, ~22% at 2y
+#   The 27-week clamp covers ~5 most-recent FIFA windows at full weight.
+#
+# LOOKBACK_MONTHS — same 36mo window we used to validate the constants.
+# GOALS_BLEND / XG_BLEND — match domestic's 30/70 Goals/xG mix exactly.
+# Stat IDs — Goals=52, Expected Goals (xG)=5304 in stats_types.
+INTL_GOAL_AVG_DECAY_BASE = 0.98
+INTL_GOAL_AVG_DECAY_CLAMP_WEEKS = 27
+INTL_GOAL_AVG_LOOKBACK_MONTHS = 36
+INTL_GOAL_AVG_GOALS_WEIGHT = 0.3
+INTL_GOAL_AVG_XG_WEIGHT = 0.7
+GOALS_STAT_ID = 52
+XG_STAT_ID = 5304
+
 # odds_beta = bet365 goal-line blend weight (0 = pure model, 1 = pure bookie).
 # Bumped to 0.5 alongside the goals odds-blend cascade rewrite 2026-05-29 —
 # matches euro_comp_projection_service. boost=1.0 = no draw inflation
@@ -96,6 +117,11 @@ class IntlProjectionScope:
     bracket_config: object = None
     has_squad_source: bool = False
     fantasy_rules: object = None
+    # When True, replace the symmetric AVG_GOALS=1.3 baseline with comp-
+    # specific weighted avg_home/avg_away goals AND classify each fixture
+    # per-venue (home_at_home / away_at_home / true_neutral / no_venue).
+    # WC keeps host_bonus/host_penalty path; friendlies opt in.
+    use_per_fixture_neutral_venue: bool = False
 
 
 # Registry of every comp the international projection pipeline knows about.
@@ -117,13 +143,147 @@ INTL_SCOPES = {
         competition_id=1082,
         competition_name='Friendly International',
         hosts=frozenset(),       # no host nation
-        host_bonus=1.0,          # → no λ adjustment
+        host_bonus=1.0,          # → no λ adjustment via the hosts-list path
         host_penalty=1.0,
         bracket_config=None,     # no bracket → Step 3 skipped
         has_squad_source=False,  # no tournament_squads entry → RecentCapsSquadProvider
         fantasy_rules=None,      # no FIFA fantasy → Step 6 skipped
+        # Friendlies are played across UEFA-vs-CONMEBOL tour matches,
+        # one-off games at the away team's invite, true neutrals (Dubai
+        # showcase fixtures), etc. — per-fixture venue classification is
+        # the only way to get the home/away baseline right.
+        use_per_fixture_neutral_venue=True,
     ),
 }
+
+
+async def _compute_intl_comp_goal_avgs(conn, competition_id: int):
+    """Weighted home/away goal averages for an international competition.
+
+    Mirrors `get_home_goal_avg` / `get_away_goal_avg` (statz_functions.py)
+    but with two intl-specific adjustments:
+
+    1. **Slower decay**: 0.98^(weeks-26) clamped to 1 for weeks<27 (vs the
+       domestic 0.9^(weeks-5) clamped<6). Intl windows recur 5x/year, so
+       the slower fall-off keeps ~5 windows weighted equally.
+
+    2. **xG-completeness filter**: only counts fixtures that have BOTH
+       Goals AND xG for BOTH teams. Without this, the 30/70 Goals+xG
+       blend mixes a wide-but-noisy Goals sample with a narrow xG sample
+       (intl Sportmonks xG covers ~60% of fixtures; the missing 40% are
+       weighted toward smaller-confederation games which skews the
+       home-vs-away spread).
+
+    Returns (avg_home, avg_away) or (None, None) if there's no usable
+    history.
+    """
+    import numpy as np
+    import pandas as pd
+
+    async with conn.cursor() as cur:
+        await cur.execute(
+            f"""
+            SELECT id, home_team_id, away_team_id, kickoff_datetime
+            FROM fixtures
+            WHERE competition_id = %s
+              AND kickoff_datetime < NOW()
+              AND kickoff_datetime > DATE_SUB(NOW(), INTERVAL {INTL_GOAL_AVG_LOOKBACK_MONTHS} MONTH)
+            """,
+            (competition_id,),
+        )
+        fx_rows = await cur.fetchall()
+        if not fx_rows:
+            return None, None
+        fx = pd.DataFrame(fx_rows, columns=[d[0] for d in cur.description])
+        fx['weeks'] = ((pd.Timestamp.now() - pd.to_datetime(fx['kickoff_datetime'])).dt.days // 7).astype(int)
+
+        fid_ph = ",".join(["%s"] * len(fx))
+        await cur.execute(
+            f"""
+            SELECT fixture_id, team_id, stats_type_id,
+                   CAST(value AS DECIMAL(10,4)) AS value
+            FROM fixture_team_stats
+            WHERE fixture_id IN ({fid_ph})
+              AND stats_type_id IN (%s, %s)
+            """,
+            tuple(int(x) for x in fx['id']) + (GOALS_STAT_ID, XG_STAT_ID),
+        )
+        ts_rows = await cur.fetchall()
+    if not ts_rows:
+        return None, None
+    ts = pd.DataFrame(ts_rows, columns=['fixture_id', 'team_id', 'stats_type_id', 'value'])
+    ts['value'] = ts['value'].astype(float)
+
+    # Keep only fixtures where every cell of the 4-row block is present:
+    # home_team Goals, away_team Goals, home_team xG, away_team xG.
+    h_map = dict(zip(fx['id'], fx['home_team_id']))
+    a_map = dict(zip(fx['id'], fx['away_team_id']))
+    have = ts.groupby('fixture_id').apply(lambda g: set(zip(g['team_id'], g['stats_type_id']))).to_dict()
+    complete = set()
+    for fid in fx['id']:
+        needed = {(h_map[fid], GOALS_STAT_ID), (a_map[fid], GOALS_STAT_ID),
+                  (h_map[fid], XG_STAT_ID),   (a_map[fid], XG_STAT_ID)}
+        if fid in have and needed.issubset(have[fid]):
+            complete.add(fid)
+    if not complete:
+        return None, None
+
+    df = fx[fx['id'].isin(complete)].merge(
+        ts[ts['fixture_id'].isin(complete)],
+        left_on='id', right_on='fixture_id', how='inner',
+    )
+
+    base = INTL_GOAL_AVG_DECAY_BASE
+    clamp = INTL_GOAL_AVG_DECAY_CLAMP_WEEKS
+    df['weight'] = np.where(df['weeks'] < clamp, 1.0, base ** (df['weeks'] - (clamp - 1)))
+
+    def _weighted_avg(side: str, stat_id: int):
+        sub = df[(df['stats_type_id'] == stat_id) & (df['team_id'] == df[f'{side}_team_id'])]
+        if sub.empty or sub['weight'].sum() == 0:
+            return None
+        return float((sub['value'] * sub['weight']).sum() / sub['weight'].sum())
+
+    h_goals = _weighted_avg('home', GOALS_STAT_ID)
+    a_goals = _weighted_avg('away', GOALS_STAT_ID)
+    h_xg = _weighted_avg('home', XG_STAT_ID)
+    a_xg = _weighted_avg('away', XG_STAT_ID)
+    if h_goals is None or a_goals is None or h_xg is None or a_xg is None:
+        return None, None
+
+    avg_home = h_goals * INTL_GOAL_AVG_GOALS_WEIGHT + h_xg * INTL_GOAL_AVG_XG_WEIGHT
+    avg_away = a_goals * INTL_GOAL_AVG_GOALS_WEIGHT + a_xg * INTL_GOAL_AVG_XG_WEIGHT
+    return float(avg_home), float(avg_away)
+
+
+def _classify_fixture_venue(home_team_country_id, away_team_country_id,
+                             venue_id, venue_country_id) -> str:
+    """Bucket an intl fixture into 4 venue cases — drives the per-fixture
+    λ baseline selection.
+
+    - 'no_venue'      → fixture.venue_id is NULL. Caller skips projection.
+    - 'home_at_home'  → venue is in the listed home team's country (most
+                        common; treat as a true home game).
+    - 'away_at_home'  → inversion: venue is in the listed AWAY team's
+                        country. Sportmonks gets the home/away flip
+                        wrong for some friendlies (e.g. Argentina v
+                        Iceland @ Reykjavik). Caller swaps the
+                        avg_home / avg_away baselines.
+    - 'true_neutral'  → venue is in a third country. Tour matches at
+                        showcase venues (Dubai, Miami, etc.). Caller
+                        uses the midpoint baseline.
+    - 'unknown'       → venue exists but its country couldn't be
+                        derived. Defaults to home_at_home (most-common
+                        case across 112 upcoming friendlies post-backfill).
+    """
+    if venue_id is None:
+        return 'no_venue'
+    if venue_country_id is None:
+        return 'unknown'
+    if venue_country_id == home_team_country_id:
+        return 'home_at_home'
+    if venue_country_id == away_team_country_id:
+        return 'away_at_home'
+    return 'true_neutral'
 
 
 class InternationalProjectionService:
@@ -267,14 +427,23 @@ class InternationalProjectionService:
                     placeholders = ",".join(["%s"] * len(fixture_ids_filter))
                     fid_filter_sql = f" AND f.id IN ({placeholders})"
                     fid_filter_params = tuple(fixture_ids_filter)
+                # venue.country_id (post-backfill, ~99% populated) drives
+                # the per-fixture neutral-venue classifier. teams.country_id
+                # lets us spot Sportmonks home/away inversions where the
+                # listed home team is playing in the listed away team's
+                # country (Argentina v Iceland @ Reykjavik etc.).
                 await cur.execute(
                     f"""
                     SELECT f.id, f.home_team_id, f.away_team_id, f.kickoff_datetime,
                            th.name AS h, ta.name AS a,
-                           bo.home_win_odd, bo.draw_odd, bo.away_win_odd
+                           bo.home_win_odd, bo.draw_odd, bo.away_win_odd,
+                           f.venue_id, v.country_id AS venue_country_id,
+                           th.country_id AS home_country_id,
+                           ta.country_id AS away_country_id
                     FROM fixtures f
                     JOIN teams th ON th.id = f.home_team_id
                     JOIN teams ta ON ta.id = f.away_team_id
+                    LEFT JOIN venues v ON v.id = f.venue_id
                     LEFT JOIN bet365_fixture_odds bo ON bo.fixture_id = f.id
                     WHERE f.competition_id = %s
                       AND f.kickoff_datetime > NOW()
@@ -299,25 +468,93 @@ class InternationalProjectionService:
             wc_fixture_ids = [row[0] for row in fixtures]
             goals_odds_map = await load_goals_odds_for_fixtures(conn, wc_fixture_ids)
 
+            # Per-fixture neutral-venue path needs comp-specific home/away
+            # goal averages (cached once per run). Falls back to symmetric
+            # AVG_GOALS if the helper returns None (e.g. brand-new comp
+            # with no history yet).
+            avg_home_goals = AVG_GOALS
+            avg_away_goals = AVG_GOALS
+            if scope.use_per_fixture_neutral_venue:
+                avg_h, avg_a = await _compute_intl_comp_goal_avgs(conn, scope.competition_id)
+                if avg_h is not None and avg_a is not None:
+                    avg_home_goals = avg_h
+                    avg_away_goals = avg_a
+                    logger.info(
+                        f"{scope.competition_name} comp goal avgs (xG-complete, "
+                        f"0.98^(w-26) decay): home={avg_home_goals:.4f} "
+                        f"away={avg_away_goals:.4f} adv={avg_home_goals - avg_away_goals:+.4f}"
+                    )
+                else:
+                    logger.warning(
+                        f"{scope.competition_name}: comp goal avg helper returned None — "
+                        f"falling back to symmetric AVG_GOALS={AVG_GOALS}"
+                    )
+            neutral_baseline = (avg_home_goals + avg_away_goals) / 2
+
             n_blended = 0
             n_skipped_unknown_team = 0
+            n_skipped_no_venue = 0
+            n_home_at_home = 0
+            n_away_at_home = 0
+            n_true_neutral = 0
+            n_unknown_venue = 0
             inserts = []
-            for fid, h_tid, a_tid, ko, home, away, oh, od, oa in fixtures:
+            for (fid, h_tid, a_tid, ko, home, away, oh, od, oa,
+                 venue_id, venue_country_id, home_country_id, away_country_id) in fixtures:
                 if home not in ratings or away not in ratings:
                     n_skipped_unknown_team += 1
                     continue
 
-                # λ from cross-Poisson rating product + host bonus
+                # λ from cross-Poisson rating product. Baseline selection:
+                #
+                # - scope.use_per_fixture_neutral_venue OFF (WC etc.):
+                #   symmetric AVG_GOALS for both sides + host-list
+                #   bonus/penalty (preserves existing WC behaviour byte
+                #   for byte).
+                #
+                # - scope.use_per_fixture_neutral_venue ON (friendlies):
+                #   classify the fixture by venue.country_id vs each
+                #   team's country, then pick comp-specific avg_home /
+                #   avg_away baselines accordingly. Inversions swap
+                #   the baselines so the real-home team gets the boost.
                 h_atk, h_def = ratings[home]
                 a_atk, a_def = ratings[away]
-                home_goals = (h_atk / 100) * (a_def / 100) * AVG_GOALS
-                away_goals = (a_atk / 100) * (h_def / 100) * AVG_GOALS
-                if home in scope.hosts:
-                    home_goals *= scope.host_bonus
-                    away_goals *= scope.host_penalty
-                elif away in scope.hosts:
-                    away_goals *= scope.host_bonus
-                    home_goals *= scope.host_penalty
+                if scope.use_per_fixture_neutral_venue:
+                    case = _classify_fixture_venue(
+                        home_country_id, away_country_id,
+                        venue_id, venue_country_id,
+                    )
+                    if case == 'no_venue':
+                        n_skipped_no_venue += 1
+                        continue
+                    if case == 'home_at_home':
+                        h_baseline, a_baseline = avg_home_goals, avg_away_goals
+                        n_home_at_home += 1
+                    elif case == 'away_at_home':
+                        # Inversion — swap the baselines so the actual
+                        # home team (the listed away side) gets the
+                        # avg_home_goals boost.
+                        h_baseline, a_baseline = avg_away_goals, avg_home_goals
+                        n_away_at_home += 1
+                    elif case == 'true_neutral':
+                        h_baseline = a_baseline = neutral_baseline
+                        n_true_neutral += 1
+                    else:  # 'unknown' — venue exists but country couldn't
+                           # be derived. Defaults to home_at_home: most
+                           # common case (~70% of friendlies) so safest fallback.
+                        h_baseline, a_baseline = avg_home_goals, avg_away_goals
+                        n_unknown_venue += 1
+                    home_goals = (h_atk / 100) * (a_def / 100) * h_baseline
+                    away_goals = (a_atk / 100) * (h_def / 100) * a_baseline
+                else:
+                    home_goals = (h_atk / 100) * (a_def / 100) * AVG_GOALS
+                    away_goals = (a_atk / 100) * (h_def / 100) * AVG_GOALS
+                    if home in scope.hosts:
+                        home_goals *= scope.host_bonus
+                        away_goals *= scope.host_penalty
+                    elif away in scope.hosts:
+                        away_goals *= scope.host_bonus
+                        home_goals *= scope.host_penalty
 
                 # Score prediction via the shared odds-blend cascade.
                 # Paths 1-3 consume bet365 goals over/under directly;
@@ -373,11 +610,22 @@ class InternationalProjectionService:
                     ko,
                 ))
 
-            logger.info(
-                f"{scope.competition_name} projection ready: total={len(fixtures)} "
-                f"projected={len(inserts)} blended={n_blended} "
-                f"skipped_unknown_team={n_skipped_unknown_team}"
-            )
+            if scope.use_per_fixture_neutral_venue:
+                logger.info(
+                    f"{scope.competition_name} projection ready: total={len(fixtures)} "
+                    f"projected={len(inserts)} blended={n_blended} "
+                    f"skipped_unknown_team={n_skipped_unknown_team} "
+                    f"skipped_no_venue={n_skipped_no_venue} | "
+                    f"venue breakdown: home_at_home={n_home_at_home} "
+                    f"away_at_home={n_away_at_home} true_neutral={n_true_neutral} "
+                    f"unknown_venue={n_unknown_venue}"
+                )
+            else:
+                logger.info(
+                    f"{scope.competition_name} projection ready: total={len(fixtures)} "
+                    f"projected={len(inserts)} blended={n_blended} "
+                    f"skipped_unknown_team={n_skipped_unknown_team}"
+                )
 
             if commit and inserts:
                 async with conn.cursor() as cur:
@@ -507,7 +755,7 @@ class InternationalProjectionService:
                 logger.exception(f"{scope.competition_name} fantasy points projection failed: {e}")
                 fantasy_points_result = {'error': str(e)}
 
-        return {
+        result = {
             'n_total': len(fixtures),
             'n_projected': len(inserts),
             'n_blended': n_blended,
@@ -523,3 +771,14 @@ class InternationalProjectionService:
             'player_stat_projection': player_stat_result,
             'fantasy_points_projection': fantasy_points_result,
         }
+        if scope.use_per_fixture_neutral_venue:
+            result.update({
+                'avg_home_goals': avg_home_goals,
+                'avg_away_goals': avg_away_goals,
+                'n_skipped_no_venue': n_skipped_no_venue,
+                'n_home_at_home': n_home_at_home,
+                'n_away_at_home': n_away_at_home,
+                'n_true_neutral': n_true_neutral,
+                'n_unknown_venue': n_unknown_venue,
+            })
+        return result
