@@ -76,7 +76,32 @@ RECENCY_EXP_SHIFT = 3        # decay exponent = weeks_since - 3
 # Club games count for less than international caps — the share we ultimately
 # want is the player's NATIONAL-team role; club games stabilise it but the
 # discount keeps caps dominant. Applied on top of the recency weight.
-CLUB_GAME_WEIGHT = 0.5
+# Lowered 2026-06-03 from 0.5 → 0.3 to pull share more toward intl pedigree.
+CLUB_GAME_WEIGHT = 0.3
+
+# Minutes-played filter — mirror domestic statz_functions.py:1372 which
+# drops fixtures where the player played 45 mins or less. Late-sub cameos
+# inflate per-90 share calcs.
+MINUTES_PLAYED_STAT_ID = 119
+MIN_MINUTES_THRESHOLD = 45
+
+# Goals share blend: how much weight on raw goals vs xG. Goals are noisy
+# and high-variance; xG is steadier. Shifted 2026-06-03 from 50/50 to 30/70
+# favoring xG.
+GOALS_BLEND_GOALS_WEIGHT = 0.3
+GOALS_BLEND_XG_WEIGHT = 0.7
+
+# International-cap-count shrink — players with few caps in the last 24
+# months have an unreliable intl share; dampen their projections so a
+# 1-cap player who scored doesn't get treated as a goal-per-game. Counted
+# AFTER the >45 min filter, so only "meaningful" caps count.
+INTL_CAP_SHRINK_LOOKBACK_MONTHS = 24
+def _intl_cap_shrink(caps_24mo: int) -> float:
+    if caps_24mo < 5:
+        return 0.6
+    if caps_24mo < 10:
+        return 0.8
+    return 1.0
 
 # Small-sample shrink — a high share off very few games is unreliable, so
 # pull it back toward the mean (same rule as get_player_weighted_average).
@@ -272,6 +297,13 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
 
         # 2. Appearances — every finished game each squad player featured in:
         #    all international caps + club games within the lookback window.
+        # >45 min minutes-played filter — mirrors the domestic
+        # statz_functions.get_player_weighted_average path which excludes
+        # fixtures where the player played 45 mins or fewer (line 1372 of
+        # statz_functions.py). Cameos / late subs inflate per-90 share
+        # calcs — a 6-min appearance with a goal looks like a 9-goal-
+        # per-90 player. Filter at the appearance-loading step so every
+        # downstream share calc inherits it.
         appearance_rows = []
         if squad_player_ids:
             ph_pid = ",".join(["%s"] * len(squad_player_ids))
@@ -282,6 +314,10 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
                        f.kickoff_datetime, f.competition_id
                 FROM fixture_player_stats fps
                 JOIN fixtures f ON f.id = fps.fixture_id
+                JOIN fixture_player_stats mp ON mp.fixture_id = fps.fixture_id
+                                            AND mp.player_id  = fps.player_id
+                                            AND mp.stats_type_id = {MINUTES_PLAYED_STAT_ID}
+                                            AND mp.value > {MIN_MINUTES_THRESHOLD}
                 WHERE fps.player_id IN ({ph_pid})
                   AND f.state_id IN (5, 7, 8)
                   AND (f.competition_id IN ({ph_comp})
@@ -292,8 +328,8 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
             appearance_rows = await cur.fetchall()
 
         # 2b. xG appearances — every finished game a squad player has an xG
-        #     row in. Drives the SEPARATE xG window; not date-bounded (the
-        #     intl-first 30-cap slice bounds it).
+        #     row in AND played > 45 mins. Drives the SEPARATE xG window;
+        #     not date-bounded (the intl-first 30-cap slice bounds it).
         xg_row_data = []
         if squad_player_ids:
             ph_pid = ",".join(["%s"] * len(squad_player_ids))
@@ -303,6 +339,10 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
                        f.kickoff_datetime, f.competition_id
                 FROM fixture_player_stats fps
                 JOIN fixtures f ON f.id = fps.fixture_id
+                JOIN fixture_player_stats mp ON mp.fixture_id = fps.fixture_id
+                                            AND mp.player_id  = fps.player_id
+                                            AND mp.stats_type_id = {MINUTES_PLAYED_STAT_ID}
+                                            AND mp.value > {MIN_MINUTES_THRESHOLD}
                 WHERE fps.player_id IN ({ph_pid})
                   AND fps.stats_type_id = %s
                   AND f.state_id IN (5, 7, 8)
@@ -327,6 +367,19 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
 
         appearances = _group_appearances(appearance_rows)
         xg_appearances = _group_appearances(xg_row_data)
+
+        # Per-player intl cap count in last 24mo — drives _intl_cap_shrink
+        # in the per-fixture loop. Counted against the >45-min-filtered
+        # appearances list (so 1 short cameo doesn't count as a cap).
+        # Anchored on "now" rather than per-target-fixture because cap
+        # counts are stable across the upcoming-fixture set.
+        _cap_anchor = pd.Timestamp.now() - pd.Timedelta(days=INTL_CAP_SHRINK_LOOKBACK_MONTHS * 30)
+        intl_cap_counts: Dict[int, int] = {}
+        for player_id, apps_list in appearances.items():
+            intl_cap_counts[player_id] = sum(
+                1 for (_fid, ko, comp, _tid) in apps_list
+                if comp in _INTL_COMP_SET and ko >= _cap_anchor
+            )
 
         player_windows: Dict[int, List[Tuple[int, pd.Timestamp, bool, int]]] = {}
         skipped_no_data: List[int] = []
@@ -467,6 +520,7 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
         'team_projections': team_projections,
         'teams': {r[0]: r[1] for r in teams_rows},
         'players': {r[0]: r[1] for r in players_rows},
+        'intl_cap_counts': intl_cap_counts,
     }
 
 
@@ -487,6 +541,7 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
     team_projections = data['team_projections']
     teams = data['teams']
     players = data['players']
+    intl_cap_counts = data.get('intl_cap_counts', {})
     player_odds = data.get('player_odds', {}) or {}
     odds_blend_weight = float(data.get('odds_blend_weight', 0.3))
 
@@ -531,6 +586,12 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
             window = player_windows.get(player_id)
             if not window:
                 continue  # no history — skipped + logged in project()
+
+            # Cap-shrink: dampen the share by player's recent intl
+            # presence. Counted off the >45-min-filtered appearances so a
+            # cameo doesn't count as a cap. Applied uniformly to every
+            # share-distributed stat below (Goals, Shots, Assists, ...).
+            cap_shrink = _intl_cap_shrink(intl_cap_counts.get(player_id, 0))
 
             row = {
                 'fixture_id': tp['fixture_id'],
@@ -577,9 +638,10 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
                             xg_window, xg_player_vals, xg_team_vals, target_dt
                         )
                         if xg_share > 0:
-                            share = (share + xg_share) / 2.0
+                            share = (share * GOALS_BLEND_GOALS_WEIGHT
+                                     + xg_share * GOALS_BLEND_XG_WEIGHT)
 
-                row[out_stat] = round(_f(tp[tp_col]) * share, 2)
+                row[out_stat] = round(_f(tp[tp_col]) * share * cap_shrink, 2)
 
             # Derived stats (Assists, Key Passes).
             for out_stat, (p_sid, t_sid) in DERIVED_SHARE_STATS.items():
@@ -592,7 +654,7 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
                     for (fid, _ko, _ic, tid) in window
                 }
                 share, _n = _weighted_share(window, player_vals, team_vals, target_dt)
-                row[out_stat] = round(derived_totals[out_stat] * share, 2)
+                row[out_stat] = round(derived_totals[out_stat] * share * cap_shrink, 2)
 
             # Fouls Drawn — team total = the opponent's projected Fouls;
             # share denominator = the opponent's fouls across the window.
@@ -605,7 +667,7 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
                 for (fid, _ko, _ic, tid) in window
             }
             fd_share, _n = _weighted_share(window, fd_player_vals, fd_team_vals, target_dt)
-            row['Fouls Drawn'] = round(opp_fouls_total * fd_share, 2)
+            row['Fouls Drawn'] = round(opp_fouls_total * fd_share * cap_shrink, 2)
 
             # Saves — keepers get the team total; outfielders 0.
             row['Saves'] = round(team_saves, 2) if position_group == 'GK' else 0.0
