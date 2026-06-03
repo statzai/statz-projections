@@ -272,8 +272,9 @@ def _classify_fixture_venue(home_team_country_id, away_team_country_id,
                         showcase venues (Dubai, Miami, etc.). Caller
                         uses the midpoint baseline.
     - 'unknown'       → venue exists but its country couldn't be
-                        derived. Defaults to home_at_home (most-common
-                        case across 112 upcoming friendlies post-backfill).
+                        derived (coastal/island edge cases the polygon
+                        geocoder can't match). Caller skips the fixture
+                        rather than guessing — fail-closed policy.
     """
     if venue_id is None:
         return 'no_venue'
@@ -527,6 +528,15 @@ class InternationalProjectionService:
                     if case == 'no_venue':
                         n_skipped_no_venue += 1
                         continue
+                    if case == 'unknown':
+                        # Venue exists but its country_id is NULL and the
+                        # geocoder couldn't match (coastal/island edge
+                        # cases — Bahrain Gulf coast, French Polynesia,
+                        # etc.). Skip rather than guess — better to drop
+                        # a fixture than project it with possibly-wrong
+                        # home-advantage assumptions.
+                        n_unknown_venue += 1
+                        continue
                     if case == 'home_at_home':
                         h_baseline, a_baseline = avg_home_goals, avg_away_goals
                         n_home_at_home += 1
@@ -536,14 +546,9 @@ class InternationalProjectionService:
                         # avg_home_goals boost.
                         h_baseline, a_baseline = avg_away_goals, avg_home_goals
                         n_away_at_home += 1
-                    elif case == 'true_neutral':
+                    else:  # 'true_neutral'
                         h_baseline = a_baseline = neutral_baseline
                         n_true_neutral += 1
-                    else:  # 'unknown' — venue exists but country couldn't
-                           # be derived. Defaults to home_at_home: most
-                           # common case (~70% of friendlies) so safest fallback.
-                        h_baseline, a_baseline = avg_home_goals, avg_away_goals
-                        n_unknown_venue += 1
                     home_goals = (h_atk / 100) * (a_def / 100) * h_baseline
                     away_goals = (a_atk / 100) * (h_def / 100) * a_baseline
                 else:
@@ -615,10 +620,10 @@ class InternationalProjectionService:
                     f"{scope.competition_name} projection ready: total={len(fixtures)} "
                     f"projected={len(inserts)} blended={n_blended} "
                     f"skipped_unknown_team={n_skipped_unknown_team} "
-                    f"skipped_no_venue={n_skipped_no_venue} | "
+                    f"skipped_no_venue={n_skipped_no_venue} "
+                    f"skipped_unknown_venue={n_unknown_venue} | "
                     f"venue breakdown: home_at_home={n_home_at_home} "
-                    f"away_at_home={n_away_at_home} true_neutral={n_true_neutral} "
-                    f"unknown_venue={n_unknown_venue}"
+                    f"away_at_home={n_away_at_home} true_neutral={n_true_neutral}"
                 )
             else:
                 logger.info(
