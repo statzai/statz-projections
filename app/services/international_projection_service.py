@@ -395,6 +395,8 @@ class InternationalProjectionService:
 
         # Step 1: refresh Statz ratings inline (skipped in per-fixture mode).
         ratings: dict
+        statz_rated_team_names: set = set()
+        fifa_carry_forward_names: set = set()
         if fixture_ids_filter:
             # Read latest cached team_ratings rows from team_ratings table
             # without recomputing. Fast — single SQL query.
@@ -422,41 +424,43 @@ class InternationalProjectionService:
         else:
             ratings_date = date.today()
             statz_df, _ = await compute_international_ratings(ratings_date, commit=commit)
+            # `ratings` dict — only the freshly-computed Statz ratings
+            # (~180 teams). compute_international_ratings ALSO writes
+            # ~31 FIFA carry-forwards to team_ratings for micro-nations
+            # without enough recent intl data (BVI, Vanuatu, etc.), but
+            # those flat defaults (typically atk=40 def=40) carry no
+            # real signal — every carry-forward team would project
+            # identically. Per policy, fixtures involving carry-forward
+            # teams get skipped (n_skipped_fifa_carry_forward counter).
+            # We layer carry-forwards into a SEPARATE set just for the
+            # diagnostic distinction "FIFA-only" vs "truly unrated".
             ratings = {
                 row['team_name']: (float(row['attack']), float(row['defense']))
                 for _, row in statz_df.iterrows()
             } if not statz_df.empty else {}
-            n_statz = len(ratings)
-            # compute_international_ratings returns ONLY the ~180
-            # freshly-computed Statz ratings in its DataFrame; the ~31
-            # FIFA carry-forwards (for micro-nations without enough recent
-            # intl data — BVI, Vanuatu, etc.) are written to team_ratings
-            # but absent from the returned df. Layer them in by reading
-            # the just-written ratings_date snapshot from team_ratings so
-            # micro-nation fixtures (Gibraltar v BVI etc.) don't silently
-            # fail the `team not in ratings` skip.
+            statz_rated_team_names: set = set(ratings.keys())
+            fifa_carry_forward_names: set = set()
             if commit:
                 _r_conn = await get_source_connection()
                 try:
                     async with _r_conn.cursor() as cur:
                         await cur.execute(
                             """
-                            SELECT t.name, tr.attack, tr.defense
-                            FROM team_ratings tr
+                            SELECT t.name FROM team_ratings tr
                             JOIN teams t ON t.id = tr.team_id
                             WHERE tr.competition_id = %s AND tr.date = %s
                             """,
                             (INTL_RATINGS_BUCKET_COMP_ID, ratings_date),
                         )
-                        for name, atk, dfn in await cur.fetchall():
-                            if name and name not in ratings:
-                                ratings[name] = (float(atk), float(dfn))
+                        for (name,) in await cur.fetchall():
+                            if name and name not in statz_rated_team_names:
+                                fifa_carry_forward_names.add(name)
                 finally:
                     release_source_connection(_r_conn)
             logger.info(
-                f"Refreshed {n_statz} Statz ratings + "
-                f"{len(ratings) - n_statz} FIFA carry-forwards for "
-                f"{ratings_date} = {len(ratings)} total"
+                f"Refreshed {len(statz_rated_team_names)} Statz ratings + "
+                f"{len(fifa_carry_forward_names)} FIFA carry-forwards "
+                f"(carry-forward fixtures will skip) for {ratings_date}"
             )
 
         conn = await get_source_connection()
@@ -572,6 +576,7 @@ class InternationalProjectionService:
             n_blended = 0
             n_skipped_no_odds = 0
             n_skipped_unknown_team = 0
+            n_skipped_fifa_carry_forward = 0
             n_skipped_no_venue = 0
             n_home_at_home = 0
             n_away_at_home = 0
@@ -588,7 +593,16 @@ class InternationalProjectionService:
                     n_skipped_no_odds += 1
                     continue
                 if home not in ratings or away not in ratings:
-                    n_skipped_unknown_team += 1
+                    # `ratings` dict (full-comp mode) holds Statz-rated
+                    # teams only — FIFA carry-forward teams are tracked
+                    # separately. Bucket the skip accordingly:
+                    #   - FIFA-only team in the fixture → carry-forward
+                    #     skip (flat 40/40 defaults are noise, not signal)
+                    #   - Neither rated nor carry-forward → truly unknown
+                    if home in fifa_carry_forward_names or away in fifa_carry_forward_names:
+                        n_skipped_fifa_carry_forward += 1
+                    else:
+                        n_skipped_unknown_team += 1
                     continue
 
                 # λ from cross-Poisson rating product. Baseline selection:
@@ -706,6 +720,7 @@ class InternationalProjectionService:
                     f"projected={len(inserts)} blended={n_blended} | skips: "
                     f"no_odds={n_skipped_no_odds} "
                     f"unknown_team={n_skipped_unknown_team} "
+                    f"fifa_carry_forward={n_skipped_fifa_carry_forward} "
                     f"no_venue={n_skipped_no_venue} "
                     f"unknown_venue={n_unknown_venue} | "
                     f"venue breakdown: home_at_home={n_home_at_home} "
@@ -874,4 +889,5 @@ class InternationalProjectionService:
             })
         if scope.require_result_odds:
             result['n_skipped_no_odds'] = n_skipped_no_odds
+        result['n_skipped_fifa_carry_forward'] = n_skipped_fifa_carry_forward
         return result
