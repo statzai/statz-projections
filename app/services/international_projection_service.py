@@ -122,6 +122,13 @@ class IntlProjectionScope:
     # per-venue (home_at_home / away_at_home / true_neutral / no_venue).
     # WC keeps host_bonus/host_penalty path; friendlies opt in.
     use_per_fixture_neutral_venue: bool = False
+    # When True, skip any fixture that has no 1X2 result odds across our
+    # 5 fixture-odds books (bet365 / Coral / Ladbrokes / Midnite /
+    # Boylesports). For friendlies — bookmakers price ~3-5 days before
+    # kickoff, so this gates projections behind "is this a real, live,
+    # bookmaker-confirmed fixture". WC doesn't opt in (every WC fixture
+    # gets priced; the gate would just add latency).
+    require_result_odds: bool = False
 
 
 # Registry of every comp the international projection pipeline knows about.
@@ -153,6 +160,12 @@ INTL_SCOPES = {
         # showcase fixtures), etc. — per-fixture venue classification is
         # the only way to get the home/away baseline right.
         use_per_fixture_neutral_venue=True,
+        # Friendlies feed includes a lot of obscure exhibition / micro-
+        # confederation fixtures that bookmakers don't price. Gate on
+        # 1X2 odds presence so we only project games with real
+        # bookmaker interest. Nightly full-comp re-runs pick up new
+        # odds as books start pricing closer to kickoff.
+        require_result_odds=True,
     ),
 }
 
@@ -469,6 +482,39 @@ class InternationalProjectionService:
             wc_fixture_ids = [row[0] for row in fixtures]
             goals_odds_map = await load_goals_odds_for_fixtures(conn, wc_fixture_ids)
 
+            # When scope.require_result_odds, build the set of fixtures
+            # that have complete 1X2 result odds across any of our 5
+            # fixture-odds books. Used as the FIRST gate in the per-
+            # fixture loop — friendlies feed includes obscure exhibition
+            # / micro-confederation games bookies don't price, so we
+            # skip them rather than emit a model-only projection. Stake
+            # has no 1X2 for football so it's not included.
+            fixtures_with_1x2: set = set()
+            if scope.require_result_odds and wc_fixture_ids:
+                async with conn.cursor() as cur:
+                    fid_ph = ",".join(["%s"] * len(wc_fixture_ids))
+                    fid_tuple = tuple(int(x) for x in wc_fixture_ids)
+                    await cur.execute(
+                        f"""
+                        SELECT fixture_id FROM bet365_fixture_odds
+                          WHERE fixture_id IN ({fid_ph}) AND home_win_odd IS NOT NULL AND draw_odd IS NOT NULL AND away_win_odd IS NOT NULL
+                        UNION SELECT fixture_id FROM coral_fixture_odds
+                          WHERE fixture_id IN ({fid_ph}) AND home_win_odd IS NOT NULL AND draw_odd IS NOT NULL AND away_win_odd IS NOT NULL
+                        UNION SELECT fixture_id FROM ladbrokes_fixture_odds
+                          WHERE fixture_id IN ({fid_ph}) AND home_win_odd IS NOT NULL AND draw_odd IS NOT NULL AND away_win_odd IS NOT NULL
+                        UNION SELECT fixture_id FROM midnite_fixture_odds
+                          WHERE fixture_id IN ({fid_ph}) AND home_win_odd IS NOT NULL AND draw_odd IS NOT NULL AND away_win_odd IS NOT NULL
+                        UNION SELECT fixture_id FROM boylesports_fixture_odds
+                          WHERE fixture_id IN ({fid_ph}) AND home_win_odd IS NOT NULL AND draw_odd IS NOT NULL AND away_win_odd IS NOT NULL
+                        """,
+                        fid_tuple * 5,
+                    )
+                    fixtures_with_1x2 = {int(r[0]) for r in await cur.fetchall()}
+                logger.info(
+                    f"{scope.competition_name}: {len(fixtures_with_1x2)}/{len(wc_fixture_ids)} "
+                    f"fixtures have 1X2 result odds across 5 books — others will skip"
+                )
+
             # Per-fixture neutral-venue path needs comp-specific home/away
             # goal averages (cached once per run). Falls back to symmetric
             # AVG_GOALS if the helper returns None (e.g. brand-new comp
@@ -493,6 +539,7 @@ class InternationalProjectionService:
             neutral_baseline = (avg_home_goals + avg_away_goals) / 2
 
             n_blended = 0
+            n_skipped_no_odds = 0
             n_skipped_unknown_team = 0
             n_skipped_no_venue = 0
             n_home_at_home = 0
@@ -502,6 +549,13 @@ class InternationalProjectionService:
             inserts = []
             for (fid, h_tid, a_tid, ko, home, away, oh, od, oa,
                  venue_id, venue_country_id, home_country_id, away_country_id) in fixtures:
+                # Gate 1: bookmaker-confirmed (only when scope opts in).
+                # First gate so the strongest skip reason wins — a fixture
+                # with no odds AND no rating counts as no_odds, not
+                # unknown_team.
+                if scope.require_result_odds and fid not in fixtures_with_1x2:
+                    n_skipped_no_odds += 1
+                    continue
                 if home not in ratings or away not in ratings:
                     n_skipped_unknown_team += 1
                     continue
@@ -618,10 +672,11 @@ class InternationalProjectionService:
             if scope.use_per_fixture_neutral_venue:
                 logger.info(
                     f"{scope.competition_name} projection ready: total={len(fixtures)} "
-                    f"projected={len(inserts)} blended={n_blended} "
-                    f"skipped_unknown_team={n_skipped_unknown_team} "
-                    f"skipped_no_venue={n_skipped_no_venue} "
-                    f"skipped_unknown_venue={n_unknown_venue} | "
+                    f"projected={len(inserts)} blended={n_blended} | skips: "
+                    f"no_odds={n_skipped_no_odds} "
+                    f"unknown_team={n_skipped_unknown_team} "
+                    f"no_venue={n_skipped_no_venue} "
+                    f"unknown_venue={n_unknown_venue} | "
                     f"venue breakdown: home_at_home={n_home_at_home} "
                     f"away_at_home={n_away_at_home} true_neutral={n_true_neutral}"
                 )
@@ -786,4 +841,6 @@ class InternationalProjectionService:
                 'n_true_neutral': n_true_neutral,
                 'n_unknown_venue': n_unknown_venue,
             })
+        if scope.require_result_odds:
+            result['n_skipped_no_odds'] = n_skipped_no_odds
         return result
