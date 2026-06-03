@@ -426,7 +426,38 @@ class InternationalProjectionService:
                 row['team_name']: (float(row['attack']), float(row['defense']))
                 for _, row in statz_df.iterrows()
             } if not statz_df.empty else {}
-            logger.info(f"Refreshed {len(ratings)} Statz ratings for {ratings_date}")
+            n_statz = len(ratings)
+            # compute_international_ratings returns ONLY the ~180
+            # freshly-computed Statz ratings in its DataFrame; the ~31
+            # FIFA carry-forwards (for micro-nations without enough recent
+            # intl data — BVI, Vanuatu, etc.) are written to team_ratings
+            # but absent from the returned df. Layer them in by reading
+            # the just-written ratings_date snapshot from team_ratings so
+            # micro-nation fixtures (Gibraltar v BVI etc.) don't silently
+            # fail the `team not in ratings` skip.
+            if commit:
+                _r_conn = await get_source_connection()
+                try:
+                    async with _r_conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            SELECT t.name, tr.attack, tr.defense
+                            FROM team_ratings tr
+                            JOIN teams t ON t.id = tr.team_id
+                            WHERE tr.competition_id = %s AND tr.date = %s
+                            """,
+                            (INTL_RATINGS_BUCKET_COMP_ID, ratings_date),
+                        )
+                        for name, atk, dfn in await cur.fetchall():
+                            if name and name not in ratings:
+                                ratings[name] = (float(atk), float(dfn))
+                finally:
+                    release_source_connection(_r_conn)
+            logger.info(
+                f"Refreshed {n_statz} Statz ratings + "
+                f"{len(ratings) - n_statz} FIFA carry-forwards for "
+                f"{ratings_date} = {len(ratings)} total"
+            )
 
         conn = await get_source_connection()
         try:
