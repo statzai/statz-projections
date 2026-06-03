@@ -77,6 +77,7 @@ class WcSquadProvider:
                 JOIN wc_squads s ON s.id = p.squad_id
                 WHERE p.player_id IS NOT NULL
                   AND s.team_id IS NOT NULL
+                  AND p.status = 'playing'
                 """,
             )
             rows = await cur.fetchall()
