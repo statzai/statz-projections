@@ -423,6 +423,7 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
         #    national teams and the clubs the players turned out for, plus
         #    (via stat 56) the opponent fouls for the Fouls Drawn denominator.
         team_stat_rows = []
+        team_assist_sum_rows = []
         if window_fixture_ids:
             ph_fid = ",".join(["%s"] * len(window_fixture_ids))
             ph_sid = ",".join(["%s"] * len(_ALL_TEAM_STAT_IDS))
@@ -436,6 +437,23 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
                 tuple(window_fixture_ids) + tuple(_ALL_TEAM_STAT_IDS),
             )
             team_stat_rows = await cur.fetchall()
+
+            # Sportmonks' fixture_team_stats Assists (stat 79) systematically
+            # undercounts vs the SUM of fixture_player_stats Assists for the
+            # same fixture (e.g. France 14-0 Gibraltar: team-level=3, player
+            # sum=10). Re-derive team_assists from player-sums so the
+            # assist-share denominator is correct. Override happens below.
+            await cur.execute(
+                f"""
+                SELECT fixture_id, team_id, SUM(value) AS total
+                FROM fixture_player_stats
+                WHERE fixture_id IN ({ph_fid})
+                  AND stats_type_id = %s
+                GROUP BY fixture_id, team_id
+                """,
+                tuple(window_fixture_ids) + (79,),
+            )
+            team_assist_sum_rows = await cur.fetchall()
 
         # 5. WC team_projections written by the team-stat step.
         # Per-fixture mode narrows to just the requested fixtures.
@@ -492,6 +510,12 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
         tstats[(team_id, fixture_id, stats_type_id)] = v
         if stats_type_id == FOULS_TEAM_STAT_ID:
             fixture_fouls.setdefault(fixture_id, {})[team_id] = v
+
+    # Override team Assists (stat 79) entries with the player-sum-derived
+    # totals — Sportmonks' team-level Assists field is unreliable (often
+    # 2-3× undercount vs the actual sum of player assists).
+    for fixture_id, team_id, total in team_assist_sum_rows:
+        tstats[(int(team_id), int(fixture_id), 79)] = _f(total)
 
     # opp_fouls[(team_id, fixture_id)] = the OTHER team's fouls in that fixture
     opp_fouls: Dict[Tuple[int, int], float] = {}
