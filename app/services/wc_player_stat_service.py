@@ -65,11 +65,14 @@ GAME_WINDOW = 30             # last N appearances per player (intl-first, club-f
 CLUB_LOOKBACK_MONTHS = 18    # how far back to pull club games from (load bound)
 
 # --- Recency weighting -----------------------------------------------------
-# 0.995/week — matches the team-stat service (DECAY_WEIGHT) and the
-# international ratings. Over a 30-game window a near-flat curve keeps the
-# games evenly weighted rather than collapsing the share onto the last
-# 1-2 caps.
-RECENCY_WEIGHT = 0.995
+# 0.9975/week — VERY gentle decay. Over a 30-game window this keeps games
+# spanning multiple intl tournament cycles (2022 WC, Euro 2024, current
+# qualifying) weighted near-evenly. A 3-year-old cap carries 68% weight,
+# 5-year-old 53%. Loosened from 0.995 to 0.9975 on 2026-06-04 to pull older
+# tournament-era caps further toward full influence — players don't get 30
+# caps in tight succession, so the share calc needs the older games to
+# stabilise.
+RECENCY_WEIGHT = 0.9975
 RECENCY_GRACE_WEEKS = 4      # full weight inside the last 4 weeks
 RECENCY_EXP_SHIFT = 3        # decay exponent = weeks_since - 3
 
