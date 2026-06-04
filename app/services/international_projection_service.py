@@ -108,6 +108,9 @@ class IntlProjectionScope:
     fantasy_rules     — 'fifa_wc_2026' enables Step 6 (WC fantasy points).
                         None for non-WC comps; future Euros fantasy keys
                         would be added here.
+    fanteam_rules     — 'fanteam_wc_2026' enables Step 6b (FanTeam WC
+                        fantasy points). Sibling of fantasy_rules; FanTeam
+                        and FIFA can both be on for the same comp.
     """
     competition_id: int
     competition_name: str
@@ -117,6 +120,7 @@ class IntlProjectionScope:
     bracket_config: object = None
     has_squad_source: bool = False
     fantasy_rules: object = None
+    fanteam_rules: object = None
     # When True, replace the symmetric AVG_GOALS=1.3 baseline with comp-
     # specific weighted avg_home/avg_away goals AND classify each fixture
     # per-venue (home_at_home / away_at_home / true_neutral / no_venue).
@@ -145,6 +149,7 @@ INTL_SCOPES = {
         bracket_config=WC_2026,
         has_squad_source=True,
         fantasy_rules='fifa_wc_2026',
+        fanteam_rules='fanteam_wc_2026',
     ),
     'Friendly International': IntlProjectionScope(
         competition_id=1082,
@@ -861,6 +866,22 @@ class InternationalProjectionService:
                 logger.exception(f"{scope.competition_name} fantasy points projection failed: {e}")
                 fantasy_points_result = {'error': str(e)}
 
+        # Step 6b: Per-(fixture, player) FanTeam fantasy point projections.
+        # Sibling of Step 6 with the FanTeam PL ruleset applied to WC stat
+        # bags. Reads position from `fanteam_wc_player_mappings` so the
+        # scoring matches FanTeam's own classification of each player.
+        fanteam_points_result = None
+        if commit and scope.fanteam_rules == 'fanteam_wc_2026':
+            try:
+                from app.services.fanteam_wc_projection_service import FanTeamWcProjectionService
+                fanteam_points_result = await FanTeamWcProjectionService(scope=scope).project(
+                    commit=commit, fixture_ids=fixture_ids_filter,
+                )
+                logger.info(f"{scope.competition_name} FanTeam projection: {fanteam_points_result}")
+            except Exception as e:
+                logger.exception(f"{scope.competition_name} FanTeam projection failed: {e}")
+                fanteam_points_result = {'error': str(e)}
+
         # Step 7: Per-(competition, player) tournament-total goals + assists.
         # Aggregates the group-stage player projections + scales them by the
         # team's expected_goals_for from tournament_projections. Gated on
@@ -901,6 +922,7 @@ class InternationalProjectionService:
             'team_stat_projection': team_stat_result,
             'player_stat_projection': player_stat_result,
             'fantasy_points_projection': fantasy_points_result,
+            'fanteam_points_projection': fanteam_points_result,
             'tournament_player_projection': tournament_player_result,
         }
         if scope.use_per_fixture_neutral_venue:
