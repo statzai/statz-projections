@@ -318,6 +318,13 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
         # calcs — a 6-min appearance with a goal looks like a 9-goal-
         # per-90 player. Filter at the appearance-loading step so every
         # downstream share calc inherits it.
+        # state_id filter dropped — historical Sportmonks fixtures have
+        # state_id=NULL (~67% of pre-current-season PL/Serie A/La Liga
+        # rows). Filtering IN (5,7,8) was excluding ~10-15 years of
+        # career data for veterans (Lukaku's Roma/Inter/Chelsea games,
+        # Ronaldo's Madrid era, etc.). A row in fixture_player_stats
+        # is itself sufficient evidence the fixture was played — no
+        # need to gate on state.
         appearance_rows = []
         if squad_player_ids:
             ph_pid = ",".join(["%s"] * len(squad_player_ids))
@@ -332,7 +339,7 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
                                             AND mp.stats_type_id = {MINUTES_PLAYED_STAT_ID}
                                             AND mp.value > {MIN_MINUTES_THRESHOLD}
                 WHERE fps.player_id IN ({ph_pid})
-                  AND f.state_id IN (5, 7, 8)
+                  AND f.kickoff_datetime < NOW()
                 """,
                 tuple(squad_player_ids),
             )
@@ -356,7 +363,7 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
                                             AND mp.value > {MIN_MINUTES_THRESHOLD}
                 WHERE fps.player_id IN ({ph_pid})
                   AND fps.stats_type_id = %s
-                  AND f.state_id IN (5, 7, 8)
+                  AND f.kickoff_datetime < NOW()
                 """,
                 tuple(squad_player_ids) + (XG_STAT_ID,),
             )
