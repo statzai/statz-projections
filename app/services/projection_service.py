@@ -1757,6 +1757,13 @@ class ProjectionService:
                         return 0.0
                     return float(_td_poisson.sf(threshold - 1, total))
                 pl_projections['CBIT Hit Rate'] = pl_projections.apply(_td_cbit_hit_rate, axis=1)
+                # Phase 2 persistence: store the percentage form of CBIT
+                # Hit Rate so the fantasy API can surface it as
+                # `def_con_pct`. CBIT Hit Rate itself stays 0-1 because
+                # downstream FPL scoring (statz_functions.py line 2078)
+                # multiplies it by 2 to award the +2 defensive-contribution
+                # bonus.
+                pl_projections['def_con_pct'] = (pl_projections['CBIT Hit Rate'] * 100).round(2)
                 logger.info(f"[{league}] FPL: CBIT Hit Rate replaced with team-down projection")
 
                 fpl_points_dict_gk = {'Goals': 10, 'Assists': 3, 'Clean Sheet': 4, 'Saves': 1, 'Penalties Saved': 5, 'Goals Conceded': -1, 'Yellow Card': -1}
@@ -1778,7 +1785,22 @@ class ProjectionService:
 
                 fpl_df = fpl_point_df.merge(bonus, on=['Player', 'Team', 'Opponent'], how='left', suffixes=('', '_Bonus'))
                 fpl_df['FPL Points'] = fpl_df['PTS'] + fpl_df['Bonus Points'].fillna(0)
-                fpl_df = fpl_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'FPL Points']].copy()
+                # Phase 2: pull def_con_pct off pl_projections so it lands
+                # in fpl_df for persistence. Keyed on (fixture_id, player_id)
+                # — the natural per-row identifier — instead of the
+                # (Player, Team, Opponent) triple the bonus merge above
+                # uses. Player triples can be ambiguous in pathological
+                # data (same matchup repeating across GWs); fixture_id +
+                # player_id is unambiguous. drop_duplicates is a
+                # defensive guard against any stray data dupes on those
+                # keys; the underlying intent is "one def_con_pct per
+                # (fixture, player)".
+                _def_con = (
+                    pl_projections[['fixture_id', 'player_id', 'def_con_pct']]
+                    .drop_duplicates(['fixture_id', 'player_id'])
+                )
+                fpl_df = fpl_df.merge(_def_con, on=['fixture_id', 'player_id'], how='left')
+                fpl_df = fpl_df[['fixture_id', 'kickoff_datetime', 'player_id', 'Player', 'Position', 'Team', 'Opponent', 'Venue', 'FPL Points', 'Bonus Points', 'def_con_pct']].copy()
                 # Stamp gameweek_id + team_id + opponent_id from the source
                 # fixtures table. gameweek_id makes the 6-GW horizon
                 # queryable; team_id / opponent_id let consumers filter
