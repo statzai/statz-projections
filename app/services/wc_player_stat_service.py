@@ -90,9 +90,15 @@ MIN_MINUTES_THRESHOLD = 45
 
 # Goals share blend: how much weight on raw goals vs xG. Goals are noisy
 # and high-variance; xG is steadier. Shifted 2026-06-03 from 50/50 to 30/70
-# favoring xG.
+# favoring xG. The 0.7 weight is the FULL weight applied when xG window
+# is at or above XG_FULL_WEIGHT_N; thinner samples scale the weight down
+# linearly so a player with 5-10 xG games doesn't have their projection
+# dominated by a noisy partial sample. Audit on 2026-06-04 showed top-30
+# scorers including Lukaku (9 xG games) and Havertz (15) were getting
+# 70% blend weight from too few xG fixtures — tiered scaling fixes this.
 GOALS_BLEND_GOALS_WEIGHT = 0.3
 GOALS_BLEND_XG_WEIGHT = 0.7
+XG_FULL_WEIGHT_N = 20
 
 # International-cap-count shrink — players with few caps in the last 24
 # months have an unreliable intl share; dampen their projections so a
@@ -665,8 +671,18 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
                             xg_window, xg_player_vals, xg_team_vals, target_dt
                         )
                         if xg_share > 0:
-                            share = (share * GOALS_BLEND_GOALS_WEIGHT
-                                     + xg_share * GOALS_BLEND_XG_WEIGHT)
+                            # Tiered xG weight: full GOALS_BLEND_XG_WEIGHT
+                            # when xg window has >=XG_FULL_WEIGHT_N games,
+                            # linearly less when thinner. Keeps the 30/70
+                            # G/xG blend honest for players with rich xG
+                            # history while preventing thin samples (5-15
+                            # games) from dominating a player's projection.
+                            xg_w = min(
+                                GOALS_BLEND_XG_WEIGHT,
+                                len(xg_window) / XG_FULL_WEIGHT_N * GOALS_BLEND_XG_WEIGHT,
+                            )
+                            goals_w = 1.0 - xg_w
+                            share = share * goals_w + xg_share * xg_w
 
                 row[out_stat] = round(_f(tp[tp_col]) * share * cap_shrink, 2)
 
