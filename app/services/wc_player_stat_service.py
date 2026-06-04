@@ -440,6 +440,9 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
         # 4. Team stats for the window fixtures, ALL teams — covers both the
         #    national teams and the clubs the players turned out for, plus
         #    (via stat 56) the opponent fouls for the Fouls Drawn denominator.
+        #    Mirror domestic: filter `fixtures.stats_imported = 1` so empty-
+        #    import fixtures don't pollute team denominators. Same as
+        #    statz_functions.py:333 / :375 in the domestic path.
         team_stat_rows = []
         team_assist_sum_rows = []
         if window_fixture_ids:
@@ -447,10 +450,12 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
             ph_sid = ",".join(["%s"] * len(_ALL_TEAM_STAT_IDS))
             await cur.execute(
                 f"""
-                SELECT fixture_id, team_id, stats_type_id, value
-                FROM fixture_team_stats
-                WHERE fixture_id IN ({ph_fid})
-                  AND stats_type_id IN ({ph_sid})
+                SELECT fts.fixture_id, fts.team_id, fts.stats_type_id, fts.value
+                FROM fixture_team_stats fts
+                JOIN fixtures f ON f.id = fts.fixture_id
+                WHERE fts.fixture_id IN ({ph_fid})
+                  AND fts.stats_type_id IN ({ph_sid})
+                  AND f.stats_imported = 1
                 """,
                 tuple(window_fixture_ids) + tuple(_ALL_TEAM_STAT_IDS),
             )
@@ -461,13 +466,17 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
             # same fixture (e.g. France 14-0 Gibraltar: team-level=3, player
             # sum=10). Re-derive team_assists from player-sums so the
             # assist-share denominator is correct. Override happens below.
+            # Same stats_imported=1 gate as the team-stats query above so
+            # the override stays consistent with domestic-style filtering.
             await cur.execute(
                 f"""
-                SELECT fixture_id, team_id, SUM(value) AS total
-                FROM fixture_player_stats
-                WHERE fixture_id IN ({ph_fid})
-                  AND stats_type_id = %s
-                GROUP BY fixture_id, team_id
+                SELECT fps.fixture_id, fps.team_id, SUM(fps.value) AS total
+                FROM fixture_player_stats fps
+                JOIN fixtures f ON f.id = fps.fixture_id
+                WHERE fps.fixture_id IN ({ph_fid})
+                  AND fps.stats_type_id = %s
+                  AND f.stats_imported = 1
+                GROUP BY fps.fixture_id, fps.team_id
                 """,
                 tuple(window_fixture_ids) + (79,),
             )
