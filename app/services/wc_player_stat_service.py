@@ -62,7 +62,12 @@ logger = logging.getLogger("wc_player_stats")
 
 # --- Game window -----------------------------------------------------------
 GAME_WINDOW = 30             # last N appearances per player (intl-first, club-filled)
-CLUB_LOOKBACK_MONTHS = 18    # how far back to pull club games from (load bound)
+# No club lookback limit — matches the domestic projection path which loads
+# all of a player's stats and lets the GAME_WINDOW cap + recency weights
+# decide what's relevant. The previous 18-month cap was a load-bound that
+# created inconsistent behaviour for veterans with thin recent xG samples
+# (Lukaku: 9 xG-eligible games inside 18mo, but plenty more at Roma/Inter
+# pre-2024 that the window-builder couldn't reach).
 
 # --- Recency weighting -----------------------------------------------------
 # 0.9975/week — VERY gentle decay. Over a 30-game window this keeps games
@@ -316,7 +321,6 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
         appearance_rows = []
         if squad_player_ids:
             ph_pid = ",".join(["%s"] * len(squad_player_ids))
-            ph_comp = ",".join(["%s"] * len(INTERNATIONAL_COMP_IDS))
             await cur.execute(
                 f"""
                 SELECT DISTINCT fps.player_id, fps.fixture_id, fps.team_id,
@@ -329,10 +333,8 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
                                             AND mp.value > {MIN_MINUTES_THRESHOLD}
                 WHERE fps.player_id IN ({ph_pid})
                   AND f.state_id IN (5, 7, 8)
-                  AND (f.competition_id IN ({ph_comp})
-                       OR f.kickoff_datetime >= DATE_SUB(NOW(), INTERVAL {CLUB_LOOKBACK_MONTHS} MONTH))
                 """,
-                tuple(squad_player_ids) + tuple(INTERNATIONAL_COMP_IDS),
+                tuple(squad_player_ids),
             )
             appearance_rows = await cur.fetchall()
 
