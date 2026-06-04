@@ -861,6 +861,31 @@ class InternationalProjectionService:
                 logger.exception(f"{scope.competition_name} fantasy points projection failed: {e}")
                 fantasy_points_result = {'error': str(e)}
 
+        # Step 7: Per-(competition, player) tournament-total goals + assists.
+        # Aggregates the group-stage player projections + scales them by the
+        # team's expected_goals_for from tournament_projections. Gated on
+        # bracket_config — same condition as the tournament simulator since
+        # both need the Monte Carlo bracket output.
+        # Skipped in per-fixture mode (tournament totals are bracket-wide,
+        # not per-fixture).
+        tournament_player_result = None
+        if commit and not fixture_ids_filter and scope.bracket_config is not None:
+            try:
+                from app.services.wc_tournament_player_projection_service import (
+                    WcTournamentPlayerProjectionService,
+                )
+                tournament_player_result = await WcTournamentPlayerProjectionService(
+                    scope=scope
+                ).project(commit=commit)
+                logger.info(
+                    f"{scope.competition_name} tournament player projection: {tournament_player_result}"
+                )
+            except Exception as e:
+                logger.exception(
+                    f"{scope.competition_name} tournament player projection failed: {e}"
+                )
+                tournament_player_result = {'error': str(e)}
+
         result = {
             'n_total': len(fixtures),
             'n_projected': len(inserts),
@@ -876,6 +901,7 @@ class InternationalProjectionService:
             'team_stat_projection': team_stat_result,
             'player_stat_projection': player_stat_result,
             'fantasy_points_projection': fantasy_points_result,
+            'tournament_player_projection': tournament_player_result,
         }
         if scope.use_per_fixture_neutral_venue:
             result.update({
