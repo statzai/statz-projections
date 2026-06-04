@@ -504,6 +504,48 @@ class LeagueDataLoader:
             # (home + away, > 2.5, etc.) doesn't string-concatenate.
             if "value" in df.columns:
                 df["value"] = pd.to_numeric(df["value"], errors="coerce")
+
+        # Override team Assists (stats_type_id=79) with SUM of player_stats
+        # per (fixture, team). Sportmonks' fixture_team_stats Assists field
+        # systematically undercounts vs the actual sum of player assists
+        # (e.g. France 14-0 Gibraltar: team=3, player_sum=10). Same fix as
+        # the intl/WC pipeline (wc_player_stat_service commit fd3dfa5), kept
+        # consistent across all projection services.
+        if not df.empty:
+            ASSISTS_STAT_ID = 79
+            sql_assists = f"""
+                SELECT fixture_id, team_id, SUM(value) AS total
+                FROM fixture_player_stats
+                WHERE fixture_id IN ({fix_ph})
+                  AND stats_type_id = %s
+                GROUP BY fixture_id, team_id
+            """
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    sql_assists, tuple(self.fixture_ids) + (ASSISTS_STAT_ID,)
+                )
+                assist_rows = await cur.fetchall()
+
+            if assist_rows:
+                # Drop existing Assists team-rows then concat the player-sum-derived
+                # ones. Downstream `get_player_stats` only reads
+                # (fixture_id, team_id, stats_type_id, value) from team_stats,
+                # so the unset id/created_at/updated_at on the new rows are
+                # harmless. dropna in case any totals come back as None.
+                df = df[df["stats_type_id"] != ASSISTS_STAT_ID].reset_index(drop=True)
+                assist_df = pd.DataFrame(
+                    [
+                        {
+                            "fixture_id": int(r[0]),
+                            "team_id": int(r[1]),
+                            "stats_type_id": ASSISTS_STAT_ID,
+                            "value": float(r[2]) if r[2] is not None else 0.0,
+                        }
+                        for r in assist_rows
+                    ]
+                )
+                df = pd.concat([df, assist_df], ignore_index=True)
+
         self.team_stats = df
 
     async def _load_player_stats(self, conn) -> None:
