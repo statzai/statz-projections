@@ -145,7 +145,7 @@ class RecentCapsSquadProvider:
         if not team_ids:
             team_ids = self.team_ids
         if not team_ids:
-            logger.warning("RecentCapsSquadProvider called with empty team_ids — returning empty pool")
+            logger.debug("RecentCapsSquadProvider called with empty team_ids — returning empty pool")
             return {}
         # Local import — datetime is module-imported.
         anchor = as_of or datetime.utcnow()
@@ -188,7 +188,10 @@ class RecentCapsSquadProvider:
         for tid, pids in candidates_by_team.items():
             pool[tid] = [(pid, positions.get(pid, 'MID')) for pid in pids]
             if not pool[tid]:
-                logger.warning(
+                # INFO not WARNING: expected for minnow nations with no
+                # recent caps in our DB — benign data coverage, not a fault.
+                # The digest only surfaces WARNING/ERROR.
+                logger.info(
                     "RecentCapsSquadProvider: no recent caps for team_id=%s "
                     "(min_minutes=%d, min_caps=%d, lookback_months=%d) — "
                     "fixture's player projections will be empty",
@@ -286,7 +289,9 @@ async def resolve_player_position(conn, player_ids: list) -> dict:
     for pid in player_ids:
         if int(pid) not in out:
             out[int(pid)] = 'MID'
-            logger.warning(
+            # DEBUG not WARNING: a benign per-player data fallback (no position
+            # on record → MID). Noisy + expected; kept reachable at DEBUG.
+            logger.debug(
                 "resolve_player_position: no position for player_id=%s — defaulting to MID",
                 pid,
             )

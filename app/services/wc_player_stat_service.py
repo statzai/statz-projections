@@ -880,7 +880,11 @@ class WcPlayerStatService:
                         f"— nothing to project. Run `php artisan wc:link --players-only` on statz."
                     )
                 else:
-                    logger.warning(
+                    # INFO not WARNING: for recent-caps comps (friendlies/quals)
+                    # an empty pool is the expected "nothing to project right
+                    # now" state (no upcoming fixtures, or only minnow nations
+                    # with no caps). Not a fault — keep it out of the digest.
+                    logger.info(
                         f"No squads loaded for {self.scope.competition_name} — "
                         f"RecentCapsSquadProvider returned an empty pool. Likely no "
                         f"upcoming fixtures, or every selected nation has zero "
@@ -909,9 +913,10 @@ class WcPlayerStatService:
             )
             data['odds_blend_weight'] = 0.3
 
-            # Flag squad players with no usable history at all — skipped from
-            # projection. A data gap to chase (uncovered league / missing
-            # player record).
+            # Squad players with no usable history at all — skipped from
+            # projection. INFO not WARNING: expected for obscure / deep-squad
+            # names we simply have no match data for (can't project a player
+            # with zero history). Kept queryable at INFO; out of the digest.
             if skipped_no_data:
                 pid_to_team = {
                     pid: tid for tid, members in squads.items() for (pid, _pg) in members
@@ -920,10 +925,10 @@ class WcPlayerStatService:
                     f"{players.get(pid, pid)} [{teams.get(pid_to_team.get(pid), '?')}]"
                     for pid in skipped_no_data
                 )
-                logger.warning(
-                    f"{self.scope.competition_name} player-stat: SKIPPING "
+                logger.info(
+                    f"{self.scope.competition_name} player-stat: skipped "
                     f"{len(skipped_no_data)} squad players with no international "
-                    f"or club history — investigate: {detail}"
+                    f"or club history (no data to project): {detail}"
                 )
 
             logger.info(
