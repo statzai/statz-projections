@@ -202,6 +202,23 @@ _ALL_TEAM_STAT_IDS = sorted(
     | {t for _p, t in DERIVED_SHARE_STATS.values()}
     | {XG_STAT_ID}
 )
+
+# Share-denominator reconciliation map: {player_fps_id: team_fts_id}.
+# Every share/derived stat is a "one event = one player" counting stat, so
+# the team total SHOULD equal the sum of the players' values. In practice
+# the two feeds disagree in a meaningful fraction of (esp. international)
+# fixtures — sometimes the team row is missing/low (Assists ~33% of intl
+# games, Key Passes ~24%), sometimes a thin player import makes the
+# player-sum low. BOTH failure modes are undercounts, so we take
+# max(team_row, player_sum) as the denominator: it's a no-op where the
+# feeds agree, picks player-sum where the team row is short, and picks the
+# team row where the player import is thin. xG (modeled, not a count) and
+# Fouls Drawn (opponent-derived) are deliberately excluded.
+_COUNTING_DENOM_MAP: Dict[int, int] = {
+    **{p: t for p, t, _c in SHARE_STATS.values()},
+    **{p: t for p, t in DERIVED_SHARE_STATS.values()},
+}
+_COUNTING_PLAYER_IDS = sorted(_COUNTING_DENOM_MAP.keys())
 _INTL_COMP_SET = set(INTERNATIONAL_COMP_IDS)
 
 
@@ -461,7 +478,7 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
         #    import fixtures don't pollute team denominators. Same as
         #    statz_functions.py:333 / :375 in the domestic path.
         team_stat_rows = []
-        team_assist_sum_rows = []
+        team_player_sum_rows = []
         if window_fixture_ids:
             ph_fid = ",".join(["%s"] * len(window_fixture_ids))
             ph_sid = ",".join(["%s"] * len(_ALL_TEAM_STAT_IDS))
@@ -478,26 +495,28 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
             )
             team_stat_rows = await cur.fetchall()
 
-            # Sportmonks' fixture_team_stats Assists (stat 79) systematically
-            # undercounts vs the SUM of fixture_player_stats Assists for the
-            # same fixture (e.g. France 14-0 Gibraltar: team-level=3, player
-            # sum=10). Re-derive team_assists from player-sums so the
-            # assist-share denominator is correct. Override happens below.
-            # Same stats_imported=1 gate as the team-stats query above so
-            # the override stays consistent with domestic-style filtering.
+            # Per-(fixture, team, stat) SUM of player values for every
+            # counting stat. Used below to set each share denominator to
+            # max(team_row, player_sum) — see _COUNTING_DENOM_MAP. The team
+            # and player feeds should agree (one event = one player) but
+            # often don't; both disagreement modes are undercounts, so the
+            # larger is the better estimate of the true team total. Same
+            # stats_imported=1 gate as the team-stats query so thin imports
+            # don't feed a too-low player-sum into the reconciliation.
+            ph_csid = ",".join(["%s"] * len(_COUNTING_PLAYER_IDS))
             await cur.execute(
                 f"""
-                SELECT fps.fixture_id, fps.team_id, SUM(fps.value) AS total
+                SELECT fps.fixture_id, fps.team_id, fps.stats_type_id, SUM(fps.value) AS total
                 FROM fixture_player_stats fps
                 JOIN fixtures f ON f.id = fps.fixture_id
                 WHERE fps.fixture_id IN ({ph_fid})
-                  AND fps.stats_type_id = %s
+                  AND fps.stats_type_id IN ({ph_csid})
                   AND f.stats_imported = 1
-                GROUP BY fps.fixture_id, fps.team_id
+                GROUP BY fps.fixture_id, fps.team_id, fps.stats_type_id
                 """,
-                tuple(window_fixture_ids) + (79,),
+                tuple(window_fixture_ids) + tuple(_COUNTING_PLAYER_IDS),
             )
-            team_assist_sum_rows = await cur.fetchall()
+            team_player_sum_rows = await cur.fetchall()
 
         # 5. WC team_projections written by the team-stat step.
         # Per-fixture mode narrows to just the requested fixtures.
@@ -555,11 +574,16 @@ async def _load_data(conn, competition_id: int, squad_provider, fixture_ids_filt
         if stats_type_id == FOULS_TEAM_STAT_ID:
             fixture_fouls.setdefault(fixture_id, {})[team_id] = v
 
-    # Override team Assists (stat 79) entries with the player-sum-derived
-    # totals — Sportmonks' team-level Assists field is unreliable (often
-    # 2-3× undercount vs the actual sum of player assists).
-    for fixture_id, team_id, total in team_assist_sum_rows:
-        tstats[(int(team_id), int(fixture_id), 79)] = _f(total)
+    # Reconcile every counting-stat denominator to max(team_row, player_sum).
+    # No-op where the feeds agree; recovers the team total where the team
+    # row is missing/low (Assists, Key Passes worst) without corrupting it
+    # where a thin player import would undercount (team_row wins then).
+    for fixture_id, team_id, player_sid, total in team_player_sum_rows:
+        team_sid = _COUNTING_DENOM_MAP.get(int(player_sid))
+        if team_sid is None:
+            continue
+        key = (int(team_id), int(fixture_id), team_sid)
+        tstats[key] = max(tstats.get(key, 0.0), _f(total))
 
     # opp_fouls[(team_id, fixture_id)] = the OTHER team's fouls in that fixture
     opp_fouls: Dict[Tuple[int, int], float] = {}
