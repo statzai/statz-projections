@@ -133,6 +133,15 @@ class IntlProjectionScope:
     # bookmaker-confirmed fixture". WC doesn't opt in (every WC fixture
     # gets priced; the gate would just add latency).
     require_result_odds: bool = False
+    # When set, skip a fixture where BOTH teams' overall Statz rating
+    # (attack − defense) is below this floor. Friendlies set it to 0.0 so
+    # minnow-vs-minnow exhibitions (two below-average sides) aren't
+    # projected — they clog the pages, draw little interest, and are the
+    # hardest to predict (thin, volatile data). One below-average side vs a
+    # decent one still projects (interest in the bigger team). Teams with no
+    # Statz rating are already dropped by the carry-forward gate. None = off
+    # (WC / quals / tournaments project every fixture regardless of strength).
+    skip_both_below_rating: float = None
 
 
 # Registry of every comp the international projection pipeline knows about.
@@ -160,6 +169,7 @@ INTL_SCOPES = {
         bracket_config=None,     # no bracket → Step 3 skipped
         has_squad_source=False,  # no tournament_squads entry → RecentCapsSquadProvider
         fantasy_rules=None,      # no FIFA fantasy → Step 6 skipped
+        skip_both_below_rating=0.0,  # skip minnow-vs-minnow (both overall < 0)
         # Friendlies are played across UEFA-vs-CONMEBOL tour matches,
         # one-off games at the away team's invite, true neutrals (Dubai
         # showcase fixtures), etc. — per-fixture venue classification is
@@ -582,6 +592,7 @@ class InternationalProjectionService:
             n_skipped_no_odds = 0
             n_skipped_unknown_team = 0
             n_skipped_fifa_carry_forward = 0
+            n_skipped_both_minnow = 0
             n_skipped_no_venue = 0
             n_home_at_home = 0
             n_away_at_home = 0
@@ -624,6 +635,18 @@ class InternationalProjectionService:
                 #   the baselines so the real-home team gets the boost.
                 h_atk, h_def = ratings[home]
                 a_atk, a_def = ratings[away]
+
+                # Gate 3: minnow-vs-minnow. Skip when BOTH teams' overall
+                # Statz rating (atk − def) is below the scope floor. Placed
+                # before the venue classify so these fixtures bucket as
+                # "minnow" rather than "no_venue". Both-sides test → a
+                # below-average team vs a decent one still projects.
+                if scope.skip_both_below_rating is not None:
+                    if ((h_atk - h_def) < scope.skip_both_below_rating
+                            and (a_atk - a_def) < scope.skip_both_below_rating):
+                        n_skipped_both_minnow += 1
+                        continue
+
                 if scope.use_per_fixture_neutral_venue:
                     case = _classify_fixture_venue(
                         home_country_id, away_country_id,
@@ -726,6 +749,7 @@ class InternationalProjectionService:
                     f"no_odds={n_skipped_no_odds} "
                     f"unknown_team={n_skipped_unknown_team} "
                     f"fifa_carry_forward={n_skipped_fifa_carry_forward} "
+                    f"both_minnow={n_skipped_both_minnow} "
                     f"no_venue={n_skipped_no_venue} "
                     f"unknown_venue={n_unknown_venue} | "
                     f"venue breakdown: home_at_home={n_home_at_home} "
@@ -938,4 +962,6 @@ class InternationalProjectionService:
         if scope.require_result_odds:
             result['n_skipped_no_odds'] = n_skipped_no_odds
         result['n_skipped_fifa_carry_forward'] = n_skipped_fifa_carry_forward
+        if scope.skip_both_below_rating is not None:
+            result['n_skipped_both_minnow'] = n_skipped_both_minnow
         return result
