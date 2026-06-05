@@ -1466,9 +1466,11 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
     player_stats = player_stats.merge(fixtures, left_on='fixture_id', right_on='id')
     player_stats = player_stats[['kickoff_datetime', 'fixture_id', 'team_id', 'name', 'value', 'minutes']].sort_values(
         by='kickoff_datetime')
-    ## NEW - This if statement has been moved up
-    if games is not None:
-        player_stats = player_stats.iloc[-games:]
+    # NOTE: window slice (iloc[-games:]) deferred until AFTER the team-stat
+    # merge below — so the window is always `games` fixtures with valid team
+    # denominators, not `games` fixtures some of which the team-merge later
+    # zero-fills. Sparse-coverage stats (FPL synthetics, intl xG) gain a
+    # full-sized sample this way.
     player_stats.reset_index(drop=True, inplace=True)
 
     if stat == 'Expected Goals (xG)':
@@ -1564,6 +1566,22 @@ def get_player_stats(stat_df, team_df, player_id, stat, stats_types, fixtures, c
     else:  # NEW
         player_stats[f'Team {stat}'] = player_stats[f'Team {stat}'].astype(int)  # NEW
     player_stats['Game'] = player_stats['Game'].str.split(' v ').str[0]  # NEW
+
+    # NEW (2026-06-05): Drop fixtures where team has no value for this stat
+    # BEFORE the window slice. Previously this filter ran downstream in
+    # get_player_weighted_average AFTER the window, producing variable
+    # sample sizes (e.g. 12 valid out of last 30 for a player with cup
+    # history on an FPL-only stat). Now we keep walking back the player's
+    # history until we have `games` fixtures with valid team denominators
+    # — fewer if the player simply doesn't have enough history.
+    player_stats = player_stats[player_stats[f'Team {stat}'] > 0].reset_index(drop=True)
+
+    # Window slice deferred from earlier in the function — applied now,
+    # after team-merge + team-zero filter, so the window is stable in size
+    # and consists only of fixtures with a valid share-calc denominator.
+    if games is not None:
+        player_stats = player_stats.iloc[-games:].reset_index(drop=True)
+
     return player_stats.reset_index(drop=True)
 
 
@@ -1599,17 +1617,11 @@ def get_player_weighted_average(df, team_df, player_id, team_id, stat, stats_typ
     # UDATED - pass team_id and comps to get_weighted_player_stats function
     player_stats = get_weighted_player_stats(df, team_df, player_id, team_id, stat, stats_types, fixtures, comps,
                                              weight, mins, games)
-    # Drop rows where Team {stat} is 0. These represent fixtures where the
-    # team-level value isn't in team_stats — typically cup/international
-    # games not loaded in team_df, or FPL-only synthetic stats (Ball
-    # Recovery, CBI(FPL)) that only have team rows for the current PL
-    # season. Without this filter, the player's value still counts toward
-    # the numerator while the denominator excludes those fixtures, which
-    # massively inflates share for players with cup/international history.
-    # Caught 2026-05-06 via Yates / Reed Recoveries projections at
-    # 53% / 37% share (real PL share ~5-15%) → DM FPL points 4-5 PTS
-    # vs realistic 1-2.
-    player_stats = player_stats[player_stats[f'Team {stat}'] > 0].reset_index(drop=True)
+    # NOTE (2026-06-05): The Team {stat} > 0 filter used to live here. It now
+    # runs upstream in get_player_stats *before* the window slice, so the
+    # window is `games` fixtures of valid team denominators instead of
+    # `games` minus the zero-team-stat ones. By the time we reach this
+    # function the data is already filtered — this comment is a tombstone.
     weighted_sum = player_stats[f'Weighted Player {stat}'].sum()
     if weighted_sum == 0:
         return 0
