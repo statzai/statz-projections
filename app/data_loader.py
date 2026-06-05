@@ -505,46 +505,89 @@ class LeagueDataLoader:
             if "value" in df.columns:
                 df["value"] = pd.to_numeric(df["value"], errors="coerce")
 
-        # Override team Assists (stats_type_id=79) with SUM of player_stats
-        # per (fixture, team). Sportmonks' fixture_team_stats Assists field
-        # systematically undercounts vs the actual sum of player assists
-        # (e.g. France 14-0 Gibraltar: team=3, player_sum=10). Same fix as
-        # the intl/WC pipeline (wc_player_stat_service commit fd3dfa5), kept
-        # consistent across all projection services.
+        # Reconcile every counting-stat share denominator to
+        # max(team_row, player_sum). Each is a one-event-one-player count, so
+        # the team total SHOULD equal the sum of player values — but the two
+        # Sportmonks feeds disagree in a meaningful fraction of fixtures
+        # (esp. international: team Assists missing/low ~33% of games, Key
+        # Passes ~24%; sometimes a thin player import makes the player-sum
+        # low instead). Both modes are undercounts, so max() picks the better
+        # estimate: no-op where the feeds agree, player-sum where the team row
+        # is short, team_row where the player import is thin. Mirrors the
+        # intl/WC pipeline (wc_player_stat_service _COUNTING_DENOM_MAP). xG
+        # (modeled), xA/Ball Recovery/CBI-FPL (overlay-injected, already
+        # player-derived) and Fouls Drawn (opponent-based) are excluded.
         if not df.empty:
-            ASSISTS_STAT_ID = 79
-            sql_assists = f"""
-                SELECT fixture_id, team_id, SUM(value) AS total
-                FROM fixture_player_stats
-                WHERE fixture_id IN ({fix_ph})
-                  AND stats_type_id = %s
-                GROUP BY fixture_id, team_id
-            """
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    sql_assists, tuple(self.fixture_ids) + (ASSISTS_STAT_ID,)
-                )
-                assist_rows = await cur.fetchall()
+            name_to_id = dict(zip(self.stats_types["name"], self.stats_types["id"]))
+            # (player_stat_name, team_stat_name) — same name except
+            # Accurate Passes (player) → Successful Passes (team total).
+            COUNTING_NAME_PAIRS = [
+                ("Goals", "Goals"), ("Shots Total", "Shots Total"),
+                ("Shots On Target", "Shots On Target"), ("Fouls", "Fouls"),
+                ("Yellowcards", "Yellowcards"), ("Tackles", "Tackles"),
+                ("Passes", "Passes"), ("Accurate Passes", "Successful Passes"),
+                ("Total Crosses", "Total Crosses"), ("Interceptions", "Interceptions"),
+                ("Offsides", "Offsides"), ("Assists", "Assists"),
+                ("Key Passes", "Key Passes"),
+            ]
+            pid_to_tid: dict = {}
+            for pname, tname in COUNTING_NAME_PAIRS:
+                pid, tid = name_to_id.get(pname), name_to_id.get(tname)
+                if pid is not None and tid is not None:
+                    pid_to_tid[int(pid)] = int(tid)
 
-            if assist_rows:
-                # Drop existing Assists team-rows then concat the player-sum-derived
-                # ones. Downstream `get_player_stats` only reads
-                # (fixture_id, team_id, stats_type_id, value) from team_stats,
-                # so the unset id/created_at/updated_at on the new rows are
-                # harmless. dropna in case any totals come back as None.
-                df = df[df["stats_type_id"] != ASSISTS_STAT_ID].reset_index(drop=True)
-                assist_df = pd.DataFrame(
-                    [
-                        {
-                            "fixture_id": int(r[0]),
-                            "team_id": int(r[1]),
-                            "stats_type_id": ASSISTS_STAT_ID,
-                            "value": float(r[2]) if r[2] is not None else 0.0,
-                        }
-                        for r in assist_rows
-                    ]
-                )
-                df = pd.concat([df, assist_df], ignore_index=True)
+            if pid_to_tid:
+                player_ids = list(pid_to_tid.keys())
+                psum_ph = ",".join(["%s"] * len(player_ids))
+                # stats_imported=1 gate so thin imports don't feed a too-low
+                # player-sum into the reconciliation (matches WC).
+                sql_psum = f"""
+                    SELECT fps.fixture_id, fps.team_id, fps.stats_type_id, SUM(fps.value) AS total
+                    FROM fixture_player_stats fps
+                    JOIN fixtures f ON f.id = fps.fixture_id
+                    WHERE fps.fixture_id IN ({fix_ph})
+                      AND fps.stats_type_id IN ({psum_ph})
+                      AND f.stats_imported = 1
+                    GROUP BY fps.fixture_id, fps.team_id, fps.stats_type_id
+                """
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        sql_psum, tuple(self.fixture_ids) + tuple(player_ids)
+                    )
+                    psum_rows = await cur.fetchall()
+
+                if psum_rows:
+                    # Map player_id → team_id so the player-sum lands on the
+                    # team denominator's stats_type_id (Accurate→Successful).
+                    psum_df = pd.DataFrame(
+                        [
+                            {
+                                "fixture_id": int(r[0]),
+                                "team_id": int(r[1]),
+                                "stats_type_id": pid_to_tid[int(r[2])],
+                                "psum": float(r[3]) if r[3] is not None else 0.0,
+                            }
+                            for r in psum_rows
+                            if int(r[2]) in pid_to_tid
+                        ]
+                    )
+                    # Successful Passes (team) AND Accurate Passes player-sum
+                    # both map to the Successful Passes id — collapse dupes.
+                    psum_df = (
+                        psum_df.groupby(["fixture_id", "team_id", "stats_type_id"], as_index=False)["psum"].sum()
+                    )
+                    counting_tids = set(pid_to_tid.values())
+                    mask = df["stats_type_id"].isin(counting_tids)
+                    counting = df[mask]
+                    rest = df[~mask]
+                    merged = counting.merge(
+                        psum_df, on=["fixture_id", "team_id", "stats_type_id"], how="outer"
+                    )
+                    # max() over the two candidate denominators, NaN-safe
+                    # (missing team row → use psum; missing player data → keep team).
+                    merged["value"] = merged[["value", "psum"]].max(axis=1)
+                    merged.drop(columns=["psum"], inplace=True)
+                    df = pd.concat([rest, merged], ignore_index=True)
 
         self.team_stats = df
 
