@@ -61,7 +61,16 @@ from app.source_database import get_source_connection, release_source_connection
 logger = logging.getLogger("wc_player_stats")
 
 # --- Game window -----------------------------------------------------------
-GAME_WINDOW = 30             # last N appearances per player (intl-first, club-filled)
+GAME_WINDOW = 30             # last N VALID appearances per player (intl-first, club-filled)
+# Raw window is intentionally wider than GAME_WINDOW so the share calc can
+# walk past fixtures with missing team_stats (sparse-coverage stats like
+# xG / Successful Passes on older intl fixtures) and still find 30 valid
+# fixtures with a real team denominator. _weighted_share early-breaks once
+# GAME_WINDOW valid fixtures are accumulated, so dense-coverage stats see
+# identical behaviour to the previous GAME_WINDOW=30 cap. Memory: 1330
+# players × 90 entries ≈ 6MB additional, negligible. Mirrors the domestic
+# 2026-06-05 filter-before-window fix in statz_functions.get_player_stats.
+GAME_WINDOW_RAW = GAME_WINDOW * 3  # walk up to 3x GAME_WINDOW seeking valid fixtures
 # No club lookback limit — matches the domestic projection path which loads
 # all of a player's stats and lets the GAME_WINDOW cap + recency weights
 # decide what's relevant. The previous 18-month cap was a load-bound that
@@ -214,9 +223,12 @@ def _f(val) -> float:
 def _build_window(
     apps: List[Tuple[int, pd.Timestamp, int, int]],
 ) -> List[Tuple[int, pd.Timestamp, bool, int]]:
-    """Pick a player's game window from their appearances — international
+    """Pick a player's RAW game window from their appearances — international
     games first (most recent), then club games fill the remainder, up to
-    GAME_WINDOW.
+    GAME_WINDOW_RAW. _weighted_share then walks the raw window and early-
+    breaks at GAME_WINDOW VALID fixtures (where team_val > 0). Wider raw
+    window means sparse-coverage stats can still find a full 30-fixture
+    sample without changing dense-stat behaviour.
 
     Input appearances are (fixture_id, kickoff, competition_id, team_id).
     Returns (fixture_id, kickoff, is_club, team_id) entries.
@@ -225,9 +237,9 @@ def _build_window(
                   key=lambda a: a[1], reverse=True)
     club = sorted((a for a in apps if a[2] not in _INTL_COMP_SET),
                   key=lambda a: a[1], reverse=True)
-    chosen = intl[:GAME_WINDOW]
-    if len(chosen) < GAME_WINDOW:
-        chosen = chosen + club[:GAME_WINDOW - len(chosen)]
+    chosen = intl[:GAME_WINDOW_RAW]
+    if len(chosen) < GAME_WINDOW_RAW:
+        chosen = chosen + club[:GAME_WINDOW_RAW - len(chosen)]
     return [(fid, ko, comp not in _INTL_COMP_SET, tid)
             for (fid, ko, comp, tid) in chosen]
 
@@ -267,6 +279,11 @@ def _weighted_share(
         num += weight * player_vals.get(fixture_id, 0.0)
         den += weight * team_val
         n += 1
+        # Early-break: once we have GAME_WINDOW valid fixtures the share
+        # is stable. Walking further into the raw window just buries the
+        # recent signal under deeper-time, weight-suppressed noise.
+        if n >= GAME_WINDOW:
+            break
 
     if den <= 0:
         return 0.0, 0
