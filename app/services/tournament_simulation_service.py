@@ -751,9 +751,18 @@ def _aggregate(all_sim_outcomes: List[dict], config: TournamentConfig,
     sum_group_pts = defaultdict(float)
     sum_group_gf = defaultdict(float)
     sum_group_ga = defaultdict(float)
-    sum_total_gf = defaultdict(float)
+    # total_gf kept as a per-sim sample list (not just a sum) so we can
+    # derive the mean AND the min/max/p10/p90 range. total_ga stays a sum —
+    # we only expose a range for goals-for. ~48 teams × num_sims floats ≈ 4MB.
+    total_gf_samples = defaultdict(list)
     sum_total_ga = defaultdict(float)
     team_group_id = {}
+
+    # Whole-tournament total goals per sim (sum of every team's total_gf in
+    # that sim = all goals scored in the tournament, each counted once). The
+    # mean equals Σ per-team expected_goals_for; the spread is computed here
+    # rather than by summing per-team ranges (which would over-state it).
+    tournament_total_samples: List[int] = []
 
     # Per-group running tallies (keyed by group_code).
     grp_win_tournament = defaultdict(float)   # sims whose champion is from this group
@@ -768,7 +777,7 @@ def _aggregate(all_sim_outcomes: List[dict], config: TournamentConfig,
             sum_group_pts[t_id] += o['group_points']
             sum_group_gf[t_id] += o['group_gf']
             sum_group_ga[t_id] += o['group_ga']
-            sum_total_gf[t_id] += o['total_gf']
+            total_gf_samples[t_id].append(o['total_gf'])
             sum_total_ga[t_id] += o['total_ga']
             c = ctr[t_id]
             if o['is_group_winner']: c['win_group'] += 1
@@ -792,6 +801,9 @@ def _aggregate(all_sim_outcomes: List[dict], config: TournamentConfig,
             bot = [t for t, g in gf_by_team.items() if g == min_gf]
             for t in top: ctr[t]['highest_scorer'] += 1.0 / len(top)
             for t in bot: ctr[t]['lowest_scorer'] += 1.0 / len(bot)
+            # Whole-tournament total goals this sim — sum of every team's
+            # total_gf (each goal counted once, by the scoring team).
+            tournament_total_samples.append(sum(gf_by_team.values()))
 
         # ---- best finisher per confederation this sim ----
         # finish_key ranks by knockout stage first, then group form so
@@ -836,6 +848,8 @@ def _aggregate(all_sim_outcomes: List[dict], config: TournamentConfig,
     for t_id in teams:
         c = ctr[t_id]
         gid = team_group_id.get(t_id)
+        gf_arr = np.asarray(total_gf_samples[t_id], dtype=float)
+        gf_mean = float(gf_arr.mean()) if gf_arr.size else 0.0
         agg[t_id] = {
             'group_id': gid,
             'group_code': group_codes.get(gid),
@@ -850,9 +864,15 @@ def _aggregate(all_sim_outcomes: List[dict], config: TournamentConfig,
             'lowest_scoring_team_percent': 100.0 * c['lowest_scorer'] / num_sims,
             'expected_group_goals_for': sum_group_gf[t_id] / num_sims,
             'expected_group_goals_against': sum_group_ga[t_id] / num_sims,
-            'expected_goals_for': sum_total_gf[t_id] / num_sims,
+            'expected_goals_for': gf_mean,
             'expected_goals_against': sum_total_ga[t_id] / num_sims,
-            'expected_goal_difference': (sum_total_gf[t_id] - sum_total_ga[t_id]) / num_sims,
+            'expected_goal_difference': gf_mean - (sum_total_ga[t_id] / num_sims),
+            # Whole-tournament goals-for range across sims. min/max = single
+            # most extreme sim; p10/p90 = stable floor/ceiling band.
+            'goals_for_min': float(gf_arr.min()) if gf_arr.size else 0.0,
+            'goals_for_max': float(gf_arr.max()) if gf_arr.size else 0.0,
+            'goals_for_p10': float(np.percentile(gf_arr, 10)) if gf_arr.size else 0.0,
+            'goals_for_p90': float(np.percentile(gf_arr, 90)) if gf_arr.size else 0.0,
         }
         for round_name in config.knockout_rounds:
             agg[t_id][f"reach_{round_name}_percent"] = 100.0 * c[f"reach_{round_name}"] / num_sims
@@ -868,16 +888,28 @@ def _aggregate(all_sim_outcomes: List[dict], config: TournamentConfig,
             'expected_goals': (sum(samples) / len(samples)) if samples else 0.0,
         }
 
-    return agg, group_agg
+    # ---- whole-tournament total-goals distribution ----
+    tt_arr = np.asarray(tournament_total_samples, dtype=float)
+    tournament_agg = {
+        'total_goals_mean': float(tt_arr.mean()) if tt_arr.size else 0.0,
+        'total_goals_min': float(tt_arr.min()) if tt_arr.size else 0.0,
+        'total_goals_max': float(tt_arr.max()) if tt_arr.size else 0.0,
+        'total_goals_p10': float(np.percentile(tt_arr, 10)) if tt_arr.size else 0.0,
+        'total_goals_p90': float(np.percentile(tt_arr, 90)) if tt_arr.size else 0.0,
+    }
+
+    return agg, group_agg, tournament_agg
 
 
 async def _write_to_db(
     conn, agg: Dict[int, dict], group_agg: Dict[str, dict],
+    tournament_agg: Dict[str, float],
     config: TournamentConfig, num_sims: int,
 ) -> None:
     """Upsert simulator output — one row per team into
     tournament_projections, one row per group into
-    tournament_group_projections. Idempotent per (competition, season)."""
+    tournament_group_projections, one row per (competition, season) into
+    tournament_goal_summary. Idempotent per (competition, season)."""
     now = datetime.now()
 
     team_rows = []
@@ -908,6 +940,10 @@ async def _write_to_db(
             round(p['expected_group_goals_for'], 2),
             round(p['expected_group_goals_against'], 2),
             round(p['expected_goals_for'], 2),
+            round(p['goals_for_min'], 2),
+            round(p['goals_for_max'], 2),
+            round(p['goals_for_p10'], 2),
+            round(p['goals_for_p90'], 2),
             round(p['expected_goals_against'], 2),
             round(p['expected_goal_difference'], 2),
             round(p['finish_bottom_group_percent'], 2),
@@ -943,12 +979,14 @@ async def _write_to_db(
                     reach_r32_percent, reach_r16_percent, reach_qf_percent,
                     reach_sf_percent, reach_final_percent, win_tournament_percent,
                     expected_group_goals_for, expected_group_goals_against,
-                    expected_goals_for, expected_goals_against, expected_goal_difference,
+                    expected_goals_for, goals_for_min, goals_for_max,
+                    goals_for_p10, goals_for_p90,
+                    expected_goals_against, expected_goal_difference,
                     finish_bottom_group_percent, best_in_continent_percent,
                     highest_scoring_team_percent, lowest_scoring_team_percent,
                     num_sims, created_at, updated_at)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 team_rows[i:i+100],
             )
 
@@ -965,6 +1003,29 @@ async def _write_to_db(
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 group_rows,
             )
+
+        # Whole-tournament total-goals distribution — one row per
+        # (competition, season). Delete-then-insert keeps it idempotent.
+        await cur.execute(
+            "DELETE FROM tournament_goal_summary WHERE competition_id = %s AND season_id = %s",
+            (config.competition_id, config.season_id),
+        )
+        await cur.execute(
+            """INSERT INTO tournament_goal_summary
+               (competition_id, season_id, total_goals_mean, total_goals_min,
+                total_goals_max, total_goals_p10, total_goals_p90,
+                num_sims, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (
+                config.competition_id, config.season_id,
+                round(tournament_agg['total_goals_mean'], 2),
+                round(tournament_agg['total_goals_min'], 2),
+                round(tournament_agg['total_goals_max'], 2),
+                round(tournament_agg['total_goals_p10'], 2),
+                round(tournament_agg['total_goals_p90'], 2),
+                num_sims, now, now,
+            ),
+        )
     await conn.commit()
 
 
@@ -995,12 +1056,15 @@ class TournamentSimulator:
                 if (sim_idx + 1) % log_every == 0:
                     logger.info(f"  sim {sim_idx + 1}/{num_sims}")
 
-            agg, group_agg = _aggregate(
+            agg, group_agg, tournament_agg = _aggregate(
                 all_outcomes, config, data['group_codes'], data['confederation_by_team'],
             )
-            await _write_to_db(conn, agg, group_agg, config, num_sims)
+            await _write_to_db(conn, agg, group_agg, tournament_agg, config, num_sims)
             logger.info(
-                f"Tournament sim done — {len(agg)} teams, {len(group_agg)} groups written"
+                f"Tournament sim done — {len(agg)} teams, {len(group_agg)} groups written; "
+                f"total goals mean={tournament_agg['total_goals_mean']:.1f} "
+                f"[{tournament_agg['total_goals_min']:.0f}, {tournament_agg['total_goals_max']:.0f}] "
+                f"p10={tournament_agg['total_goals_p10']:.1f} p90={tournament_agg['total_goals_p90']:.1f}"
             )
 
             return {
