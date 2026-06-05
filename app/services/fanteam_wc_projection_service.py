@@ -186,8 +186,12 @@ async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict
         )
         ft_map_rows = await cur.fetchall()
 
+        # Direct fixture→round lookup via wc_fixtures.round_id (FIFA's
+        # authoritative pre-assignment). Sibling of wc_fantasy_points
+        # service — see its comment for why we don't use wc_rounds
+        # start/end windows.
         await cur.execute(
-            "SELECT id, start_date, end_date FROM wc_rounds ORDER BY id"
+            "SELECT fixture_id, round_id FROM wc_fixtures WHERE fixture_id IS NOT NULL"
         )
         round_rows = await cur.fetchall()
 
@@ -245,31 +249,23 @@ async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict
             'p_away_win': pl,
         }
 
-    rounds = [
-        (rid, sd, ed) for rid, sd, ed in round_rows
-        if sd is not None and ed is not None
-    ]
+    round_by_fixture = {fid: rid for fid, rid in round_rows if fid is not None}
 
     return {
         'players': by_pair,
         'fixtures': fix_meta,
-        'rounds': rounds,
+        'round_by_fixture': round_by_fixture,
     }
 
 
-def _round_for(kickoff, rounds) -> int:
-    if kickoff is None:
-        return None
-    for rid, sd, ed in rounds:
-        if sd <= kickoff <= ed:
-            return rid
-    return None
+def _round_for(fixture_id, round_by_fixture) -> int:
+    return round_by_fixture.get(fixture_id)
 
 
 def _build_rows(data: dict) -> list:
     players = data['players']
     fixtures = data['fixtures']
-    rounds = data['rounds']
+    round_by_fixture = data['round_by_fixture']
 
     out = []
     for (fid, pid), entry in players.items():
@@ -298,7 +294,7 @@ def _build_rows(data: dict) -> list:
 
         pts = _fanteam_points(entry['stats'], position, opp_goals,
                               own_goals, p_win, p_loss)
-        wc_round_id = _round_for(entry['kickoff_datetime'], rounds)
+        wc_round_id = _round_for(fid, round_by_fixture)
 
         out.append((
             fid,

@@ -186,11 +186,15 @@ async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict
         )
         fp_rows = await cur.fetchall()
 
-        # Round windows — fixtures fall into a unique round by kickoff.
-        # Knockout rounds with no fixtures yet won't match anything but
-        # the column is nullable so that's fine.
+        # Fixture → round mapping from `wc_fixtures.round_id` (FIFA's
+        # authoritative pre-assignment). Used to be wc_rounds windows by
+        # kickoff_datetime, but FIFA's wc_rounds.start_date is the lineup-
+        # lock deadline (typically 1h post-first-fixture-kickoff) which
+        # left opening fixtures of each round outside their own window →
+        # NULL wc_round_id. Direct lookup avoids the window mismatch and
+        # leaves wc_rounds.start_date semantics intact for the planner.
         await cur.execute(
-            "SELECT id, start_date, end_date FROM wc_rounds ORDER BY id"
+            "SELECT fixture_id, round_id FROM wc_fixtures WHERE fixture_id IS NOT NULL"
         )
         round_rows = await cur.fetchall()
 
@@ -231,36 +235,31 @@ async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict
             'away_goals': away_goals,
         }
 
-    rounds = [
-        (rid, sd, ed) for rid, sd, ed in round_rows
-        if sd is not None and ed is not None
-    ]
+    # {statz_fixture_id: wc_round_id} — direct lookup. Empty rows mean
+    # wc_fixtures hasn't been ingested yet; downstream uses .get() so a
+    # missing entry just leaves wc_round_id as None.
+    round_by_fixture = {fid: rid for fid, rid in round_rows if fid is not None}
 
     return {
         'players': by_pair,
         'fixtures': fix_meta,
-        'rounds': rounds,
+        'round_by_fixture': round_by_fixture,
     }
 
 
-def _round_for(kickoff, rounds) -> int:
-    """Map a kickoff datetime to a wc_rounds.id by falling inside [start, end].
-    Returns None when no round matches (e.g. a knockout fixture before draw —
-    shouldn't appear here, but defensive).
+def _round_for(fixture_id, round_by_fixture) -> int:
+    """Look up wc_round_id for a Statz fixture id via the wc_fixtures.round_id
+    mapping. Returns None when not found (knockout fixture before bracket
+    draw, or wc_fixtures not yet ingested).
     """
-    if kickoff is None:
-        return None
-    for rid, sd, ed in rounds:
-        if sd <= kickoff <= ed:
-            return rid
-    return None
+    return round_by_fixture.get(fixture_id)
 
 
 def _build_rows(data: dict) -> list:
     """Pure function: stats bag + opponent goals + round window → INSERT rows."""
     players = data['players']
     fixtures = data['fixtures']
-    rounds = data['rounds']
+    round_by_fixture = data['round_by_fixture']
 
     out = []
     for (fid, pid), entry in players.items():
@@ -282,7 +281,7 @@ def _build_rows(data: dict) -> list:
             opp_goals = max(meta['home_goals'], meta['away_goals'])
 
         pts = _fantasy_points(entry['stats'], position, opp_goals)
-        wc_round_id = _round_for(entry['kickoff_datetime'], rounds)
+        wc_round_id = _round_for(fid, round_by_fixture)
 
         out.append((
             fid,
@@ -330,10 +329,10 @@ class WcFantasyPointsService:
             )
             n_players = len(data['players'])
             n_fixtures = len(data['fixtures'])
-            n_rounds = len(data['rounds'])
+            n_round_mappings = len(data['round_by_fixture'])
             logger.info(
                 f"Loaded {n_players} player-fixture stat bags, {n_fixtures} "
-                f"fixture-projection rows, {n_rounds} round windows"
+                f"fixture-projection rows, {n_round_mappings} fixture→round mappings"
             )
 
             if n_players == 0 or n_fixtures == 0:
