@@ -142,6 +142,13 @@ class IntlProjectionScope:
     # Statz rating are already dropped by the carry-forward gate. None = off
     # (WC / quals / tournaments project every fixture regardless of strength).
     skip_both_below_rating: float = None
+    # Blend weight toward bookmaker lines in the goals + team-stat odds
+    # blends: final = (1 − β)·model + β·market. WC keeps 0.5 (trust model
+    # and market equally). Friendlies bump to 0.7 — the model is noisier on
+    # thin-data nations, so hug the book more and stop surfacing model error
+    # as inflated "edges" (cards/corners/etc.). Applies to BOTH the 1X2/goals
+    # blend and every team-stat blend for the scope.
+    odds_beta: float = 0.5
 
 
 # Registry of every comp the international projection pipeline knows about.
@@ -170,6 +177,7 @@ INTL_SCOPES = {
         has_squad_source=False,  # no tournament_squads entry → RecentCapsSquadProvider
         fantasy_rules=None,      # no FIFA fantasy → Step 6 skipped
         skip_both_below_rating=0.0,  # skip minnow-vs-minnow (both overall < 0)
+        odds_beta=0.7,           # hug the book harder — model noisier on friendlies
         # Friendlies are played across UEFA-vs-CONMEBOL tour matches,
         # one-off games at the away team's invite, true neutrals (Dubai
         # showcase fixtures), etc. — per-fixture venue classification is
@@ -404,7 +412,7 @@ class InternationalProjectionService:
 
         logger.info(
             f"International projection start — comp={scope.competition_name} "
-            f"(id={scope.competition_id}), commit={commit}, odds_beta={ODDS_BETA}, "
+            f"(id={scope.competition_id}), commit={commit}, odds_beta={scope.odds_beta}, "
             f"boost={BOOST}, fixture_ids={fixture_ids_filter}"
         )
 
@@ -712,7 +720,7 @@ class InternationalProjectionService:
                         float(home_goals), float(away_goals),
                         bookie_1x2_pct,
                         goals_odds_map.get(fid, {}),
-                        ODDS_BETA,
+                        scope.odds_beta,
                         BOOST,
                     )
                 )

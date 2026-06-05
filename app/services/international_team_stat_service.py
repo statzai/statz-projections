@@ -760,14 +760,16 @@ class InternationalTeamStatService:
                 # ── Team-stat odds-blend ──
                 # Reels each team's projected stats (corners/cards/shots/
                 # SoT/fouls/tackles) toward bookmaker expected via the
-                # cascade. Same WC blend weight as 1X2 goals (ODDS_BETA=0.5).
+                # cascade. Blend weight is per-scope (scope.odds_beta) — same
+                # β the 1X2/goals blend uses: WC 0.5, friendlies 0.7 (model
+                # noisier on thin-data nations → hug the book harder).
                 # All WC fixtures are bracket-home/away; bookies still
                 # price by that role even at neutral venues.
                 from app.services.odds_blend import (
                     load_team_stat_odds, blend_team_stat,
                     TEAM_STAT_BOOKIE_PRIORITY, STAT_COLUMN_TO_MARKET,
                 )
-                from app.services.international_projection_service import ODDS_BETA as _WC_ODDS_BETA
+                _WC_ODDS_BETA = self.scope.odds_beta
                 _fix_ids = df['fixture_id'].astype(int).unique().tolist()
                 _odds_per_market = {}
                 for _market, _books in TEAM_STAT_BOOKIE_PRIORITY.items():
