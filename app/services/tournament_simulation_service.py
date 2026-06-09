@@ -316,9 +316,15 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
                 'away_slot': away_slot,
             })
 
-            # Derive match_base from the first "Winner Match N" reference in R16:
-            # the smallest N across all R16 home/away slots is the first R32 match.
-            if round_name == 'r16' and match_base is None:
+            # Derive match_base = the smallest "Winner Match N" reference
+            # across ALL R16 fixtures (the first R32 match number). Must scan
+            # every R16 fixture, not just the first — the fixture that
+            # references the lowest R32 number (e.g. W73) is not necessarily
+            # first in the result set (now ordered by match_number, R16 M89
+            # comes first and references W74/W77, so stopping at the first
+            # fixture wrongly yields 74). Off-by-one match_base shifts every
+            # "Winner Match N" lookup and collapses the deep rounds.
+            if round_name == 'r16':
                 for slot in (home_slot, away_slot):
                     if slot and slot[0] == 'match_ref':
                         n = slot[2]
