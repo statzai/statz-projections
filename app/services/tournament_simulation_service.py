@@ -286,6 +286,13 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
             continue
 
         async with conn.cursor() as cur:
+            # Order by FIFA-canonical match_number, NOT kickoff time. The R32
+            # array is indexed 0..15 and "Winner Match N" resolves to
+            # r32[N - match_base], so the i-th fixture here must be FIFA match
+            # (base + i). Kickoff order is a permutation of FIFA's KO numbering,
+            # so ordering by kickoff cross-wires the bracket (e.g. two group
+            # winners meeting in the R16). match_number is canonical from the
+            # statz backfill (FifaKnockoutNumbering); NULLs sort last as a guard.
             await cur.execute(
                 """
                 SELECT f.id, th.name AS home_name, ta.name AS away_name, f.kickoff_datetime
@@ -293,7 +300,7 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
                 JOIN teams th ON th.id = f.home_team_id
                 JOIN teams ta ON ta.id = f.away_team_id
                 WHERE f.stage_id = %s
-                ORDER BY f.kickoff_datetime, f.id
+                ORDER BY f.match_number IS NULL, f.match_number, f.id
                 """,
                 (sid,),
             )
