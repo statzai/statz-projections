@@ -731,6 +731,15 @@ def derive_player_lambdas(
     return None
 
 
+# Master switch for the player-odds blend (WC + domestic both route through
+# blend_player_stat). DISABLED 2026-06-10 — reverted to pure model: blending
+# toward un-de-margined over-only player props inflated projections ~40%
+# (Germany R1 goals ×1.43, market aggregate ≈1.86× model). Ingestion + config
+# stay wired, so re-enabling is just flipping this to True — but DON'T until
+# the over-only ladders are de-margined (see backlog "Player-odds blend").
+PLAYER_ODDS_BLEND_ENABLED = False
+
+
 def blend_player_stat(
     model_lambda: float,
     ladders_by_book: dict,
@@ -748,6 +757,10 @@ def blend_player_stat(
 
     blend_weight: service-level α (0.3 domestic/WC, 0.5 euro).
     """
+    # Reverted to pure model — see PLAYER_ODDS_BLEND_ENABLED above.
+    if not PLAYER_ODDS_BLEND_ENABLED:
+        return model_lambda
+
     if not ladders_by_book:
         return model_lambda
 
