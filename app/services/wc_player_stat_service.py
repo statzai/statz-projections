@@ -774,19 +774,20 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
             # Saves — keepers get the team total; outfielders 0.
             row['Saves'] = round(team_saves, 2) if position_group == 'GK' else 0.0
 
-            # Player-prop blend (v1: Goals / Shots Total / Shots On Target).
+            # Player-prop blend (Goals / Shots Total / Shots On Target /
+            # Assists / Fouls / Tackles / Fouls Drawn / Yellow Cards / Passes).
             # Mutates row[stat] in place; missing-ladder rows fall through
-            # untouched. Skipped entirely for GKs on Shots Total / Shots
-            # On Target — model produces ~0 (no GK shot history) and any
-            # non-bet365 book that prices keepers indiscriminately would
+            # untouched. Skipped for GKs on Shots Total / Shots On Target /
+            # Tackles — model produces ~0 (keepers don't shoot or tackle) and
+            # any non-bet365 book that prices keepers indiscriminately would
             # blend a non-trivial bookie λ over a zero model λ, producing
-            # absurd GK shot projections. Goals stays blendable for GKs
-            # (rare set-piece scorer markets are legitimate).
+            # absurd GK projections. Goals/Fouls/Passes/Cards stay blendable
+            # for GKs (legitimate non-zero model + markets).
             if player_odds:
                 for _stat_name, _stat_type_id in PLAYER_BLEND_STAT_NAMES.items():
                     if _stat_name not in row:
                         continue
-                    if position_group == 'GK' and _stat_name in ('Shots Total', 'Shots On Target'):
+                    if position_group == 'GK' and _stat_name in ('Shots Total', 'Shots On Target', 'Tackles'):
                         continue
                     _ladders = (player_odds
                                 .get(int(tp['fixture_id']), {})

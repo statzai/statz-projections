@@ -72,6 +72,11 @@ PLAYER_STAT_BOOKIE_PRIORITY = {
     42: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Shots Total
     86: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Shots On Target
     79: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Assists (bet365 = "Or Their Substitute" variant; falls through where empty)
+    56: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Fouls (committed)
+    78: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Tackles
+    96: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Fouls Drawn (To Be Fouled)
+    84: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Yellow Cards (booked)
+    80: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Passes
 }
 
 # Derived constants — callers import these directly rather than
@@ -90,6 +95,11 @@ PLAYER_BLEND_STAT_NAMES = {
     'Shots Total':     42,
     'Shots On Target': 86,
     'Assists':         79,
+    'Fouls':           56,
+    'Tackles':         78,
+    'Fouls Drawn':     96,
+    'Yellow Cards':    84,
+    'Passes':          80,
 }
 
 
