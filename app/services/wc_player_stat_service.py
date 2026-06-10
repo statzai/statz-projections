@@ -898,12 +898,14 @@ class WcPlayerStatService:
                 )
                 return {'n_player_rows': 0, 'n_squads': len(squads), 'committed': False}
 
-            # Pre-load player-prop odds (Goals/Shots Total/SoT v1) and
-            # stash on data dict so _build_player_rows stays pure. Same
-            # cascade + α=0.3 as domestic. WC has no pre-tournament
-            # confirmed lineups, so no load_confirmed_lineups call here.
-            # Run AFTER the empty-squad / empty-team_projections early
-            # returns so we don't fire 5 per-book SELECTs on a degenerate run.
+            # Pre-load player-prop odds (Goals / Shots Total / SoT / Assists)
+            # and stash on data dict so _build_player_rows stays pure. Same
+            # cascade as domestic; blend weight flows from the competition's
+            # odds_beta (0.5 for WC, 0.7 friendlies) — matching the team-goal
+            # blend rather than a fixed 0.3. WC has no pre-tournament confirmed
+            # lineups, so no load_confirmed_lineups call here. Run AFTER the
+            # empty-squad / empty-team_projections early returns so we don't
+            # fire per-book SELECTs on a degenerate run.
             from app.services.odds_blend import (
                 load_player_odds, PLAYER_BLEND_BOOKS, PLAYER_BLEND_STAT_IDS,
             )
@@ -911,7 +913,7 @@ class WcPlayerStatService:
             data['player_odds'] = await load_player_odds(
                 conn, _wc_fix_ids, PLAYER_BLEND_STAT_IDS, PLAYER_BLEND_BOOKS,
             )
-            data['odds_blend_weight'] = 0.3
+            data['odds_blend_weight'] = float(self.scope.odds_beta)
 
             # Squad players with no usable history at all — skipped from
             # projection. INFO not WARNING: expected for obscure / deep-squad
