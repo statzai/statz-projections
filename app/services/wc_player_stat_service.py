@@ -787,7 +787,7 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
                 for _stat_name, _stat_type_id in PLAYER_BLEND_STAT_NAMES.items():
                     if _stat_name not in row:
                         continue
-                    if position_group == 'GK' and _stat_name in ('Shots Total', 'Shots On Target', 'Tackles'):
+                    if position_group == 'GK' and _stat_name in ('Shots Total', 'Shots On Target'):
                         continue
                     _ladders = (player_odds
                                 .get(int(tp['fixture_id']), {})
@@ -914,7 +914,10 @@ class WcPlayerStatService:
             data['player_odds'] = await load_player_odds(
                 conn, _wc_fix_ids, PLAYER_BLEND_STAT_IDS, PLAYER_BLEND_BOOKS,
             )
-            data['odds_blend_weight'] = float(self.scope.odds_beta)
+            # Ignored downstream — blend_player_stat uses the fixed
+            # PLAYER_ODDS_BLEND_WEIGHT (0.3, all comps). Kept for the data
+            # contract; set to 0.3 so it isn't misleading.
+            data['odds_blend_weight'] = 0.3
 
             # Squad players with no usable history at all — skipped from
             # projection. INFO not WARNING: expected for obscure / deep-squad

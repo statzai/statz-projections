@@ -67,16 +67,14 @@ STAT_COLUMN_TO_MARKET = {
 # observed coverage. Keys are stats_types.id (52=Goals, 42=Shots Total,
 # 86=Shots On Target). v1 is these three; extend in v1.5 with Tackles
 # (78), Fouls (56), Fouls Drawn (96), Yellow Cards (84), Assists (79).
+# Goals/Shots/SoT only — the original v1 set. Assists + Fouls/Tackles/Fouls
+# Drawn/Yellow/Passes were trialled 2026-06-10 but reverted: blending toward
+# un-de-margined over-only odds inflated the aggregate ~40%, worst on the
+# short-priced markets. Re-add (with de-margin) per the backlog.
 PLAYER_STAT_BOOKIE_PRIORITY = {
     52: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Goals
     42: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Shots Total
     86: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Shots On Target
-    79: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Assists (bet365 = "Or Their Substitute" variant; falls through where empty)
-    56: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Fouls (committed)
-    78: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Tackles
-    96: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Fouls Drawn (To Be Fouled)
-    84: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Yellow Cards (booked)
-    80: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Passes
 }
 
 # Derived constants — callers import these directly rather than
@@ -94,12 +92,6 @@ PLAYER_BLEND_STAT_NAMES = {
     'Goals':           52,
     'Shots Total':     42,
     'Shots On Target': 86,
-    'Assists':         79,
-    'Fouls':           56,
-    'Tackles':         78,
-    'Fouls Drawn':     96,
-    'Yellow Cards':    84,
-    'Passes':          80,
 }
 
 
@@ -732,12 +724,19 @@ def derive_player_lambdas(
 
 
 # Master switch for the player-odds blend (WC + domestic both route through
-# blend_player_stat). DISABLED 2026-06-10 — reverted to pure model: blending
-# toward un-de-margined over-only player props inflated projections ~40%
-# (Germany R1 goals ×1.43, market aggregate ≈1.86× model). Ingestion + config
-# stay wired, so re-enabling is just flipping this to True — but DON'T until
-# the over-only ladders are de-margined (see backlog "Player-odds blend").
-PLAYER_ODDS_BLEND_ENABLED = False
+# blend_player_stat). Re-enabled 2026-06-10 for the ORIGINAL v1 stats only
+# (Goals/Shots/SoT — see PLAYER_BLEND_STAT_NAMES). The 2026-06-10 extension to
+# assists/fouls/tackles/etc was reverted because blending toward un-de-margined
+# over-only props inflated the aggregate ~40% (Germany R1 goals ×1.43).
+# Re-add those stats only after de-margining the over-only ladders (backlog).
+PLAYER_ODDS_BLEND_ENABLED = True
+
+# Fixed player-odds blend weight — 0.3 for ALL competitions (deliberately NOT
+# the per-comp odds_beta). The over-only ladders carry uncorrected vig, so we
+# keep the market's pull modest and uniform until the de-margin lands; then
+# revisit whether to scale by odds_beta. blend_player_stat uses THIS, ignoring
+# whatever weight the caller passes. See backlog "Player-odds blend".
+PLAYER_ODDS_BLEND_WEIGHT = 0.3
 
 
 def blend_player_stat(
@@ -755,9 +754,10 @@ def blend_player_stat(
     stats_type_id: drives the per-stat bookmaker priority lookup
         via PLAYER_STAT_BOOKIE_PRIORITY.
 
-    blend_weight: service-level α (0.3 domestic/WC, 0.5 euro).
+    blend_weight: IGNORED — the blend uses the fixed module-level
+        PLAYER_ODDS_BLEND_WEIGHT (0.3 for all comps) regardless of what the
+        caller passes, until the over-only de-margin lands.
     """
-    # Reverted to pure model — see PLAYER_ODDS_BLEND_ENABLED above.
     if not PLAYER_ODDS_BLEND_ENABLED:
         return model_lambda
 
@@ -772,7 +772,8 @@ def blend_player_stat(
     if lam_bookie is None:
         return model_lambda
 
-    return (1.0 - blend_weight) * model_lambda + blend_weight * lam_bookie
+    w = PLAYER_ODDS_BLEND_WEIGHT
+    return (1.0 - w) * model_lambda + w * lam_bookie
 
 
 def compute_final_goals_and_probs(
