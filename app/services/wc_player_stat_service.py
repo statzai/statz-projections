@@ -787,7 +787,7 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
                 for _stat_name, _stat_type_id in PLAYER_BLEND_STAT_NAMES.items():
                     if _stat_name not in row:
                         continue
-                    if position_group == 'GK' and _stat_name in ('Shots Total', 'Shots On Target'):
+                    if position_group == 'GK' and _stat_name in ('Shots Total', 'Shots On Target', 'Tackles'):
                         continue
                     _ladders = (player_odds
                                 .get(int(tp['fixture_id']), {})

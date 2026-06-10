@@ -67,14 +67,19 @@ STAT_COLUMN_TO_MARKET = {
 # observed coverage. Keys are stats_types.id (52=Goals, 42=Shots Total,
 # 86=Shots On Target). v1 is these three; extend in v1.5 with Tackles
 # (78), Fouls (56), Fouls Drawn (96), Yellow Cards (84), Assists (79).
-# Goals/Shots/SoT only — the original v1 set. Assists + Fouls/Tackles/Fouls
-# Drawn/Yellow/Passes were trialled 2026-06-10 but reverted: blending toward
-# un-de-margined over-only odds inflated the aggregate ~40%, worst on the
-# short-priced markets. Re-add (with de-margin) per the backlog.
+# Blended player-prop markets, all at the flat PLAYER_ODDS_BLEND_WEIGHT (0.3).
+# Passes deliberately excluded (thin market). NOTE: these are still over-only
+# with no de-margin, so the λ's run hot (worst on short-priced fouls/tackles)
+# — accepted at the low 0.3 weight; tighten via the de-margin (backlog).
 PLAYER_STAT_BOOKIE_PRIORITY = {
     52: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Goals
     42: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Shots Total
     86: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Shots On Target
+    79: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Assists (bet365 = "Or Their Substitute" variant)
+    56: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Fouls (committed)
+    96: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Fouls Drawn (To Be Fouled)
+    78: ['bet365', 'midnite', 'coral', 'ladbrokes', 'boylesports'],  # Tackles
+    84: ['bet365', 'coral', 'ladbrokes', 'midnite', 'boylesports'],  # Yellow Cards (booked)
 }
 
 # Derived constants — callers import these directly rather than
@@ -92,6 +97,11 @@ PLAYER_BLEND_STAT_NAMES = {
     'Goals':           52,
     'Shots Total':     42,
     'Shots On Target': 86,
+    'Assists':         79,
+    'Fouls':           56,
+    'Fouls Drawn':     96,
+    'Tackles':         78,
+    'Yellow Cards':    84,
 }
 
 
