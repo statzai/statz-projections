@@ -777,10 +777,10 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
             # Player-prop blend (Goals / Shots Total / Shots On Target /
             # Assists / Fouls / Tackles / Fouls Drawn / Yellow Cards / Passes).
             # Mutates row[stat] in place; missing-ladder rows fall through
-            # untouched. Skipped for GKs on Shots / SoT / Tackles / GOALS —
+            # untouched. Skipped for GKs on Shots / SoT / Tackles / Goals / Assists —
             # the keeper model is ~0 there, so a bookie λ blended over it
-            # produces absurd values. Goals is skipped because a keeper with
-            # anytime-scorer odds is a name-collision mismap (e.g. outfield
+            # produces absurd values. Goals + Assists are skipped because a
+            # keeper with anytime scorer/assist odds is a name-collision mismap (outfield
             # "Mladen Jurkas" / midfielder "Éderson" priced as scorers and
             # resolved onto same-named GKs) — never legitimate signal. Fouls/
             # Passes/Cards stay blendable for GKs (real GK markets).
@@ -788,7 +788,7 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
                 for _stat_name, _stat_type_id in PLAYER_BLEND_STAT_NAMES.items():
                     if _stat_name not in row:
                         continue
-                    if position_group == 'GK' and _stat_name in ('Shots Total', 'Shots On Target', 'Tackles', 'Goals'):
+                    if position_group == 'GK' and _stat_name in ('Shots Total', 'Shots On Target', 'Tackles', 'Goals', 'Assists'):
                         continue
                     _ladders = (player_odds
                                 .get(int(tp['fixture_id']), {})
