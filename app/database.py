@@ -18,6 +18,11 @@ async def init_db_pool():
             maxsize=Config.MAX_POOL_SIZE,
             autocommit=False,
             connect_timeout=10,
+            # Pin to UTC — see source_database.py for the rationale. Keeps the
+            # write pool's NOW()/CURRENT_TIMESTAMP (and any DEFAULT timestamp
+            # columns on projection tables) aligned with the UTC-stored
+            # kickoffs, so reads and writes share one clock.
+            init_command="SET time_zone = '+00:00'",
         )
     print(f"Pool is initialized: {pool}")
 

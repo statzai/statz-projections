@@ -22,6 +22,15 @@ async def source_init_db_pool():
             autocommit=False,
             connect_timeout=10,
             pool_recycle=300,  # recycle connections older than 5 minutes
+            # Pin every pooled connection to UTC. fixtures.kickoff_datetime
+            # (and all stored datetimes) are UTC, but the DB host runs on
+            # SYSTEM time = Europe/London, so a bare NOW() drifts +1h during
+            # BST. That made `kickoff_datetime > NOW()` drop fixtures from the
+            # "upcoming" projection window a full hour before kickoff (and the
+            # mirror `< NOW()` lookback include them an hour early). Forcing the
+            # session TZ to UTC makes NOW()/CURRENT_TIMESTAMP agree with the
+            # stored UTC values year-round (GMT *and* BST).
+            init_command="SET time_zone = '+00:00'",
         )
 
 async def get_source_connection():
