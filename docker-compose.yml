@@ -17,4 +17,9 @@ services:
       - ./app/model-builds:/app/app/model-builds
     env_file:
       - .env
+    environment:
+      # Pin the container clock to UTC so Python datetime.now()/pd.Timestamp.now()
+      # match the UTC-pinned DB session (see app/source_database.py). The host
+      # runs Europe/London, which otherwise drifts these +1h during BST.
+      - TZ=UTC
     restart: unless-stopped
