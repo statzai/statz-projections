@@ -350,8 +350,21 @@ class WcFantasyPointsService:
             logger.info(f"WC fantasy points ready: {len(rows)} rows")
 
             if commit and rows:
-                # Idempotent: clear existing rows, then bulk insert.
-                # Per-fixture mode scopes the DELETE to those fixtures.
+                # The INSERT upserts on (fixture_id, player_id), so future
+                # fixtures are refreshed in place — no blanket delete needed
+                # to keep them current. We delete ONLY to clear projections we
+                # no longer want.
+                #
+                # Rule: a round's projections are kept until the round is
+                # FINISHED (all its matches played). The planner shows the
+                # in-play round read-only, including projections for fixtures
+                # that have already kicked off — so we must NOT prune a fixture
+                # just because it's started. Once kickoff passes, the SELECT
+                # (kickoff > NOW) stops refreshing that fixture, so its last
+                # pre-match projection is simply retained. We only delete rows
+                # for rounds whose status is 'complete'.
+                #
+                # Per-fixture mode still scopes the DELETE to those fixtures.
                 async with conn.cursor() as cur:
                     if fixture_ids:
                         del_ph = ",".join(["%s"] * len(fixture_ids))
@@ -362,9 +375,9 @@ class WcFantasyPointsService:
                     else:
                         await cur.execute(
                             """DELETE wfp FROM wc_fantasy_projections wfp
-                               JOIN fixtures f ON f.id = wfp.fixture_id
-                               WHERE f.competition_id = %s""",
-                            (self.scope.competition_id,),
+                               JOIN wc_fixtures wf ON wf.fixture_id = wfp.fixture_id
+                               JOIN wc_rounds wr ON wr.id = wf.round_id
+                               WHERE wr.status = 'complete'""",
                         )
                 await conn.commit()
 
