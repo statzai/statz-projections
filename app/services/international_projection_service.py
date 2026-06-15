@@ -410,10 +410,23 @@ class InternationalProjectionService:
         if league_request is not None and getattr(league_request, 'fixture_ids', None):
             fixture_ids_filter = [int(x) for x in league_request.fixture_ids]
 
+        # Lean tournament-only re-sim: run the bracket-wide steps (1 ratings,
+        # 2 1X2, 3 sim, 7 top-scorer) but SKIP the expensive per-fixture steps
+        # (4 team-stat, 5 player-stat, 6/6b fantasy). Only meaningful for a
+        # bracket-wide run — a fixture_ids filter would itself skip 1/3/7, so
+        # lean is ignored when one is present.
+        lean = bool(getattr(league_request, 'lean', False)) if league_request is not None else False
+        if lean and fixture_ids_filter:
+            logger.warning(
+                f"{scope.competition_name}: lean=True ignored — a fixture_ids filter "
+                f"was supplied, which already skips the bracket-wide steps."
+            )
+            lean = False
+
         logger.info(
             f"International projection start — comp={scope.competition_name} "
             f"(id={scope.competition_id}), commit={commit}, odds_beta={scope.odds_beta}, "
-            f"boost={BOOST}, fixture_ids={fixture_ids_filter}"
+            f"boost={BOOST}, fixture_ids={fixture_ids_filter}, lean={lean}"
         )
 
         # Step 1: refresh Statz ratings inline (skipped in per-fixture mode).
@@ -832,9 +845,10 @@ class InternationalProjectionService:
                 f"Step 3: skipped (no bracket config for {scope.competition_name})"
             )
 
-        # Step 4: Per-team stat projections.
+        # Step 4: Per-team stat projections. (Skipped in lean — the post-match
+        # re-sim reuses the last full pass's per-fixture lines.)
         team_stat_result = None
-        if commit:
+        if commit and not lean:
             try:
                 team_stat_result = await InternationalTeamStatService(scope=scope).project(
                     commit=commit, fixture_ids=fixture_ids_filter,
@@ -854,7 +868,7 @@ class InternationalProjectionService:
         #     fixture_player_stats minutes played in the last 24 months
         #     for each nation in the upcoming fixture batch.
         player_stat_result = None
-        if commit:
+        if commit and not lean:
             try:
                 from app.services.intl_squad_provider import (
                     WcSquadProvider, RecentCapsSquadProvider,
@@ -888,7 +902,7 @@ class InternationalProjectionService:
         # comps (Euros / Copa / AFCON) will need their own scoring-rule
         # configs before opting in via scope.fantasy_rules.
         fantasy_points_result = None
-        if commit and scope.fantasy_rules == 'fifa_wc_2026':
+        if commit and not lean and scope.fantasy_rules == 'fifa_wc_2026':
             try:
                 fantasy_points_result = await WcFantasyPointsService(scope=scope).project(
                     commit=commit, fixture_ids=fixture_ids_filter,
@@ -903,7 +917,7 @@ class InternationalProjectionService:
         # bags. Reads position from `fanteam_wc_player_mappings` so the
         # scoring matches FanTeam's own classification of each player.
         fanteam_points_result = None
-        if commit and scope.fanteam_rules == 'fanteam_wc_2026':
+        if commit and not lean and scope.fanteam_rules == 'fanteam_wc_2026':
             try:
                 from app.services.fanteam_wc_projection_service import FanTeamWcProjectionService
                 fanteam_points_result = await FanTeamWcProjectionService(scope=scope).project(
