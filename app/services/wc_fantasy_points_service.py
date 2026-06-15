@@ -19,7 +19,8 @@ Scoring rules (FIFA 2026 — different from FPL):
   - Yellow card:   -1 (all)
   - Saves:         GK only — every 3 = +1
   - Tackles:       MID only — every 3 = +1
-  - Key passes:    MID only — every 2 = +1
+  - Big chances created: MID only — every 2 = +1 (FIFA sheet says "chances
+                   created" but scores big chances created)
   - Shots on tgt:  FWD only — every 2 = +1
 
 Out of scope for v1 (would need data we don't have or compute):
@@ -58,12 +59,15 @@ STAT_ASSISTS = 79
 STAT_YELLOW_CARDS = 84
 STAT_SAVES = 57
 STAT_TACKLES = 78
-STAT_KEY_PASSES = 117
+# FIFA's scoring sheet says "chances created" but the rule actually scores
+# BIG chances created (stat 580), not key passes (117). Projected via the
+# same share machinery (see wc_player_stat_service BIG_CHANCES_PER_SHOT).
+STAT_BIG_CHANCES_CREATED = 580
 STAT_SHOTS_ON_TARGET = 86
 
 # Per-position scoring tables. Each value applies as `expected_value × pts`
 # for continuous stats (goals, assists, yellows). Threshold stats (saves,
-# tackles, key passes, shots-on-target) use the Poisson discretisation in
+# tackles, big chances created, shots-on-target) use the Poisson discretisation in
 # `_threshold_points`.
 GOAL_PTS = {'GK': 9, 'DEF': 7, 'MID': 6, 'FWD': 5}
 CLEAN_SHEET_PTS = {'GK': 5, 'DEF': 5, 'MID': 1, 'FWD': 0}
@@ -72,7 +76,7 @@ YELLOW_CARD_PTS = -1
 APPEARANCE_PTS = 2   # +1 starts, +1 60+ min — assume starter both ways
 SAVES_PER_POINT = 3
 TACKLES_PER_POINT = 3
-KEY_PASSES_PER_POINT = 2
+BIG_CHANCES_PER_POINT = 2   # every 2 big chances created = +1 (MID)
 SHOTS_PER_POINT = 2
 
 
@@ -125,7 +129,7 @@ def _fantasy_points(stats: Dict[int, float], position: str, opp_goals: float) ->
         pts += _threshold_points(stats.get(STAT_SAVES, 0.0), SAVES_PER_POINT)
     if position == 'MID':
         pts += _threshold_points(stats.get(STAT_TACKLES, 0.0), TACKLES_PER_POINT)
-        pts += _threshold_points(stats.get(STAT_KEY_PASSES, 0.0), KEY_PASSES_PER_POINT)
+        pts += _threshold_points(stats.get(STAT_BIG_CHANCES_CREATED, 0.0), BIG_CHANCES_PER_POINT)
     if position == 'FWD':
         pts += _threshold_points(stats.get(STAT_SHOTS_ON_TARGET, 0.0), SHOTS_PER_POINT)
 

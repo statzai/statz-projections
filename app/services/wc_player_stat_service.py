@@ -136,6 +136,12 @@ SMALL_SAMPLE_SHRINK = 0.75
 # them; we mirror the ratios.
 ASSISTS_PER_GOAL = 0.82
 KEY_PASSES_PER_SHOT = 0.75
+# Big Chances Created per team shot. Empirically ~0.29 across the major
+# leagues (PL/La Liga/Serie A/Bundesliga/Ligue 1 all 0.28–0.30; intl ~0.33),
+# rounded to 0.3. Cross-checks: 0.3/0.75 = 0.4 ≈ the BCC:key-passes frequency
+# ratio. Drives FIFA WC fantasy's "every 2 big chances created = +1" rule
+# (FIFA labelled it "chances created" but it scores big chances created).
+BIG_CHANCES_PER_SHOT = 0.3
 
 # Share-distributed stats.
 #   output name -> (player fixture_player_stats stats_type_id,
@@ -162,8 +168,9 @@ SHARE_STATS: Dict[str, Tuple[int, int, str]] = {
 # a ratio off another projection rather than a team_projections column.
 #   output name -> (player fps id, team fts id used as the share denominator)
 DERIVED_SHARE_STATS: Dict[str, Tuple[int, int]] = {
-    'Assists':    (79, 79),
-    'Key Passes': (117, 117),
+    'Assists':             (79, 79),
+    'Key Passes':          (117, 117),
+    'Big Chances Created': (580, 580),
 }
 
 # Fouls Drawn is special: a team's Fouls Drawn = the OPPONENT's Fouls — both
@@ -671,6 +678,7 @@ def _build_player_rows(data: dict) -> Tuple[list, int]:
         derived_totals = {
             'Assists': team_goals * ASSISTS_PER_GOAL,
             'Key Passes': team_shots * KEY_PASSES_PER_SHOT,
+            'Big Chances Created': team_shots * BIG_CHANCES_PER_SHOT,
         }
         opp_fouls_total = _f(opp_tp['fouls']) if opp_tp is not None else 0.0
 

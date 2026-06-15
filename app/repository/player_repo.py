@@ -37,6 +37,7 @@ STATUS_TYPES = {
     "Interceptions": 100,
     "Accurate Passes": 116,
     "Key Passes": 117,
+    "Big Chances Created": 580,
     # PL-only defensive projections — computed for the team-down CBIT
     # calc (see projection_service.py) but previously discarded. Stored
     # so the FPL planner can show projected defensive output; combined
