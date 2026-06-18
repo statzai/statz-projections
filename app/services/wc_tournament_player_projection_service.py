@@ -159,15 +159,18 @@ class WcTournamentPlayerProjectionService:
                 #     expected_goals_for, leaving the team's expected REMAINING
                 #     goals to distribute over the rest of the tournament.
                 #
-                #     ONLY count games whose PLAYER STATS have landed (EXISTS in
-                #     fixture_player_stats). Player goals lag the scoreline by
-                #     hours; without this gate a finished-but-stats-pending game
-                #     would bank its team scoreline (shrinking the remaining
-                #     pool) while its scorers' goals can't yet be credited (4b),
-                #     so scorers DROP below their pre-match line until the goals
-                #     land. Excluding the game keeps it in the projected pool —
-                #     team + player actuals stay in sync, banked together once
-                #     stats arrive (the player-goals-landed trigger then re-runs).
+                #     ONLY count games whose GOAL data has landed — a 0-0 (no
+                #     goals to wait for) OR ≥1 player-goal row (stat 52). Player
+                #     goals lag the scoreline by hours AND lag other player
+                #     stats (lineups/minutes can land first — so an "any stat"
+                #     check isn't enough; must check goal rows specifically).
+                #     Without this gate a finished-but-goals-pending game banks
+                #     its scoreline (shrinking the remaining pool) while its
+                #     scorers' goals can't yet be credited (4b), so scorers DROP
+                #     below their pre-match line (Kane 4.3→3.0 after scoring 2).
+                #     Excluding the game keeps it in the projected pool — team +
+                #     player actuals stay in sync, banked together once goals
+                #     arrive (the player-goals-landed trigger then re-runs).
                 await cur.execute(
                     """
                     SELECT team_id, SUM(gf) AS goals FROM (
@@ -175,16 +178,20 @@ class WcTournamentPlayerProjectionService:
                         FROM fixtures f
                         WHERE competition_id = %s AND kickoff_datetime > '2026-05-01'
                           AND kickoff_datetime <= NOW() AND state_id = 5
-                          AND EXISTS (SELECT 1 FROM fixture_player_stats fps WHERE fps.fixture_id = f.id)
+                          AND ((home_team_goals + away_team_goals) = 0
+                               OR EXISTS (SELECT 1 FROM fixture_player_stats fps
+                                          WHERE fps.fixture_id = f.id AND fps.stats_type_id = %s))
                         UNION ALL
                         SELECT away_team_id AS team_id, away_team_goals AS gf
                         FROM fixtures f
                         WHERE competition_id = %s AND kickoff_datetime > '2026-05-01'
                           AND kickoff_datetime <= NOW() AND state_id = 5
-                          AND EXISTS (SELECT 1 FROM fixture_player_stats fps WHERE fps.fixture_id = f.id)
+                          AND ((home_team_goals + away_team_goals) = 0
+                               OR EXISTS (SELECT 1 FROM fixture_player_stats fps
+                                          WHERE fps.fixture_id = f.id AND fps.stats_type_id = %s))
                     ) z GROUP BY team_id
                     """,
-                    (comp_id, comp_id),
+                    (comp_id, GOALS_STAT_ID, comp_id, GOALS_STAT_ID),
                 )
                 team_actual_goals = {int(r[0]): float(r[1] or 0.0) for r in await cur.fetchall()}
         finally:
