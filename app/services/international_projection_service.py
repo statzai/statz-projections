@@ -423,10 +423,17 @@ class InternationalProjectionService:
             )
             lean = False
 
+        # Ratings-only: recompute team_ratings (Step 1) then return. Forces a
+        # bracket-wide recompute (no fixture filter → Step 1 takes the recompute
+        # branch, not the cache branch).
+        ratings_only = bool(getattr(league_request, 'ratings_only', False)) if league_request is not None else False
+        if ratings_only:
+            fixture_ids_filter = None
+
         logger.info(
             f"International projection start — comp={scope.competition_name} "
             f"(id={scope.competition_id}), commit={commit}, odds_beta={scope.odds_beta}, "
-            f"boost={BOOST}, fixture_ids={fixture_ids_filter}, lean={lean}"
+            f"boost={BOOST}, fixture_ids={fixture_ids_filter}, lean={lean}, ratings_only={ratings_only}"
         )
 
         # Step 1: refresh Statz ratings inline (skipped in per-fixture mode).
@@ -498,6 +505,20 @@ class InternationalProjectionService:
                 f"{len(fifa_carry_forward_names)} FIFA carry-forwards "
                 f"(carry-forward fixtures will skip) for {ratings_date}"
             )
+
+        # Ratings-only run: Step 1 has recomputed + committed team_ratings —
+        # stop here, skip the sim / per-fixture stats / fantasy / top-scorer.
+        if ratings_only:
+            logger.info(
+                f"{scope.competition_name}: ratings_only run complete — "
+                f"recomputed {len(ratings)} ratings, skipped projection steps."
+            )
+            return {
+                'ratings_only': True,
+                'n_ratings': len(ratings),
+                'committed': commit,
+                'competition_id': scope.competition_id,
+            }
 
         conn = await get_source_connection()
         try:

@@ -19,3 +19,10 @@ class LeagueRequest(BaseModel):
     # re-deriving every player's per-fixture lines (those refresh on the
     # twice-daily full passes). Must be paired with an empty fixture list.
     lean: Optional[bool] = False
+    # Ratings-only run: recompute + write team_ratings (Step 1) and return —
+    # skip the sim, per-fixture stats, fantasy and top-scorer. Used by the
+    # WC xG-landed trigger: team xG (stat 5304) arrives ~1h after a match
+    # finalises, so the post-match lean re-sim fires too early to capture it;
+    # this re-runs JUST the ratings once the xG lands. Forces an empty fixture
+    # list (ratings are bracket-wide).
+    ratings_only: Optional[bool] = False
