@@ -158,18 +158,30 @@ class WcTournamentPlayerProjectionService:
                 #     fixture scoreline). Used to subtract off the sim's
                 #     expected_goals_for, leaving the team's expected REMAINING
                 #     goals to distribute over the rest of the tournament.
+                #
+                #     ONLY count games whose PLAYER STATS have landed (EXISTS in
+                #     fixture_player_stats). Player goals lag the scoreline by
+                #     hours; without this gate a finished-but-stats-pending game
+                #     would bank its team scoreline (shrinking the remaining
+                #     pool) while its scorers' goals can't yet be credited (4b),
+                #     so scorers DROP below their pre-match line until the goals
+                #     land. Excluding the game keeps it in the projected pool —
+                #     team + player actuals stay in sync, banked together once
+                #     stats arrive (the player-goals-landed trigger then re-runs).
                 await cur.execute(
                     """
                     SELECT team_id, SUM(gf) AS goals FROM (
                         SELECT home_team_id AS team_id, home_team_goals AS gf
-                        FROM fixtures
+                        FROM fixtures f
                         WHERE competition_id = %s AND kickoff_datetime > '2026-05-01'
                           AND kickoff_datetime <= NOW() AND state_id = 5
+                          AND EXISTS (SELECT 1 FROM fixture_player_stats fps WHERE fps.fixture_id = f.id)
                         UNION ALL
                         SELECT away_team_id AS team_id, away_team_goals AS gf
-                        FROM fixtures
+                        FROM fixtures f
                         WHERE competition_id = %s AND kickoff_datetime > '2026-05-01'
                           AND kickoff_datetime <= NOW() AND state_id = 5
+                          AND EXISTS (SELECT 1 FROM fixture_player_stats fps WHERE fps.fixture_id = f.id)
                     ) z GROUP BY team_id
                     """,
                     (comp_id, comp_id),
