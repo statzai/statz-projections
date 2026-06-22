@@ -866,6 +866,45 @@ class InternationalProjectionService:
                 f"Step 3: skipped (no bracket config for {scope.competition_name})"
             )
 
+        # Step 3b (lean only): re-sync team_projections.goals from the freshly
+        # rewritten fixture_projections. In a full run, Step 4 (team-stat)
+        # overwrites team_projections.goals with fixture_projections.home/away_
+        # goals — so the two tables agree. A lean re-runs Step 2 (rewrites
+        # fixture_projections off the updated ratings) but SKIPS Step 4, which
+        # left team_projections.goals stale → the Fixtures-tab and Teams-tab
+        # scorelines diverged (e.g. Argentina 1.65 vs 1.68). This lightweight
+        # join-update restores the invariant (team goals == fixture-side goal)
+        # without re-running the expensive shots/corners suite. Runs before
+        # Step 7, which reads team_projections.goals. (Shots/corners stay
+        # anchored to the last full pass until the next full run — accepted.)
+        if commit and lean:
+            _sync_conn = await get_source_connection()
+            try:
+                async with _sync_conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        UPDATE team_projections tp
+                        JOIN fixtures f ON f.id = tp.fixture_id
+                        JOIN fixture_projections fp ON fp.fixture_id = tp.fixture_id
+                        SET tp.goals = CASE WHEN tp.team_id = f.home_team_id
+                                            THEN fp.home_goals ELSE fp.away_goals END,
+                            tp.updated_at = NOW()
+                        WHERE f.competition_id = %s
+                          AND f.kickoff_datetime > NOW()
+                        """,
+                        (scope.competition_id,),
+                    )
+                    _synced = cur.rowcount
+                await _sync_conn.commit()
+                logger.info(
+                    f"{scope.competition_name}: lean goals-sync — "
+                    f"team_projections.goals re-aligned to fixture_projections ({_synced} rows)"
+                )
+            except Exception as e:
+                logger.exception(f"{scope.competition_name} lean goals-sync failed: {e}")
+            finally:
+                release_source_connection(_sync_conn)
+
         # Step 4: Per-team stat projections. (Skipped in lean — the post-match
         # re-sim reuses the last full pass's per-fixture lines.)
         team_stat_result = None
