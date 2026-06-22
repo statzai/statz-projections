@@ -39,6 +39,9 @@ class TournamentConfig:
     #   4 = H2H points, 5 = H2H GD, 6 = H2H GF
     #   7 = fair-play (skipped per 2026-05-15 decision)
     #   8 = drawing of lots (random)
+    # NOTE: this default is the PRE-2026 FIFA order (overall GD before H2H).
+    # FIFA WC 2026 reversed it (H2H first) — see WC_2026's explicit override.
+    # Any new modern-tournament config should set the chain explicitly.
     group_tiebreaker_chain: List[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 8])
 
     # Cross-group ranking (for best-thirds selection) — H2H doesn't apply
@@ -66,6 +69,13 @@ WC_2026 = TournamentConfig(
     best_thirds_advance=8,
     knockout_rounds=['r32', 'r16', 'qf', 'sf', 'final'],
     has_third_place_playoff=True,
+    # FIFA reversed the group tiebreaker order for 2026 (Art. 13): head-to-head
+    # (pts→GD→goals) now comes BEFORE overall goal difference, unlike 1998-2022.
+    # Step IDs: 1=pts, 4/5/6=H2H pts/GD/goals, 2/3=group GD/goals, 8=lots.
+    group_tiebreaker_chain=[1, 4, 5, 6, 2, 3, 8],
+    # Cross-group (best-thirds) ranking: H2H meaningless (teams never met) →
+    # pts→groupGD→groupGoals→lots, unchanged for 2026.
+    cross_group_tiebreaker_chain=[1, 2, 3, 8],
 )
 
 

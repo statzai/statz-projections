@@ -295,7 +295,8 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
             # statz backfill (FifaKnockoutNumbering); NULLs sort last as a guard.
             await cur.execute(
                 """
-                SELECT f.id, th.name AS home_name, ta.name AS away_name, f.kickoff_datetime
+                SELECT f.id, th.name AS home_name, ta.name AS away_name,
+                       f.home_team_id, f.away_team_id, f.kickoff_datetime
                 FROM fixtures f
                 JOIN teams th ON th.id = f.home_team_id
                 JOIN teams ta ON ta.id = f.away_team_id
@@ -307,9 +308,15 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
             fixture_rows = await cur.fetchall()
 
         round_matches = []
-        for fid, h_name, a_name, _ in fixture_rows:
-            home_slot = _parse_slot(h_name)
-            away_slot = _parse_slot(a_name)
+        for fid, h_name, a_name, h_team_id, a_team_id, _ in fixture_rows:
+            # Once a slot is settled (group complete / clinched, or an earlier
+            # KO round played), Sportmonks replaces the placeholder name with
+            # the real team — so _parse_slot returns None. Fall back to the
+            # fixture's actual team_id as a ('fixed', tid) slot, otherwise the
+            # whole downstream bracket collapses to None (the live-tournament
+            # 0%-advancement bug). A NULL team_id (not yet drawn) stays None.
+            home_slot = _parse_slot(h_name) or (('fixed', h_team_id) if h_team_id else None)
+            away_slot = _parse_slot(a_name) or (('fixed', a_team_id) if a_team_id else None)
             round_matches.append({
                 'fixture_id': fid,
                 'home_slot': home_slot,
@@ -441,6 +448,9 @@ def _fill_r32_slots(
     """
     third_slots = []   # list of (match_idx, side, allowed_groups, winner_group_letter)
     resolved = [[None, None] for _ in r32_matches]
+    # Invert {letter: team_id} so a confirmed team sitting in a former
+    # '1st Group X' slot can be mapped back to its group letter.
+    winner_letter_by_team = {tid: g for g, tid in winners_by_group.items()}
 
     for i, m in enumerate(r32_matches):
         # Track the "winner" partner letter on the same fixture so we can
@@ -449,6 +459,11 @@ def _fill_r32_slots(
         for side, slot in (('home', m['home_slot']), ('away', m['away_slot'])):
             if slot and slot[0] == 'winner':
                 winner_partner_letter = slot[1]
+            elif slot and slot[0] == 'fixed' and slot[1] in winner_letter_by_team:
+                # Confirmed team occupying what was a '1st Group X' slot —
+                # recover its group letter so the best-third Annex C lookup
+                # ('1X' slot label) still works on the same fixture.
+                winner_partner_letter = winner_letter_by_team[slot[1]]
 
         for side, slot in (('home', m['home_slot']), ('away', m['away_slot'])):
             if slot is None:
@@ -458,6 +473,10 @@ def _fill_r32_slots(
                 resolved[i][side_idx] = winners_by_group.get(slot[1])
             elif slot[0] == 'runner_up':
                 resolved[i][side_idx] = runners_up_by_group.get(slot[1])
+            elif slot[0] == 'fixed':
+                # Settled team — use it directly (group complete/clinched, so
+                # it agrees with the simulated group result).
+                resolved[i][side_idx] = slot[1]
             elif slot[0] == 'best_third':
                 third_slots.append((i, side_idx, list(slot[1]), winner_partner_letter))
 
@@ -639,6 +658,10 @@ def _resolve_ref(slot, winners_by_round, losers_by_round, fifa_offsets, match_ba
     if slot is None:
         return None
     kind = slot[0]
+    if kind == 'fixed':
+        # A KO fixture whose team is already confirmed (that round has been
+        # played and Sportmonks replaced the placeholder with the real team).
+        return slot[1]
     if kind == 'match_ref':
         outcome, fifa_num = slot[1], slot[2]
         source = winners_by_round if outcome == 'winner' else losers_by_round
