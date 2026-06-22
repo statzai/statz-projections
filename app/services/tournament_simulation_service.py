@@ -831,6 +831,16 @@ def _aggregate(all_sim_outcomes: List[dict], config: TournamentConfig,
             if o['is_group_winner']: c['win_group'] += 1
             if o['qualified']: c['qualify'] += 1
             if o['is_group_bottom']: c['group_bottom'] += 1
+            # Full per-position distribution (1..4) + best-third qualification.
+            # The bracket builder uses these to assign each group's standings
+            # via a joint one-to-one assignment (not mean rank) and to pick the
+            # 8 qualifying thirds by their own probability — so a near-certain
+            # qualifier whose exact position is split can't be diluted out of
+            # the R32. group_position is 1-indexed; clamp defensively.
+            pos = o['group_position']
+            if 1 <= pos <= 4:
+                c[f'pos{pos}'] += 1
+            if o['is_best_third']: c['best_third'] += 1
             stage = o['knockout_stage']
             if stage == 'winner':
                 c['winner'] += 1
@@ -905,6 +915,13 @@ def _aggregate(all_sim_outcomes: List[dict], config: TournamentConfig,
             'expected_group_points': sum_group_pts[t_id] / num_sims,
             'win_group_percent': 100.0 * c['win_group'] / num_sims,
             'qualify_percent': 100.0 * c['qualify'] / num_sims,
+            # Per-position probabilities (1st/2nd/3rd/4th) + best-third qualify
+            # probability — drive the bracket builder's joint group assignment.
+            'pos1_percent': 100.0 * c['pos1'] / num_sims,
+            'pos2_percent': 100.0 * c['pos2'] / num_sims,
+            'pos3_percent': 100.0 * c['pos3'] / num_sims,
+            'pos4_percent': 100.0 * c['pos4'] / num_sims,
+            'best_third_percent': 100.0 * c['best_third'] / num_sims,
             'win_tournament_percent': 100.0 * c['winner'] / num_sims,
             'finish_bottom_group_percent': 100.0 * c['group_bottom'] / num_sims,
             'best_in_continent_percent': 100.0 * c['best_in_continent'] / num_sims,
@@ -979,6 +996,11 @@ async def _write_to_db(
             round(p['expected_group_points'], 2),
             round(p['win_group_percent'], 2),
             round(p['qualify_percent'], 2),
+            round(p['pos1_percent'], 2),
+            round(p['pos2_percent'], 2),
+            round(p['pos3_percent'], 2),
+            round(p['pos4_percent'], 2),
+            round(p['best_third_percent'], 2),
             None if rounds_pct['reach_r32_percent'] is None else round(rounds_pct['reach_r32_percent'], 2),
             None if rounds_pct['reach_r16_percent'] is None else round(rounds_pct['reach_r16_percent'], 2),
             None if rounds_pct['reach_qf_percent'] is None else round(rounds_pct['reach_qf_percent'], 2),
@@ -1024,6 +1046,8 @@ async def _write_to_db(
                    (competition_id, season_id, team_id,
                     group_code, expected_group_position, expected_group_points,
                     win_group_percent, qualify_percent,
+                    pos1_percent, pos2_percent, pos3_percent, pos4_percent,
+                    best_third_percent,
                     reach_r32_percent, reach_r16_percent, reach_qf_percent,
                     reach_sf_percent, reach_final_percent, win_tournament_percent,
                     expected_group_goals_for, expected_group_goals_against,
@@ -1034,7 +1058,8 @@ async def _write_to_db(
                     highest_scoring_team_percent, lowest_scoring_team_percent,
                     num_sims, created_at, updated_at)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                           %s, %s, %s, %s, %s, %s, %s)""",
                 team_rows[i:i+100],
             )
 
