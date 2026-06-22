@@ -279,7 +279,8 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
                 break
 
     bracket = {}
-    match_base = None
+    match_base = None        # fallback: derived from R16's "Winner Match N" refs
+    r32_match_base = None    # primary: R32's own (stable) min match_number
     for round_name in config.knockout_rounds:
         sid = stage_id_by_round.get(round_name)
         if sid is None:
@@ -296,7 +297,7 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
             await cur.execute(
                 """
                 SELECT f.id, th.name AS home_name, ta.name AS away_name,
-                       f.home_team_id, f.away_team_id, f.kickoff_datetime
+                       f.home_team_id, f.away_team_id, f.match_number, f.kickoff_datetime
                 FROM fixtures f
                 JOIN teams th ON th.id = f.home_team_id
                 JOIN teams ta ON ta.id = f.away_team_id
@@ -308,7 +309,7 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
             fixture_rows = await cur.fetchall()
 
         round_matches = []
-        for fid, h_name, a_name, h_team_id, a_team_id, _ in fixture_rows:
+        for fid, h_name, a_name, h_team_id, a_team_id, match_number, _ in fixture_rows:
             # Once a slot is settled (group complete / clinched, or an earlier
             # KO round played), Sportmonks replaces the placeholder name with
             # the real team — so _parse_slot returns None. Fall back to the
@@ -323,14 +324,24 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
                 'away_slot': away_slot,
             })
 
-            # Derive match_base = the smallest "Winner Match N" reference
-            # across ALL R16 fixtures (the first R32 match number). Must scan
-            # every R16 fixture, not just the first — the fixture that
-            # references the lowest R32 number (e.g. W73) is not necessarily
-            # first in the result set (now ordered by match_number, R16 M89
-            # comes first and references W74/W77, so stopping at the first
-            # fixture wrongly yields 74). Off-by-one match_base shifts every
-            # "Winner Match N" lookup and collapses the deep rounds.
+            # PRIMARY match_base source: R32's own match_number. These are
+            # stable (73..88 for WC) and survive the whole tournament — unlike
+            # the R16-derived fallback below, which evaporates the moment an
+            # R32 match is played (Sportmonks then replaces R16's "Winner Match
+            # N" placeholder with the real team, so the ref is gone and the
+            # min recomputes to the wrong number → QF/SF collapse). Take the
+            # smallest R32 match_number as the first-R32-match FIFA number.
+            if round_name == 'r32' and match_number is not None:
+                r32_match_base = (match_number if r32_match_base is None
+                                  else min(r32_match_base, match_number))
+
+            # FALLBACK match_base = the smallest "Winner Match N" reference
+            # across ALL R16 fixtures (the first R32 match number). Used only
+            # if R32 match_numbers are absent (NULL). Must scan every R16
+            # fixture, not just the first — the fixture that references the
+            # lowest R32 number (e.g. W73) is not necessarily first in the
+            # result set (ordered by match_number, R16 M89 comes first and
+            # references W74/W77, so stopping at the first wrongly yields 74).
             if round_name == 'r16':
                 for slot in (home_slot, away_slot):
                     if slot and slot[0] == 'match_ref':
@@ -338,7 +349,8 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
                         match_base = n if match_base is None else min(match_base, n)
         bracket[round_name] = round_matches
 
-    bracket['_match_base'] = match_base or 1
+    # Prefer the stable R32-derived base; fall back to the R16-ref scan; then 1.
+    bracket['_match_base'] = r32_match_base or match_base or 1
     return bracket
 
 
