@@ -173,6 +173,35 @@ async def _load_data(conn, config: TournamentConfig) -> dict:
     # Bracket structure from placeholder names (sportmonks convention)
     bracket = await _load_bracket_structure(conn, config, group_codes)
 
+    # Odds-blended λ for CONFIRMED knockout fixtures (real teams locked in +
+    # a fixture_projections row, which is bet365-odds-blended). Once a KO tie
+    # is confirmed we simulate it off the market rather than the neutral
+    # ratings cross-Poisson — odds price team quality + host advantage more
+    # precisely (e.g. Canada v Morocco: ratings+host favour the host Canada,
+    # but the market has Morocco favourite). Keyed by fixture_id; the
+    # orientation (home/away team_id) is stored so _simulate_knockout_match
+    # only uses it when the SIMULATED pairing IS this exact confirmed fixture
+    # — hypothetical future ties (no row / different teams) fall back to
+    # ratings. fixture_projections rows are deleted once a game is played, so
+    # this naturally covers only upcoming confirmed ties.
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT f.id, f.home_team_id, f.away_team_id, fp.home_goals, fp.away_goals
+            FROM fixtures f
+            JOIN fixture_projections fp ON fp.fixture_id = f.id
+            WHERE f.competition_id = %s
+              AND f.group_id IS NULL
+              AND f.home_team_id IS NOT NULL AND f.away_team_id IS NOT NULL
+              AND fp.home_goals IS NOT NULL AND fp.away_goals IS NOT NULL
+            """,
+            (config.competition_id,),
+        )
+        ko_fixture_odds = {
+            fid: (h_id, a_id, float(h_lam), float(a_lam))
+            for fid, h_id, a_id, h_lam, a_lam in await cur.fetchall()
+        }
+
     return {
         'ratings': ratings,
         'team_name_by_id': team_name_by_id,
@@ -181,6 +210,7 @@ async def _load_data(conn, config: TournamentConfig) -> dict:
         'teams_by_group': teams_by_group,
         'group_codes': group_codes,
         'bracket': bracket,
+        'ko_fixture_odds': ko_fixture_odds,
     }
 
 
@@ -548,6 +578,8 @@ def _simulate_knockout_match(
     home_id: int, away_id: int,
     ratings: Dict[int, Tuple[float, float]],
     config: TournamentConfig,
+    fixture_id: Optional[int] = None,
+    ko_fixture_odds: Optional[dict] = None,
 ) -> Tuple[int, int, int]:
     """Simulate a knockout match.
 
@@ -555,11 +587,20 @@ def _simulate_knockout_match(
     90' + ET only — penalty-shootout goals are deliberately NOT counted
     so the per-team goal aggregates match how official competition stats
     treat shootouts. Models 90' + ET + pens if drawn.
+
+    If this exact matchup is a CONFIRMED fixture with an odds-blended
+    projection (ko_fixture_odds[fixture_id] == (home_id, away_id, λh, λa)),
+    the market λ is used instead of the neutral ratings cross-Poisson.
     """
-    h_atk, h_def = ratings.get(home_id, (100.0, 100.0))
-    a_atk, a_def = ratings.get(away_id, (100.0, 100.0))
-    lam_h = (h_atk / 100) * (a_def / 100) * AVG_GOALS
-    lam_a = (a_atk / 100) * (h_def / 100) * AVG_GOALS
+    odds = ko_fixture_odds.get(fixture_id) if (ko_fixture_odds and fixture_id is not None) else None
+    used_odds = odds is not None and odds[0] == home_id and odds[1] == away_id
+    if used_odds:
+        lam_h, lam_a = odds[2], odds[3]
+    else:
+        h_atk, h_def = ratings.get(home_id, (100.0, 100.0))
+        a_atk, a_def = ratings.get(away_id, (100.0, 100.0))
+        lam_h = (h_atk / 100) * (a_def / 100) * AVG_GOALS
+        lam_a = (a_atk / 100) * (h_def / 100) * AVG_GOALS
 
     hg, ag = _sample_score(lam_h, lam_a)
     if hg > ag: return home_id, hg, ag
@@ -573,13 +614,21 @@ def _simulate_knockout_match(
     if et_hg > et_ag: return home_id, tot_h, tot_a
     if et_ag > et_hg: return away_id, tot_h, tot_a
 
-    # Still drawn → penalties. Mild edge to favourite (higher Overall).
-    # Shootout goals are not added to tot_h / tot_a.
-    home_ovr = h_atk - h_def
-    away_ovr = a_atk - a_def
-    if home_ovr > away_ovr:
+    # Still drawn → penalties. Mild edge to the favourite. On the ratings
+    # path that's the higher-Overall (atk−def) side; on the odds path we have
+    # no ratings, so use the higher λ (market's stronger side). Shootout goals
+    # are not added to tot_h / tot_a.
+    if used_odds:
+        home_fav = lam_h > lam_a
+        away_fav = lam_a > lam_h
+    else:
+        home_ovr = h_atk - h_def
+        away_ovr = a_atk - a_def
+        home_fav = home_ovr > away_ovr
+        away_fav = away_ovr > home_ovr
+    if home_fav:
         p_home = config.pens_p_favourite
-    elif away_ovr > home_ovr:
+    elif away_fav:
         p_home = 1 - config.pens_p_favourite
     else:
         p_home = 0.5
@@ -592,6 +641,7 @@ def _simulate_fifa_knockout(
     r32_team_pairs: List[Tuple[int, int]],
     ratings: Dict[int, Tuple[float, float]],
     config: TournamentConfig,
+    ko_fixture_odds: Optional[dict] = None,
 ) -> Tuple[Dict[int, str], Dict[int, dict]]:
     """Walk the FIFA bracket from R32 (or R16) down to the final, using
     the parsed slot graph from `bracket`.
@@ -635,7 +685,10 @@ def _simulate_fifa_knockout(
                 losers.append(None)
                 continue
 
-            winner_id, hg, ag = _simulate_knockout_match(home_id, away_id, ratings, config)
+            winner_id, hg, ag = _simulate_knockout_match(
+                home_id, away_id, ratings, config,
+                fixture_id=m.get('fixture_id'), ko_fixture_odds=ko_fixture_odds,
+            )
             knockout_goals[home_id]['gf'] += hg
             knockout_goals[home_id]['ga'] += ag
             knockout_goals[away_id]['gf'] += ag
@@ -734,6 +787,7 @@ def _simulate_one(
 
     knockout_stage, knockout_goals = _simulate_fifa_knockout(
         bracket, r32_team_pairs, data['ratings'], config,
+        ko_fixture_odds=data.get('ko_fixture_odds'),
     )
 
     outcomes = {}
