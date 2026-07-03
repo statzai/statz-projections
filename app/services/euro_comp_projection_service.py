@@ -336,6 +336,19 @@ class EuroCompProjectionService:
 
         fixtures['kickoff_datetime'] = pd.to_datetime(fixtures['kickoff_datetime'])
         next_fix = fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
+
+        # Qualifying rounds are never projected — Statz only covers the actual
+        # competition (decision 2026-07-03). The statz-side trigger already
+        # filters these out of scheduled runs (ProjectionTriggerEvaluator);
+        # this guard covers full-comp/manual runs with no fixture_ids, which
+        # would otherwise pick up e.g. the August CL qualifying play-offs once
+        # both teams are rated. Column-presence check keeps this robust on DBs
+        # that pre-date the is_qualifying migration.
+        if 'is_qualifying' in next_fix.columns:
+            _pre_qual = len(next_fix)
+            next_fix = next_fix[next_fix['is_qualifying'] != 1]
+            if len(next_fix) < _pre_qual:
+                logger.info(f'[{league}] Skipped {_pre_qual - len(next_fix)} qualifying-round fixture(s)')
         if hasattr(league_request, 'fixture_ids') and league_request.fixture_ids:
             next_fix = next_fix[next_fix['id'].isin(league_request.fixture_ids)]
             logger.info(f'[{league}] Filtered to {len(next_fix)} fixtures by IDs')
