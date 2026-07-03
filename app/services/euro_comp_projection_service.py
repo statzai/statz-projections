@@ -352,6 +352,27 @@ class EuroCompProjectionService:
         next_fix = next_fix[_cols]
         if not _has_neutral:
             next_fix['neutral_venue'] = False
+
+        # Qualifying-round guard: a fixture can carry a NULL team_id (TBD
+        # placeholder for a prior-round winner — e.g. "TBD v BATE" in the
+        # ECL first qualifying round) or, in principle, a team missing from
+        # the teams table. get_team() IndexErrors on either BEFORE the
+        # placeholder/ratings guards below get a chance to skip the fixture,
+        # killing the whole comp run (2026-07-03: the first 2026/27 CL + ECL
+        # qualifying fixtures entered the window and crashed every nightly
+        # run). Skip-and-warn, same idiom as the "not in ratings" guard.
+        known_team_ids = set(teams['id'].values)
+        _pre_known = len(next_fix)
+        next_fix = next_fix[
+            next_fix['home_team_id'].isin(known_team_ids)
+            & next_fix['away_team_id'].isin(known_team_ids)
+        ]
+        if len(next_fix) < _pre_known:
+            logger.warning(
+                f'[{league}] Skipped {_pre_known - len(next_fix)} fixture(s) with NULL/unknown '
+                f'team ids (TBD qualifying slots or teams absent from teams table)'
+            )
+
         next_fix['home_team'] = next_fix['home_team_id'].apply(lambda x: get_team(x, teams))
         next_fix['away_team'] = next_fix['away_team_id'].apply(lambda x: get_team(x, teams))
         next_fix = next_fix.drop(columns=['home_team_id', 'away_team_id'])
