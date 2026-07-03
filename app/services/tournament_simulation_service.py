@@ -155,7 +155,10 @@ async def _load_data(conn, config: TournamentConfig) -> dict:
                 'away_id': a_id,
                 'home_lambda': h_lam,
                 'away_lambda': a_lam,
-                'played': state_id == 5,
+                # FT / AET / pens all count as played (group games can't go
+                # to extra time, but keep the state set consistent with the
+                # rest of the pipeline — see 2026-07-03 Tielemans AET bug).
+                'played': state_id in (5, 7, 8),
                 'actual_home': h_actual,
                 'actual_away': a_actual,
             })

@@ -143,7 +143,7 @@ class WcTournamentPlayerProjectionService:
                     WHERE f.competition_id = %s
                       AND f.kickoff_datetime > '2026-05-01'
                       AND f.kickoff_datetime <= NOW()
-                      AND f.state_id = 5
+                      AND f.state_id IN (5, 7, 8)
                       AND fps.stats_type_id IN (%s, %s)
                     GROUP BY fps.player_id, fps.team_id
                     """,
@@ -160,16 +160,21 @@ class WcTournamentPlayerProjectionService:
                 #     goals to distribute over the rest of the tournament.
                 await cur.execute(
                     """
+                    -- state_id IN (5,7,8): FT, AET, pens. Knockout games that
+                    -- finish after extra time land at state 7/8, NOT 5 — a
+                    -- state=5-only filter stopped banking those games' goals
+                    -- (Tielemans showed 0.45 tournament goals after scoring
+                    -- twice in the AET R32 win, 2026-07-03).
                     SELECT team_id, SUM(gf) AS goals FROM (
                         SELECT home_team_id AS team_id, home_team_goals AS gf
                         FROM fixtures
                         WHERE competition_id = %s AND kickoff_datetime > '2026-05-01'
-                          AND kickoff_datetime <= NOW() AND state_id = 5
+                          AND kickoff_datetime <= NOW() AND state_id IN (5, 7, 8)
                         UNION ALL
                         SELECT away_team_id AS team_id, away_team_goals AS gf
                         FROM fixtures
                         WHERE competition_id = %s AND kickoff_datetime > '2026-05-01'
-                          AND kickoff_datetime <= NOW() AND state_id = 5
+                          AND kickoff_datetime <= NOW() AND state_id IN (5, 7, 8)
                     ) z GROUP BY team_id
                     """,
                     (comp_id, comp_id),
