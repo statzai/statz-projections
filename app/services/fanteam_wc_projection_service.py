@@ -364,6 +364,14 @@ class FanTeamWcProjectionService:
             logger.info(f"FanTeam WC projections ready: {len(rows)} rows")
 
             if commit and rows:
+                # Same retention rule as the FIFA table (wc_fantasy_points_
+                # service): the INSERT upserts on (fixture_id, player_id) so
+                # upcoming fixtures refresh in place, and a round's rows are
+                # KEPT until the round completes — a fixture that has kicked
+                # off simply stops being refreshed (the SELECT is
+                # kickoff > NOW), freezing its last pre-match projection. The
+                # old blanket comp-wide DELETE made the FanTeam tab drop
+                # played fixtures at kickoff while the FIFA tab kept them.
                 async with conn.cursor() as cur:
                     if fixture_ids:
                         del_ph = ",".join(["%s"] * len(fixture_ids))
@@ -374,9 +382,9 @@ class FanTeamWcProjectionService:
                     else:
                         await cur.execute(
                             """DELETE fwp FROM fanteam_wc_projections fwp
-                               JOIN fixtures f ON f.id = fwp.fixture_id
-                               WHERE f.competition_id = %s""",
-                            (self.scope.competition_id,),
+                               JOIN wc_fixtures wf ON wf.fixture_id = fwp.fixture_id
+                               JOIN wc_rounds wr ON wr.id = wf.round_id
+                               WHERE wr.status = 'complete'""",
                         )
                 await conn.commit()
 
