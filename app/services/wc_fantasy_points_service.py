@@ -179,7 +179,8 @@ async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict
         await cur.execute(
             f"""
             SELECT fp.fixture_id, fp.home_team_id, fp.away_team_id,
-                   fp.home_goals, fp.away_goals
+                   fp.home_goals, fp.away_goals,
+                   fp.home_clean_sheet_percent, fp.away_clean_sheet_percent
             FROM fixture_projections fp
             JOIN fixtures f ON f.id = fp.fixture_id
             WHERE f.competition_id = %s
@@ -226,7 +227,7 @@ async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict
 
     # Fixture lookup → opponent goals per player side.
     fix_meta: Dict[int, dict] = {}
-    for fid, ht, at, hg, ag in fp_rows:
+    for fid, ht, at, hg, ag, hcs, acs in fp_rows:
         try:
             home_goals = float(hg) if hg is not None else 0.0
             away_goals = float(ag) if ag is not None else 0.0
@@ -237,6 +238,11 @@ async def _load_data(conn, competition_id: int, fixture_ids_filter=None) -> dict
             'away_team_id': at,
             'home_goals': home_goals,
             'away_goals': away_goals,
+            # Clean-sheet % per side — snapshotted onto the fantasy row so
+            # the breakdown survives kickoff (fixture_projections drops
+            # played rows). None-tolerant: displays as no tile.
+            'home_cs_pct': float(hcs) if hcs is not None else None,
+            'away_cs_pct': float(acs) if acs is not None else None,
         }
 
     # {statz_fixture_id: wc_round_id} — direct lookup. Empty rows mean
@@ -277,16 +283,25 @@ def _build_rows(data: dict) -> list:
 
         if team_id == meta['home_team_id']:
             opp_goals = meta['away_goals']
+            cs_pct = meta.get('home_cs_pct')
         elif team_id == meta['away_team_id']:
             opp_goals = meta['home_goals']
+            cs_pct = meta.get('away_cs_pct')
         else:
             # Player team doesn't match fixture sides (data drift). Fall back
             # to the higher of the two so clean sheet stays conservative.
             opp_goals = max(meta['home_goals'], meta['away_goals'])
+            cs_pct = None
 
         pts = _fantasy_points(entry['stats'], position, opp_goals)
         wc_round_id = _round_for(fid, round_by_fixture)
 
+        # Per-stat snapshot alongside the points, so the fantasy page's
+        # "Projection breakdown" survives kickoff. player_projections only
+        # holds upcoming fixtures — once a game starts these values are gone
+        # from the source, but this row is retained until the round completes,
+        # freezing the last pre-match projection with it.
+        stats = entry['stats']
         out.append((
             fid,
             pid,
@@ -297,6 +312,14 @@ def _build_rows(data: dict) -> list:
             team_id,
             entry['opponent_id'],
             position,
+            stats.get(STAT_GOALS),
+            stats.get(STAT_ASSISTS),
+            stats.get(STAT_SAVES),
+            stats.get(STAT_TACKLES),
+            stats.get(STAT_SHOTS_ON_TARGET),
+            stats.get(STAT_BIG_CHANCES_CREATED),
+            cs_pct,
+            round(opp_goals, 2),
         ))
 
     return out

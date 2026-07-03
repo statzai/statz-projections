@@ -24,8 +24,9 @@ async def insert_wc_fantasy_projections_async(rows):
     INSERT INTO wc_fantasy_projections (
         fixture_id, player_id, kickoff_datetime, venue,
         fantasy_points, wc_round_id, team_id, opponent_id, position,
+        xg, xa, saves, tackles, sot, big_chances_created, cs_pct, xgc,
         created_at, updated_at
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     AS new
     ON DUPLICATE KEY UPDATE
         kickoff_datetime = new.kickoff_datetime,
@@ -35,6 +36,14 @@ async def insert_wc_fantasy_projections_async(rows):
         team_id          = new.team_id,
         opponent_id      = new.opponent_id,
         position         = new.position,
+        xg                  = new.xg,
+        xa                  = new.xa,
+        saves               = new.saves,
+        tackles             = new.tackles,
+        sot                 = new.sot,
+        big_chances_created = new.big_chances_created,
+        cs_pct              = new.cs_pct,
+        xgc                 = new.xgc,
         updated_at       = NOW()
     """
     return await execute_chunked(sql, rows, label="[wc_fantasy_projections]")
