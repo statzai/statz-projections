@@ -330,7 +330,9 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
             await cur.execute(
                 """
                 SELECT f.id, th.name AS home_name, ta.name AS away_name,
-                       f.home_team_id, f.away_team_id, f.match_number, f.kickoff_datetime
+                       f.home_team_id, f.away_team_id, f.match_number,
+                       f.state_id, f.home_team_goals, f.away_team_goals, f.result_info,
+                       f.kickoff_datetime
                 FROM fixtures f
                 JOIN teams th ON th.id = f.home_team_id
                 JOIN teams ta ON ta.id = f.away_team_id
@@ -342,7 +344,8 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
             fixture_rows = await cur.fetchall()
 
         round_matches = []
-        for fid, h_name, a_name, h_team_id, a_team_id, match_number, _ in fixture_rows:
+        for (fid, h_name, a_name, h_team_id, a_team_id, match_number,
+             state_id, hg_act, ag_act, result_info, _) in fixture_rows:
             # Once a slot is settled (group complete / clinched, or an earlier
             # KO round played), Sportmonks replaces the placeholder name with
             # the real team — so _parse_slot returns None. Fall back to the
@@ -351,10 +354,33 @@ async def _load_bracket_structure(conn, config: TournamentConfig, group_codes: D
             # 0%-advancement bug). A NULL team_id (not yet drawn) stays None.
             home_slot = _parse_slot(h_name) or (('fixed', h_team_id) if h_team_id else None)
             away_slot = _parse_slot(a_name) or (('fixed', a_team_id) if a_team_id else None)
+
+            # Bank the ACTUAL result of a PLAYED knockout game (FT/AET/pens),
+            # exactly as the group stage already does. Without this the sim
+            # re-simulates played KO ties every iteration, so a team's real KO
+            # over/under-performance never lands in expected_goals_for — which
+            # broke the top-scorer "remaining goals" (Step 7 = team_EG −
+            # team_actual): Argentina banked 6 KO goals the sim never counted,
+            # leaving ~0 projected remaining for Messi despite the QF/SF/Final
+            # to come (2026-07-09).
+            actual = None
+            if (state_id in (5, 7, 8) and h_team_id and a_team_id
+                    and hg_act is not None and ag_act is not None):
+                actual = {
+                    'home_team_id': h_team_id,
+                    'away_team_id': a_team_id,
+                    'hg': int(hg_act),
+                    'ag': int(ag_act),
+                    'winner_id': _actual_ko_winner(
+                        h_team_id, a_team_id, h_name, a_name,
+                        int(hg_act), int(ag_act), result_info),
+                }
+
             round_matches.append({
                 'fixture_id': fid,
                 'home_slot': home_slot,
                 'away_slot': away_slot,
+                'actual': actual,
             })
 
             # PRIMARY match_base source: R32's own match_number. These are
@@ -639,6 +665,24 @@ def _simulate_knockout_match(
     return winner, tot_h, tot_a
 
 
+def _actual_ko_winner(home_id, away_id, home_name, away_name, hg, ag, result_info):
+    """Winner of a PLAYED knockout tie. Higher 90'+ET score wins; if level
+    (decided on penalties, state 8) the winner is named in result_info
+    (e.g. "Argentina won after penalties (4-2)."). Returns None if a level
+    game's result_info can't be parsed — caller then simulates as a fallback.
+    """
+    if hg > ag:
+        return home_id
+    if ag > hg:
+        return away_id
+    ri = (result_info or '').lower()
+    if home_name and home_name.lower() in ri:
+        return home_id
+    if away_name and away_name.lower() in ri:
+        return away_id
+    return None
+
+
 def _simulate_fifa_knockout(
     bracket: dict,
     r32_team_pairs: List[Tuple[int, int]],
@@ -672,26 +716,38 @@ def _simulate_fifa_knockout(
         losers = []
 
         for fixture_idx, m in enumerate(round_matches):
-            # Determine home / away team for this fixture
-            if round_name == 'r32':
-                home_id, away_id = r32_team_pairs[fixture_idx]
+            m_actual = m.get('actual')
+            if m_actual is not None and m_actual['winner_id'] is not None:
+                # PLAYED tie — bank the real teams, real 90'+ET goals and real
+                # winner (shootout goals excluded, matching fixtures.*_goals).
+                # No simulation; the real winner feeds the next round exactly
+                # as the confirmed-team slots already do.
+                home_id = m_actual['home_team_id']
+                away_id = m_actual['away_team_id']
+                hg, ag = m_actual['hg'], m_actual['ag']
+                winner_id = m_actual['winner_id']
             else:
-                home_id = _resolve_ref(m['home_slot'], winners_by_round, losers_by_round,
-                                       fifa_number_offsets, match_base)
-                away_id = _resolve_ref(m['away_slot'], winners_by_round, losers_by_round,
-                                       fifa_number_offsets, match_base)
+                # Still to play (or a level game whose pens winner couldn't be
+                # parsed — rare fallback) → resolve slots + simulate.
+                if round_name == 'r32':
+                    home_id, away_id = r32_team_pairs[fixture_idx]
+                else:
+                    home_id = _resolve_ref(m['home_slot'], winners_by_round, losers_by_round,
+                                           fifa_number_offsets, match_base)
+                    away_id = _resolve_ref(m['away_slot'], winners_by_round, losers_by_round,
+                                           fifa_number_offsets, match_base)
 
-            if home_id is None or away_id is None:
-                # Couldn't resolve a slot (placeholder doesn't match known patterns
-                # or upstream match failed). Skip this fixture in this sim.
-                winners.append(None)
-                losers.append(None)
-                continue
+                if home_id is None or away_id is None:
+                    # Couldn't resolve a slot (placeholder doesn't match known
+                    # patterns or upstream match failed). Skip in this sim.
+                    winners.append(None)
+                    losers.append(None)
+                    continue
 
-            winner_id, hg, ag = _simulate_knockout_match(
-                home_id, away_id, ratings, config,
-                fixture_id=m.get('fixture_id'), ko_fixture_odds=ko_fixture_odds,
-            )
+                winner_id, hg, ag = _simulate_knockout_match(
+                    home_id, away_id, ratings, config,
+                    fixture_id=m.get('fixture_id'), ko_fixture_odds=ko_fixture_odds,
+                )
             knockout_goals[home_id]['gf'] += hg
             knockout_goals[home_id]['ga'] += ag
             knockout_goals[away_id]['gf'] += ag
