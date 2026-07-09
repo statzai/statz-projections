@@ -1,4 +1,5 @@
 import logging
+import math
 from datetime import datetime
 import pandas as pd
 from app.source_database import get_source_connection, release_source_connection
@@ -71,30 +72,59 @@ async def insert_player_async(data_list, teams=None, competition_id=None, comp_t
     # remain as input (resolve_team_id needs the names), but the string
     # columns are no longer written to the DB. See nullable migration
     # 2026_04_17_120000.
+    # Build WITHOUT iterrows (Series-per-row is the slowest pandas iteration)
+    # and WITHOUT re-resolving the same ~40 team names once per player.
+    # Column-array iteration + memoised resolver — byte-identical output.
+    # The `value is None` skip (NOT a NaN skip) is preserved exactly: these
+    # frames always have string columns (position/venue/team…), so an iterrows
+    # row-Series was already object-dtype — None stayed None, NaN stayed NaN —
+    # which is exactly what iterating each column directly gives. NaN values
+    # still pass through as float(nan) and are cleaned to NULL by
+    # execute_chunked, same as before. `stat_name in row` (index membership)
+    # → `stat_name in columns`, checked once.
+    _n = len(api_pl_projections)
+
+    def _colvals(name):
+        return api_pl_projections[name].tolist() if name in api_pl_projections.columns else [None] * _n
+
+    _fid = _colvals('fixture_id')
+    _pid = _colvals('player_id')
+    _pos = _colvals('position')
+    _team = _colvals('team')
+    _opp = _colvals('opponent')
+    _ven = _colvals('venue')
+    _start = _colvals('start')
+    _ko = _colvals('kickoff_datetime')
+    _stat_arrays = [
+        (stat_id, api_pl_projections[stat_name].tolist())
+        for stat_name, stat_id in STATUS_TYPES.items()
+        if stat_name in api_pl_projections.columns
+    ]
+
+    _tid_cache = {}
+    def _resolve(name):
+        if teams is None:
+            return None
+        key = '\x00NAN' if isinstance(name, float) and math.isnan(name) else name
+        if key not in _tid_cache:
+            _tid_cache[key] = resolve_team_id(name, teams, competition_id, comp_teams)
+        return _tid_cache[key]
+
     records = []
-    for _, row in api_pl_projections.iterrows():
-        # Resolve team IDs once per row (each row spawns ~15 stat records)
-        row_team_id = resolve_team_id(row.get("team"), teams, competition_id, comp_teams) if teams is not None else None
-        row_opponent_id = resolve_team_id(row.get("opponent"), teams, competition_id, comp_teams) if teams is not None else None
-        for stat_name, stat_id in STATUS_TYPES.items():
-            if stat_name in row:
-                value = row[stat_name]
-                if value is None:
-                    continue
-                records.append((
-                    row.get("fixture_id"),
-                    row.get("player_id"),
-                    stat_id,
-                    row.get("position"),
-                    row_team_id,
-                    row_opponent_id,
-                    row.get("venue"),
-                    convert_start(row.get("start")),
-                    float(value),
-                    row.get("kickoff_datetime"),
-                    now,
-                    now,
-                ))
+    for i in range(_n):
+        row_team_id = _resolve(_team[i])
+        row_opponent_id = _resolve(_opp[i])
+        start_v = convert_start(_start[i])
+        fid_i, pid_i, pos_i, ven_i, ko_i = _fid[i], _pid[i], _pos[i], _ven[i], _ko[i]
+        for stat_id, vals in _stat_arrays:
+            value = vals[i]
+            if value is None:
+                continue
+            records.append((
+                fid_i, pid_i, stat_id, pos_i,
+                row_team_id, row_opponent_id, ven_i,
+                start_v, float(value), ko_i, now, now,
+            ))
 
     sql = """
     INSERT INTO player_projections (

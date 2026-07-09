@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+import os
 import aiomysql
 import pandas as pd
 import app.database as _db
@@ -8,17 +9,22 @@ from app.database import get_connection
 
 logger = logging.getLogger("db_utils")
 
-CHUNK_SIZE = 500
+CHUNK_SIZE = int(os.getenv("PROJECTION_CHUNK_SIZE", 2000))
 MAX_RETRIES = 3
 QUERY_TIMEOUT = 120  # seconds per chunk before giving up and retrying
 
 # Chunk size sizing notes:
 # - max_allowed_packet on prod = 64 MB.
 # - Widest table is model_dataset (~80 cols × ~50 chars = ~4 KB/row).
-#   500 rows = ~2 MB per INSERT statement. ~32x packet-size headroom.
-# - Bumped 50 → 500 on 2026-05-11 to claw back the +20s/league insert overhead
-#   added by the player-prop expansion (8 markets vs 3 = 22 props vs 9 → 30k
-#   rows for PL). Saves ~9 min off a full 23-league sweep.
+#   2000 rows = ~8 MB per INSERT statement. ~8x packet-size headroom (the
+#   projection tables are ~15 cols, far narrower — much more headroom there).
+# - execute_chunked commits ONCE PER CHUNK, so the row count / CHUNK_SIZE is
+#   the number of fsync round-trips. The big PL inserts (player_projections
+#   ~38k, player_prop_projections ~49k, and ~3x that at the 19-GW horizon)
+#   dominate the commit cost; fewer, larger chunks cut it proportionally.
+# - History: 50 → 500 (2026-05-11, player-prop expansion), 500 → 2000
+#   (2026-07-09, ahead of the 19-GW FPL horizon tripling row volume).
+#   Output-identical — same rows upserted, just batched differently.
 
 
 def resolve_team_id(team_name, teams, competition_id=None, comp_teams=None):

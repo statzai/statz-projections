@@ -77,22 +77,42 @@ async def insert_players_stats_async(data_list, teams=None, competition_id=None,
     # Note: player_name / team / opponent strings are no longer written to
     # the DB — team_id / opponent_id / player_id FKs replace them. See
     # nullable migration 2026_04_17_120000.
+    # Build the insert tuples WITHOUT iterrows (Series-per-row is the slowest
+    # pandas iteration) and WITHOUT re-resolving the same ~40 team names ~49k×.
+    # Column-array iteration + a memoised resolver — byte-identical output:
+    # same per-row logic, same STATUS_TYPES lookup, same resolve_team_id result
+    # per name (a deterministic lookup), same None/NaN handling (execute_chunked
+    # still cleans NaN→None downstream). row.get(col) → None for an absent
+    # column is preserved by pre-filling missing columns with None.
+    _cols = ['fixture_id', 'player_id', 'position', 'team', 'opponent',
+             'venue', 'market_name', 'prop', 'projection_percent', 'kickoff_datetime']
+    for _c in _cols:
+        if _c not in api_pl_projections.columns:
+            api_pl_projections[_c] = None
+
+    _tid_cache = {}
+    def _resolve(name):
+        if teams is None:
+            return None
+        # Key NaN separately so a genuine NaN name is still resolved once,
+        # identically to the original per-row resolve_team_id(nan, ...).
+        key = '\x00NAN' if isinstance(name, float) and math.isnan(name) else name
+        if key not in _tid_cache:
+            _tid_cache[key] = resolve_team_id(name, teams, competition_id, comp_teams)
+        return _tid_cache[key]
+
     values = []
-    for _, row in api_pl_projections.iterrows():
-        market_name = row.get("market_name")
-        stats_type_id = STATUS_TYPES.get(market_name, 0)
+    for (fid, pid, pos, team, opp, ven, mkt, prop, pct, ko) in zip(
+        api_pl_projections['fixture_id'], api_pl_projections['player_id'],
+        api_pl_projections['position'], api_pl_projections['team'],
+        api_pl_projections['opponent'], api_pl_projections['venue'],
+        api_pl_projections['market_name'], api_pl_projections['prop'],
+        api_pl_projections['projection_percent'], api_pl_projections['kickoff_datetime'],
+    ):
         values.append((
-            row.get("fixture_id"),
-            row.get("player_id"),
-            row.get("position"),
-            resolve_team_id(row.get("team"), teams, competition_id, comp_teams) if teams is not None else None,
-            resolve_team_id(row.get("opponent"), teams, competition_id, comp_teams) if teams is not None else None,
-            row.get("venue"),
-            market_name,
-            stats_type_id,
-            row.get("prop"),
-            row.get("projection_percent"),
-            row.get("kickoff_datetime"),
+            fid, pid, pos,
+            _resolve(team), _resolve(opp),
+            ven, mkt, STATUS_TYPES.get(mkt, 0), prop, pct, ko,
         ))
 
     sql = """

@@ -44,7 +44,7 @@ class ProjectionService:
     # GW. Wide (16) so the FPL planner's rolling 6-GW window stays full as the
     # user navigates forward — the window stays 6 up to ~active GW 11, then
     # tapers toward the buffer's end (2026-07-09). Env-overridable for tuning.
-    FANTASY_GAMEWEEKS = int(os.getenv("FANTASY_GAMEWEEKS", 16))
+    FANTASY_GAMEWEEKS = int(os.getenv("FANTASY_GAMEWEEKS", 19))
 
     # Per-league data source for the current run. Set in _setup_league to
     # the fresh LeagueDataLoader. Read elsewhere (transfermarkt mappings,
