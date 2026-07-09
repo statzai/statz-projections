@@ -3,6 +3,7 @@ import os
 from logging.handlers import TimedRotatingFileHandler
 from fastapi import FastAPI
 from app.api.routes import router as api_router
+from app.api.fpl_routes import router as fpl_router
 from app.config import Config
 from app.database import init_db_pool, close_db_pool, get_connection
 from app.source_database import (
@@ -43,6 +44,7 @@ app = FastAPI(
 
 
 app.include_router(api_router)
+app.include_router(fpl_router)
 
 
 async def _assert_utc_session(acquire, release, label):
