@@ -37,6 +37,15 @@ class ProjectionService:
     SAVE_FILE_PATH = APP_DIR / "projection-outputs"
     DAYS = int(os.getenv("PROJECTION_DAYS", 5))
 
+    # How many gameweeks ahead PL fantasy projections cover. The 5 fantasy
+    # tables are capped to this many future-deadline gameweeks; player / team /
+    # fixture projections get one extra buffer GW (see _filter_upcoming_fixtures)
+    # so the fantasy filter still yields a full set after dropping a mid-flight
+    # GW. Wide (16) so the FPL planner's rolling 6-GW window stays full as the
+    # user navigates forward — the window stays 6 up to ~active GW 11, then
+    # tapers toward the buffer's end (2026-07-09). Env-overridable for tuning.
+    FANTASY_GAMEWEEKS = int(os.getenv("FANTASY_GAMEWEEKS", 16))
+
     # Per-league data source for the current run. Set in _setup_league to
     # the fresh LeagueDataLoader. Read elsewhere (transfermarkt mappings,
     # promoted ratings, FPL player mappings) for auxiliary tables that
@@ -48,17 +57,19 @@ class ProjectionService:
     def _filter_upcoming_fixtures(league: str, fixtures, date_from, date_to):
         """Slice fixtures to the projection scope for `league`.
 
-        Premier League: project 7 upcoming gameweeks (gameweek_id-based).
-        Aligns with the FPL gameweek concept and feeds the FPL planning
-        tools that want fixture/team/player projections out to ~5 weeks
-        for transfer + chip strategy. gameweek_id survives postponements
-        and double/blank gameweeks better than round_id or date-window.
+        Premier League: project FANTASY_GAMEWEEKS+1 upcoming gameweeks
+        (gameweek_id-based). Aligns with the FPL gameweek concept and feeds
+        the FPL planning tools, whose rolling 6-GW window slides forward as the
+        user navigates — so the buffer is wide (16) to keep that window full.
+        gameweek_id survives postponements and double/blank gameweeks better
+        than round_id or date-window.
 
-        The window is 7 (not 6) so the fantasy tables — which drop any
-        gameweek whose deadline has already passed (see _fantasy_gw_filter)
-        — still get a full 6 future-deadline gameweeks even when the
-        soonest in-window gameweek is mid-flight. player / team / fixture
-        projections simply get the one extra gameweek, harmlessly.
+        The window is FANTASY_GAMEWEEKS+1 (one extra) so the fantasy tables —
+        which drop any gameweek whose deadline has already passed (see
+        _fantasy_gw_filter) — still get the full FANTASY_GAMEWEEKS
+        future-deadline gameweeks even when the soonest in-window gameweek is
+        mid-flight. player / team / fixture projections simply get the one
+        extra gameweek, harmlessly.
 
         All other leagues: stay on the date_from..date_to window
         (typically today + PROJECTION_DAYS=5). gameweek_id isn't reliably
@@ -74,8 +85,12 @@ class ProjectionService:
             future = fixtures[fixtures['kickoff_datetime'] >= pd.to_datetime('today')]
             if not future.empty and 'gameweek_id' in future.columns and pd.notna(future['gameweek_id'].min()):
                 min_gw = future['gameweek_id'].min()
-                next_fix = future[future['gameweek_id'] < min_gw + 7]
-                logger.info(f"[{league}] gameweek-based filter: GW {int(min_gw)}–{int(min_gw)+6} ({len(next_fix)} fixtures)")
+                # +1 buffer GW over the fantasy horizon so the fantasy filter
+                # still yields a full FANTASY_GAMEWEEKS after dropping a
+                # mid-flight GW.
+                span = ProjectionService.FANTASY_GAMEWEEKS + 1
+                next_fix = future[future['gameweek_id'] < min_gw + span]
+                logger.info(f"[{league}] gameweek-based filter: GW {int(min_gw)}–{int(min_gw)+span-1} ({len(next_fix)} fixtures)")
                 return next_fix
             logger.warning(f"[{league}] gameweek_id missing/null — falling back to date-window")
         return fixtures[(fixtures['kickoff_datetime'] >= date_from) & (fixtures['kickoff_datetime'] <= date_to)]
@@ -86,9 +101,9 @@ class ProjectionService:
         plan for.
 
         `upcoming_gws` — the gameweek ids (gameweeks.id) whose deadline is in
-        the future, capped to the 6 soonest. A fantasy projection for a
-        gameweek whose deadline has already passed can't be acted on, so its
-        rows are dropped before they reach the fantasy table.
+        the future, capped to the FANTASY_GAMEWEEKS soonest. A fantasy
+        projection for a gameweek whose deadline has already passed can't be
+        acted on, so its rows are dropped before they reach the fantasy table.
 
         - `upcoming_gws is None` — deadline lookup failed / not a fantasy
           league: return `df` unchanged (fail-open — a transient lookup glitch
@@ -1675,7 +1690,7 @@ class ProjectionService:
                 _fantasy_upcoming_gws = sorted(
                     gw for gw, dl in _gw_deadlines.items()
                     if pd.notna(dl) and dl > _fantasy_now
-                )[:6]
+                )[:ProjectionService.FANTASY_GAMEWEEKS]
                 logger.info(f"[{league}] fantasy projections scoped to gameweeks "
                             f"{_fantasy_upcoming_gws} (future-deadline only)")
             except Exception as e:
