@@ -31,6 +31,43 @@ XI_SIZE = 11
 CLUB_CAP = 3
 HIT = 4.0
 POSNAME = {1: 'GK', 2: 'DEF', 3: 'MID', 4: 'FWD'}
+FORMATIONS = [(3, 4, 3), (3, 5, 2), (4, 3, 3), (4, 4, 2), (4, 5, 1), (5, 3, 2), (5, 4, 1)]
+
+
+def best_xi(squad_idx, pos, xpts, eligible, horizon):
+    """Best legal starting XI + captain each week for a FIXED squad — used to
+    value the manager's CURRENT squad (the baseline) so a transfer's gain can be
+    measured against the points that actually SCORE, not raw squad totals.
+
+    Per week, independently: pick the formation (1 GK + a legal outfield split)
+    that maximises projected points among eligible players, then captain the top
+    scorer (doubled). Returns (total_pts, per_gw_starts) where per_gw_starts[p]
+    is a list[bool] of length `horizon` — did player p start in each week.
+    Ineligible players (start-eligibility) can't start, mirroring the ILP.
+    """
+    per_gw_starts = {p: [False] * horizon for p in squad_idx}
+    total = 0.0
+    for g in range(horizon):
+        by_pos = {1: [], 2: [], 3: [], 4: []}
+        for p in squad_idx:
+            if eligible[p]:
+                by_pos[pos[p]].append(p)
+        for k in by_pos:
+            by_pos[k].sort(key=lambda p: -xpts[p][g])
+        best = None
+        for d, m, f in FORMATIONS:
+            if len(by_pos[1]) >= 1 and len(by_pos[2]) >= d and len(by_pos[3]) >= m and len(by_pos[4]) >= f:
+                lineup = [by_pos[1][0]] + by_pos[2][:d] + by_pos[3][:m] + by_pos[4][:f]
+                cap = max(lineup, key=lambda p: xpts[p][g])
+                pts = sum(xpts[p][g] for p in lineup) + xpts[cap][g]
+                if best is None or pts > best[1]:
+                    best = (lineup, pts)
+        if best:
+            lineup, pts = best
+            total += pts
+            for p in lineup:
+                per_gw_starts[p][g] = True
+    return round(total, 1), per_gw_starts
 
 
 def solve_build(players, horizon, from_gw, season_id, budget=BUDGET, scope='preseason'):
@@ -213,13 +250,41 @@ def solve_transfer(data):
         if cap_p is not None:
             captain_gws.setdefault(players[cap_p]['id'], []).append(from_gw + g)
 
+    # Baseline = the CURRENT squad's best-XI+captain total; the true gain of the
+    # plan is (new best XI) − (old best XI) − hits, not the raw squad-total delta
+    # (which double-counts benched players). per-GW start flags surface benching.
+    eligible = [players[p].get('eligible', True) for p in range(P)]
+    baseline_gross, base_starts = best_xi(sorted(old_squad), pos, xpts, eligible, H)
+    new_starts = {p: [bool(x[yi(p, g)] > 0.5) for g in range(H)] for p in new_squad}
+
+    # Per-move gain = the marginal best-XI gain of doing JUST that swap from the
+    # current squad (pairing out<->in by position). For a single-transfer plan
+    # this equals netGain exactly; it never over-states the way an
+    # (in.effective − out.effective) delta would (which ignores that the new
+    # player displaces others in the XI). Sum ≈ the package gain.
+    outs_by_pos = {}
+    for p in transfers_out:
+        outs_by_pos.setdefault(pos[p], []).append(p)
+    move_gain = {}
+    for ip in transfers_in:
+        bucket = outs_by_pos.get(pos[ip], [])
+        op = bucket.pop(0) if bucket else None
+        if op is not None:
+            swapped = (old_squad - {op}) | {ip}
+            g, _ = best_xi(sorted(swapped), pos, xpts, eligible, H)
+            move_gain[ip] = round(g - baseline_gross, 1)
+
     def leg(p, is_in):
+        starts = new_starts[p] if is_in else base_starts.get(p, [False] * H)
+        effective = round(sum(xpts[p][g] for g in range(H) if starts[g]), 1)
         d = {'id': players[p]['id'], 'name': players[p]['name'],
              'position': players[p]['pos'], 'club': players[p]['club'],
-             'per_gw_pts': [round(v, 2) for v in xpts[p]], 'six_gw': round(sum(xpts[p]), 1)}
+             'per_gw_pts': [round(v, 2) for v in xpts[p]], 'six_gw': round(sum(xpts[p]), 1),
+             'effective_pts': effective, 'starts': sum(starts), 'per_gw_starts': starts}
         if is_in:
             d['price'] = players[p]['price']
             d['captain_gws'] = captain_gws.get(players[p]['id'], [])
+            d['marginal_gain'] = move_gain.get(p, 0.0)
         else:
             d['sell'] = cost[p]
         return d
@@ -230,7 +295,8 @@ def solve_transfer(data):
         'season_id': season_id, 'from_gameweek': from_gw, 'horizon': H,
         'free_transfers': ft, 'bank': bank,
         'transfers': k, 'hits': hits, 'hit_cost': round(HIT * hits, 1),
-        'squad_pts_gross': round(gross, 1), 'net_gain_vs_hits': round(net, 1),
+        'squad_pts_gross': round(gross, 1), 'baseline_gross': baseline_gross,
+        'net_gain_vs_hits': round(net, 1),
         'bank_after': round(bank + out_sell - in_price, 1),
         'ft_after': max(0, ft - k),
         'out': [leg(p, False) for p in transfers_out],
