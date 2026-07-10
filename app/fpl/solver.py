@@ -12,8 +12,17 @@ built input and gets the result dict back):
   solve_transfer(payload)
       Best set of transfers FROM an existing squad — owned players valued at
       their SELL price, others at BUY; budget = bank + squad sell value;
-      objective = Σ(best XI + captain over horizon) − 4 × max(0, transfers − FT).
+      objective = Σ(raw 6-GW xPts of the owned 15) − 4 × max(0, transfers − FT).
       Unbounded transfers/hits; taken only when they pay.
+
+      RAW xPTS BY DESIGN (George, 2026-07-10): no per-week XI/bench modelling in
+      transfer mode. A user's squad won't stay fixed for 6 weeks (transfers,
+      injuries, forced starts), so best-XI-per-week precision was false
+      precision — and raw totals are what every planner surface displays, so the
+      move rows sum to the header exactly. Start-eligibility gates INCOMING
+      players only (never recommend buying a non-starter); owned players count
+      in full. Captaincy is display-only (top raw scorer per week), not scored.
+      solve_build keeps the XI machinery — builds need a pitch to display.
 
 Mirrors scripts/fpl/solve_squad.py + scripts/fpl/transfer_plan.py in the statz
 repo (the dev/cron runners). Kept in sync by hand — same math, no CLI/JSON I/O.
@@ -177,21 +186,18 @@ def solve_transfer(data):
     club = [pl['club'] for pl in players]
     xpts = [pl['xpts'] for pl in players]
     owned = [bool(pl.get('owned')) for pl in players]
+    totals = [round(sum(x), 4) for x in xpts]   # raw horizon xPts — the objective
     # keep/sell an owned player at his sell price, buy anyone else at buy price.
     cost = [float(pl['sell']) if owned[p] else float(pl['price']) for p, pl in enumerate(players)]
     budget = bank + sum(cost[p] for p in range(P) if owned[p])
 
-    def xi(p): return p
-    def yi(p, g): return P + g * P + p
-    def ci(p, g): return P + H * P + g * P + p
-    H_VAR = P + 2 * H * P            # the single hit-count integer var
-    N = H_VAR + 1
+    # var layout: x_p (own) | h (hit count). No XI/captain vars — raw mode.
+    H_VAR = P
+    N = P + 1
 
     c = np.zeros(N)
     for p in range(P):
-        for g in range(H):
-            c[yi(p, g)] = -xpts[p][g]
-            c[ci(p, g)] = -xpts[p][g]
+        c[p] = -totals[p]
     c[H_VAR] = HIT                    # minimise → +4 per hit
 
     rows, cols, vals, lb, ub = [], [], [], [], []
@@ -202,29 +208,20 @@ def solve_transfer(data):
         lb.append(l); ub.append(u); r[0] += 1
 
     for ps, cnt in SQUAD.items():
-        add([(xi(p), 1) for p in range(P) if pos[p] == ps], cnt, cnt)
-    add([(xi(p), cost[p]) for p in range(P)], 0, budget)
+        add([(p, 1) for p in range(P) if pos[p] == ps], cnt, cnt)
+    add([(p, cost[p]) for p in range(P)], 0, budget)
     for cl in set(club):
-        add([(xi(p), 1) for p in range(P) if club[p] == cl], 0, CLUB_CAP)
-    for p in range(P):
-        for g in range(H):
-            add([(yi(p, g), 1), (xi(p), -1)], -np.inf, 0)
-            add([(ci(p, g), 1), (yi(p, g), -1)], -np.inf, 0)
-    for g in range(H):
-        add([(yi(p, g), 1) for p in range(P)], XI_SIZE, XI_SIZE)
-        add([(ci(p, g), 1) for p in range(P)], 1, 1)
-        for ps in (1, 2, 3, 4):
-            add([(yi(p, g), 1) for p in range(P) if pos[p] == ps], XI_MIN[ps], XI_MAX[ps])
+        add([(p, 1) for p in range(P) if club[p] == cl], 0, CLUB_CAP)
     # transfers k = incoming (= outgoing, squad size fixed). hit var h >= k - FT.
-    add([(xi(p), 1) for p in range(P) if not owned[p]] + [(H_VAR, -1)], -np.inf, ft)
+    add([(p, 1) for p in range(P) if not owned[p]] + [(H_VAR, -1)], -np.inf, ft)
 
+    # Eligibility gates BUYS only: never recommend bringing in a projected
+    # non-starter, but owned players stay sellable/keepable at full value.
     ub_v = np.ones(N)
     ub_v[H_VAR] = max(0, 15 - ft)
     for p in range(P):
-        if not players[p].get('eligible', True):
-            for g in range(H):
-                ub_v[yi(p, g)] = 0
-                ub_v[ci(p, g)] = 0
+        if not owned[p] and not players[p].get('eligible', True):
+            ub_v[p] = 0
 
     A = coo_matrix((vals, (rows, cols)), shape=(r[0], N))
     res = milp(c=c, constraints=LinearConstraint(A, lb, ub),
@@ -234,57 +231,31 @@ def solve_transfer(data):
         raise RuntimeError(f"no solution (status {res.status})")
     x = res.x
 
-    new_squad = {p for p in range(P) if x[xi(p)] > 0.5}
+    new_squad = {p for p in range(P) if x[p] > 0.5}
     old_squad = {p for p in range(P) if owned[p]}
     transfers_out = old_squad - new_squad
     transfers_in = new_squad - old_squad
     k = len(transfers_in)
     hits = max(0, k - ft)
-    gross = -sum(c[yi(p, g)] * x[yi(p, g)] + c[ci(p, g)] * x[ci(p, g)]
-                 for p in range(P) for g in range(H))
-    net = gross - HIT * hits
+    # Raw squad totals: gross − baseline = Σin − Σout exactly, so the plan's
+    # move rows always sum to the header (minus the hit).
+    gross = sum(totals[p] for p in new_squad)
+    baseline = sum(totals[p] for p in old_squad)
+    net = gross - baseline - HIT * hits
 
+    # Captaincy is DISPLAY-ONLY: the new squad's top raw scorer each week.
     captain_gws = {}
     for g in range(H):
-        cap_p = next((p for p in new_squad if x[ci(p, g)] > 0.5), None)
-        if cap_p is not None:
-            captain_gws.setdefault(players[cap_p]['id'], []).append(from_gw + g)
-
-    # Baseline = the CURRENT squad's best-XI+captain total; the true gain of the
-    # plan is (new best XI) − (old best XI) − hits, not the raw squad-total delta
-    # (which double-counts benched players). per-GW start flags surface benching.
-    eligible = [players[p].get('eligible', True) for p in range(P)]
-    baseline_gross, base_starts = best_xi(sorted(old_squad), pos, xpts, eligible, H)
-    new_starts = {p: [bool(x[yi(p, g)] > 0.5) for g in range(H)] for p in new_squad}
-
-    # Per-move gain = the marginal best-XI gain of doing JUST that swap from the
-    # current squad (pairing out<->in by position). For a single-transfer plan
-    # this equals netGain exactly; it never over-states the way an
-    # (in.effective − out.effective) delta would (which ignores that the new
-    # player displaces others in the XI). Sum ≈ the package gain.
-    outs_by_pos = {}
-    for p in transfers_out:
-        outs_by_pos.setdefault(pos[p], []).append(p)
-    move_gain = {}
-    for ip in transfers_in:
-        bucket = outs_by_pos.get(pos[ip], [])
-        op = bucket.pop(0) if bucket else None
-        if op is not None:
-            swapped = (old_squad - {op}) | {ip}
-            g, _ = best_xi(sorted(swapped), pos, xpts, eligible, H)
-            move_gain[ip] = round(g - baseline_gross, 1)
+        cap_p = max(new_squad, key=lambda p: xpts[p][g])
+        captain_gws.setdefault(players[cap_p]['id'], []).append(from_gw + g)
 
     def leg(p, is_in):
-        starts = new_starts[p] if is_in else base_starts.get(p, [False] * H)
-        effective = round(sum(xpts[p][g] for g in range(H) if starts[g]), 1)
         d = {'id': players[p]['id'], 'name': players[p]['name'],
              'position': players[p]['pos'], 'club': players[p]['club'],
-             'per_gw_pts': [round(v, 2) for v in xpts[p]], 'six_gw': round(sum(xpts[p]), 1),
-             'effective_pts': effective, 'starts': sum(starts), 'per_gw_starts': starts}
+             'per_gw_pts': [round(v, 2) for v in xpts[p]], 'six_gw': round(sum(xpts[p]), 1)}
         if is_in:
             d['price'] = players[p]['price']
             d['captain_gws'] = captain_gws.get(players[p]['id'], [])
-            d['marginal_gain'] = move_gain.get(p, 0.0)
         else:
             d['sell'] = cost[p]
         return d
@@ -295,7 +266,7 @@ def solve_transfer(data):
         'season_id': season_id, 'from_gameweek': from_gw, 'horizon': H,
         'free_transfers': ft, 'bank': bank,
         'transfers': k, 'hits': hits, 'hit_cost': round(HIT * hits, 1),
-        'squad_pts_gross': round(gross, 1), 'baseline_gross': baseline_gross,
+        'squad_pts_gross': round(gross, 1), 'baseline_gross': round(baseline, 1),
         'net_gain_vs_hits': round(net, 1),
         'bank_after': round(bank + out_sell - in_price, 1),
         'ft_after': max(0, ft - k),
