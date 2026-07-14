@@ -902,10 +902,51 @@ class WcPlayerStatService:
                     )
                 return {'n_player_rows': 0, 'n_squads': 0, 'committed': False}
             if not team_projections:
-                logger.warning(
-                    f"No team_projections found for {self.scope.competition_name} "
-                    f"— run InternationalTeamStatService first."
-                )
+                # Distinguish "nothing was projected upstream" (expected)
+                # from "team-stat step didn't run" (fault). The team-stat
+                # service INNER JOINs fixture_projections, so when the
+                # orchestrator's gates (odds presence for friendlies,
+                # minnow filter, venue classification) skipped every
+                # upcoming fixture, empty team_projections is the normal
+                # quiet state — e.g. friendlies outside a FIFA window
+                # aren't priced by bookmakers until ~3-5 days out, and
+                # the nightly runs would otherwise warn twice a day for
+                # weeks. INFO keeps that out of the digest; the WARNING
+                # is reserved for a real ordering fault (upcoming
+                # fixture_projections exist but team_projections don't).
+                fp_fid_sql = ""
+                fp_fid_params: tuple = ()
+                if fixture_ids:
+                    ph_fp = ",".join(["%s"] * len(fixture_ids))
+                    fp_fid_sql = f" AND f.id IN ({ph_fp})"
+                    fp_fid_params = tuple(fixture_ids)
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"""
+                        SELECT COUNT(*)
+                        FROM fixture_projections fp
+                        JOIN fixtures f ON f.id = fp.fixture_id
+                        WHERE f.competition_id = %s
+                          AND f.kickoff_datetime > NOW()
+                          AND f.state_id = 1
+                          {fp_fid_sql}
+                        """,
+                        (self.scope.competition_id,) + fp_fid_params,
+                    )
+                    n_upcoming_fp = (await cur.fetchone())[0]
+                if n_upcoming_fp == 0:
+                    logger.info(
+                        f"No team_projections for {self.scope.competition_name} — "
+                        f"expected: no upcoming fixture_projections either (every "
+                        f"fixture skipped by the projection gates), so the "
+                        f"team-stat step had nothing to project."
+                    )
+                else:
+                    logger.warning(
+                        f"No team_projections found for {self.scope.competition_name} "
+                        f"despite {n_upcoming_fp} upcoming fixture_projections rows "
+                        f"— run InternationalTeamStatService first."
+                    )
                 return {'n_player_rows': 0, 'n_squads': len(squads), 'committed': False}
 
             # Pre-load player-prop odds (Goals / Shots Total / SoT / Assists)

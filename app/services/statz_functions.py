@@ -529,6 +529,7 @@ async def get_market_value_with_cache(league_dashed, div, country_code):
 
 
 def get_market_value(league_dashed, div, country_code):
+    import time
     import requests
     from bs4 import BeautifulSoup
     import pandas as pd
@@ -536,7 +537,21 @@ def get_market_value(league_dashed, div, country_code):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
     }
-    response = requests.get(url, headers=headers)
+    # One retry on transient gateway errors (2026-07-14: a single HTTP 504
+    # on the MLS page pushed the run onto the cached-snapshot fallback).
+    # The timeout guards against a hung connection stalling the run —
+    # this function is sync, so a stuck socket blocks the whole MV block.
+    response = None
+    for attempt in (1, 2):
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code < 500:
+                break
+        except requests.RequestException:
+            if attempt == 2:
+                raise
+        if attempt == 1:
+            time.sleep(3)
     soup = BeautifulSoup(response.content, 'html.parser')
     list = soup.select('td[class="hauptlink no-border-links"]')
     teams = []
