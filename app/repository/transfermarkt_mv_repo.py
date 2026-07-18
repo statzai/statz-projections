@@ -71,6 +71,12 @@ async def read_latest_market_values_async(league_dashed: str) -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
     most_recent_at = df['scraped_at'].iloc[0]
+    # Only the newest batch: rows upsert per (league, team), so teams that
+    # left the league (relegation/season turnover) linger with an old
+    # scraped_at. Without this filter the fallback served current teams
+    # PLUS last season's relegated ones, skewing the MV index and keeping
+    # phantom "unmapped team" warnings alive.
+    df = df[df['scraped_at'] == most_recent_at]
     logger.info(
         f"[transfermarkt_mv_snapshots:{league_dashed}] "
         f"Returning {len(df)} cached MVs from {most_recent_at} "
