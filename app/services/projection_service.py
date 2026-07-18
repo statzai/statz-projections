@@ -570,14 +570,20 @@ class ProjectionService:
             if len(db_promoted_rows) > 0:
                 second_ratings = db_promoted_rows[['team_name', 'attack', 'defense']].copy()
                 second_ratings.columns = ['Team', 'Attack', 'Defense']
+                # DB DECIMAL columns arrive as decimal.Decimal — Decimal*float
+                # raises TypeError, so the whole blend crashed for every
+                # DB-config league (silently, until the except below logged).
+                # The xlsx path never hit this (floats all the way).
+                second_ratings['Attack'] = second_ratings['Attack'].astype(float)
+                second_ratings['Defense'] = second_ratings['Defense'].astype(float)
                 logger.info(f"[{league}] Promoted team ratings loaded from DB ({len(second_ratings)} teams)")
             else:
                 second_ratings = pd.read_excel(f"{data_folder_path}/{league} Promoted Team Ratings.xlsx")
                 second_ratings = second_ratings[['Team', 'Attack', 'Defense']]
                 logger.info(f"[{league}] Promoted team ratings loaded from xlsx")
-            second_ratings['Attack'] = (second_ratings['Attack']) * league_below_attack_weight
+            second_ratings['Attack'] = (second_ratings['Attack']) * float(league_below_attack_weight)
             second_ratings['Defense'] = (second_ratings[
-                'Defense']) / league_below_defense_weight  # UPDATED - divide instead of multiply
+                'Defense']) / float(league_below_defense_weight)  # UPDATED - divide instead of multiply
             promoted_teams = second_ratings['Team'].unique()
             old_weight = 0.85 ** matches_played  # NEW - uses matches played so far in season
             new_weight = 1 - old_weight  # NEW - opposite of old weight
