@@ -534,24 +534,41 @@ def get_market_value(league_dashed, div, country_code):
     from bs4 import BeautifulSoup
     import pandas as pd
     url = f'https://www.transfermarkt.co.uk/{league_dashed.lower()}/startseite/wettbewerb/{country_code}{div}'
+    # Full browser-shaped header set: since 2026-07-14 Transfermarkt's bot
+    # protection answers bare-UA requests with HTTP 202 + a challenge page
+    # (0 teams parsed, bs4 decode warnings). A UA alone stopped being enough;
+    # the Accept/Accept-Language pair is what currently gets a real page.
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Referer": "https://www.transfermarkt.co.uk/",
+        "Upgrade-Insecure-Requests": "1",
     }
-    # One retry on transient gateway errors (2026-07-14: a single HTTP 504
-    # on the MLS page pushed the run onto the cached-snapshot fallback).
-    # The timeout guards against a hung connection stalling the run —
-    # this function is sync, so a stuck socket blocks the whole MV block.
+    # Retries cover transient gateway errors (2026-07-14: a one-off 504 on
+    # the MLS page) AND the 202 challenge, which often clears on a re-request
+    # once the session cookie from the first response is presented. The
+    # timeout guards against a hung connection stalling the run — this
+    # function is sync, so a stuck socket blocks the whole MV block.
+    session = requests.Session()
     response = None
-    for attempt in (1, 2):
+    for attempt in (1, 2, 3):
         try:
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code < 500:
+            response = session.get(url, headers=headers, timeout=30)
+            if response.status_code == 200:
                 break
         except requests.RequestException:
-            if attempt == 2:
+            if attempt == 3:
                 raise
-        if attempt == 1:
-            time.sleep(3)
+        if attempt < 3:
+            time.sleep(3 * attempt)
+    if response.status_code != 200:
+        # Never parse a challenge/error body — that's where the bs4
+        # REPLACEMENT CHARACTER noise came from. Raise the same shape of
+        # error the empty-scrape path uses so the cache fallback kicks in.
+        raise RuntimeError(
+            f"get_market_value: Transfermarkt returned HTTP {response.status_code} for {league_dashed} after 3 attempts (url={url})"
+        )
     soup = BeautifulSoup(response.content, 'html.parser')
     list = soup.select('td[class="hauptlink no-border-links"]')
     teams = []

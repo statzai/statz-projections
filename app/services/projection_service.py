@@ -647,31 +647,35 @@ class ProjectionService:
                 logger.warning(f"[{league}] {len(unmapped_names)} unmapped Transfermarkt teams: {unmapped_names}")
 
                 # Save unmapped teams to DB as pending mappings (to_name=NULL)
-                # so the admin panel can show them for resolution
+                # so the admin panel can show them for resolution.
+                # Plain synchronous pymysql on purpose: this code runs inside
+                # the already-running event loop's thread, where
+                # run_until_complete() always raises "this event loop is
+                # already running" — the save silently failed for every league
+                # until 2026-07-18, which is why the admin "unmapped" badge
+                # never lit up. A tiny 2-row insert doesn't need the pool.
                 try:
-                    import aiomysql
-                    from app.database import get_connection
-                    import asyncio
+                    import pymysql
+                    from app.config import Config
 
-                    async def _save_unmapped():
-                        conn = await asyncio.wait_for(get_connection(), timeout=10)
-                        try:
-                            async with conn.cursor() as cur:
-                                for name in unmapped_names:
-                                    await cur.execute(
-                                        "INSERT IGNORE INTO transfermarkt_team_mappings "
-                                        "(competition_id, from_name, to_name, created_at, updated_at) "
-                                        "VALUES ((SELECT id FROM competitions WHERE name = %s LIMIT 1), %s, NULL, NOW(), NOW())",
-                                        (league, name)
-                                    )
-                                await conn.commit()
-                            logger.info(f"[{league}] Saved {len(unmapped_names)} unmapped teams to DB for admin resolution")
-                        finally:
-                            import app.database as _db
-                            if _db.pool:
-                                _db.pool.release(conn)
-
-                    asyncio.get_event_loop().run_until_complete(_save_unmapped())
+                    sync_conn = pymysql.connect(
+                        host=Config.DB_HOST, port=Config.DB_PORT,
+                        user=Config.DB_USER, password=Config.DB_PASSWORD,
+                        database=Config.DB_NAME, connect_timeout=10,
+                    )
+                    try:
+                        with sync_conn.cursor() as cur:
+                            for name in unmapped_names:
+                                cur.execute(
+                                    "INSERT IGNORE INTO transfermarkt_team_mappings "
+                                    "(competition_id, from_name, to_name, created_at, updated_at) "
+                                    "VALUES ((SELECT id FROM competitions WHERE name = %s LIMIT 1), %s, NULL, NOW(), NOW())",
+                                    (league, name)
+                                )
+                        sync_conn.commit()
+                        logger.info(f"[{league}] Saved {len(unmapped_names)} unmapped teams to DB for admin resolution")
+                    finally:
+                        sync_conn.close()
                 except Exception as save_err:
                     logger.warning(f"[{league}] Could not save unmapped teams to DB: {save_err}")
 
