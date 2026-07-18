@@ -66,9 +66,14 @@ def parse_league(html):
             team = team.replace(prefix, "")
         team = team.strip()
         raw = raw.replace(".", "").strip("€")
-        m = re.search(r"(\d+)([bnm]+)", raw)
+        # [bnmk]: 'k' was missing from the original pattern for years — the
+        # k→000 map entry existed but could never match, silently dropping
+        # any club under €1m (first real casualty: Rochdale AFC, €975k,
+        # League Two 2026/27 — flagged by the missing-MV badge).
+        m = re.search(r"(\d+)([bnmk]+)", raw)
         if not m or m.group(2) not in SUFFIX_MAP:
-            continue  # unparseable (or sub-1m 'k' value the pipeline also drops)
+            continue  # genuinely unparseable
+
         rows.append((team, m.group(1) + SUFFIX_MAP[m.group(2)]))
     return rows
 

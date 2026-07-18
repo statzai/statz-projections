@@ -604,7 +604,10 @@ def get_market_value(league_dashed, div, country_code):
     df['Team'] = df['Team'].str.replace('AC', '')
     df['Team'] = df['Team'].str.strip()
     df['Market Value'] = df['Market Value'].str.replace('.', '')
-    df_temp = df['Market Value'].str.strip('€').str.extract(r'(\d+)([bnm]+)')
+    # [bnmk]: 'k' was absent from this pattern for years while the k→000 map
+    # entry below waited for it — any club under €1m was silently dropped
+    # (Rochdale AFC €975k, League Two 2026/27, was the first real casualty).
+    df_temp = df['Market Value'].str.strip('€').str.extract(r'(\d+)([bnmk]+)')
     df_temp2 = df_temp[0] + df_temp[1].map({'bn': '0000000', 'm': '0000', 'k': '000'})
     df.drop('Market Value', axis=1, inplace=True)
     df['Market Value'] = df_temp2
