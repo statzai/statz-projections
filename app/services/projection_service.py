@@ -586,6 +586,14 @@ class ProjectionService:
                                                                           'Attack'])  # NEW - This maps the new attack rating from get_ratings function
             second_ratings['New Defense'] = second_ratings['Team'].map(ratings_copy.set_index('Team')[
                                                                            'Defense'])  # NEW - This maps the new defense rating from get_ratings function
+            # A promoted team usually has NO computed rating (that's why it
+            # has a prior at all) — its mapped New Attack/Defense is NaN, and
+            # NaN * new_weight is NaN even at new_weight=0, so the blend
+            # produced NaN and dropna() below deleted exactly the teams this
+            # block exists to protect. Fall back to the scaled prior when
+            # there's no computed rating to blend against.
+            second_ratings['New Attack'] = second_ratings['New Attack'].fillna(second_ratings['Attack'])
+            second_ratings['New Defense'] = second_ratings['New Defense'].fillna(second_ratings['Defense'])
             second_ratings['Attack'] = (second_ratings['Attack'] * old_weight) + (
                         second_ratings['New Attack'] * new_weight)  # NEW - This calculates the updated attack rating
             second_ratings['Defense'] = (second_ratings['Defense'] * old_weight) + (
@@ -595,8 +603,10 @@ class ProjectionService:
             ratings = pd.concat([ratings, second_ratings], ignore_index=True)
             ratings.dropna(inplace=True)
             ratings.reset_index(drop=True, inplace=True)
-        except:
-            pass
+        except Exception as promoted_err:
+            # Was a bare `except: pass` — which is how the NaN blend above
+            # went unnoticed for a full season-turnover cycle.
+            logger.warning(f"[{league}] Promoted-ratings blend failed (continuing without): {promoted_err}")
 
         # In[ ]:
 
