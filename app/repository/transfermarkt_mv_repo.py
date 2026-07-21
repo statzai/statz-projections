@@ -1,5 +1,6 @@
 import logging
 import asyncio
+from datetime import datetime
 import aiomysql
 import pandas as pd
 from app.database import get_connection
@@ -73,13 +74,21 @@ async def read_latest_market_values_async(league_dashed: str) -> pd.DataFrame:
     most_recent_at = df['scraped_at'].iloc[0]
     # Only the newest batch: rows upsert per (league, team), so teams that
     # left the league (relegation/season turnover) linger with an old
-    # scraped_at. Without this filter the fallback served current teams
+    # scraped_at. Without this filter the reader served current teams
     # PLUS last season's relegated ones, skewing the MV index and keeping
     # phantom "unmapped team" warnings alive.
     df = df[df['scraped_at'] == most_recent_at]
-    logger.info(
-        f"[transfermarkt_mv_snapshots:{league_dashed}] "
-        f"Returning {len(df)} cached MVs from {most_recent_at} "
-        f"(scrape failed, falling back to last-good)"
-    )
+    # Snapshots are the PRIMARY MV source (weekly out-of-band refresh) —
+    # nudge when the weekly cadence has slipped, stay quiet otherwise.
+    age_days = (datetime.utcnow() - most_recent_at).days if isinstance(most_recent_at, datetime) else None
+    if age_days is not None and age_days > 14:
+        logger.warning(
+            f"[transfermarkt_mv_snapshots:{league_dashed}] Snapshot is {age_days} days old "
+            f"({most_recent_at}) — run the weekly MV scrape (scripts/scrape_market_values.py)."
+        )
+    else:
+        logger.info(
+            f"[transfermarkt_mv_snapshots:{league_dashed}] "
+            f"Serving {len(df)} MVs from snapshot {most_recent_at}"
+        )
     return df[['Team', 'Market Value']]

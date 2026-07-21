@@ -488,15 +488,18 @@ def get_ratings(league_id, previous_team_ratings, current_season_id, all_season_
 
 
 async def get_market_value_with_cache(league_dashed, div, country_code):
-    """Async wrapper that scrapes Transfermarkt and persists the result —
-    or falls back to the most recent cached snapshot when the scrape fails.
+    """Snapshot-first (2026-07-21): projection runs READ the weekly
+    transfermarkt_market_value_snapshots refresh instead of scraping
+    Transfermarkt on every run — "we don't need to scrape every time we
+    project, it can be a weekly thing" (George). MVs drift on
+    weeks-to-months timescales, and per-run scraping did nothing since the
+    AWS WAF block (2026-07-14) except burn ~10s/league and keep the server
+    IP flagged. Snapshots are refreshed out-of-band by
+    scripts/scrape_market_values.py (residential IP) or the GitHub Action.
 
-    Why: 2026-04-28 saw 6 leagues' MV blocks fail in a 1-hour window
-    (classic IP rate-limit). The bare `get_market_value` raises in that
-    case, the MV adjustment is skipped entirely, and ratings get no MV
-    bump. With the cache fallback, the run uses yesterday's MV values —
-    invisible to projection accuracy because MVs change on weeks-to-months
-    timescales.
+    A live scrape remains ONLY as the first-onboard fallback: a league
+    with no snapshot at all (newly added comp) gets one attempt so it
+    isn't stuck valueless until the next weekly refresh.
     """
     import logging
     _log = logging.getLogger("projection")
@@ -504,38 +507,22 @@ async def get_market_value_with_cache(league_dashed, div, country_code):
         insert_market_value_snapshots_async,
         read_latest_market_values_async,
     )
-    try:
-        df = get_market_value(league_dashed, div, country_code)
-        # Async-write the snapshot; failure here shouldn't break the run
-        # because we already have today's values in df.
-        try:
-            await insert_market_value_snapshots_async(df, league_dashed)
-        except Exception as cache_write_err:
-            _log.warning(
-                f"[transfermarkt_mv:{league_dashed}] Snapshot write failed (non-fatal): {cache_write_err}"
-            )
-        return df
-    except Exception as scrape_err:
-        cached = await read_latest_market_values_async(league_dashed)
-        if cached.empty:
-            # No prior snapshot AND no live scrape — the run genuinely
-            # loses its MV adjustment. That deserves the WARNING; re-raise
-            # so the MV block's existing try/except logs the failure.
-            _log.warning(
-                f"[transfermarkt_mv:{league_dashed}] Live scrape failed ({scrape_err}) "
-                f"and no cached snapshot exists — MV adjustment will be skipped."
-            )
-            raise
-        # Cache fallback succeeded → the run is fine on last-good values.
-        # INFO on purpose: the AWS WAF block (since 2026-07-14) fails every
-        # scrape from this IP, and a WARNING here put ~10 rows/day in the
-        # log digest for a non-event. Snapshot freshness is surfaced by the
-        # admin "missing MV" badge instead.
-        _log.info(
-            f"[transfermarkt_mv:{league_dashed}] Live scrape failed ({scrape_err}) — "
-            f"using last-good cached snapshot."
-        )
+    cached = await read_latest_market_values_async(league_dashed)
+    if not cached.empty:
         return cached
+
+    _log.info(
+        f"[transfermarkt_mv:{league_dashed}] No snapshot yet (new league?) — "
+        f"attempting one live scrape."
+    )
+    df = get_market_value(league_dashed, div, country_code)  # raises on failure → MV block skips, as before
+    try:
+        await insert_market_value_snapshots_async(df, league_dashed)
+    except Exception as cache_write_err:
+        _log.warning(
+            f"[transfermarkt_mv:{league_dashed}] Snapshot write failed (non-fatal): {cache_write_err}"
+        )
+    return df
 
 
 def get_market_value(league_dashed, div, country_code):
