@@ -28,6 +28,13 @@ from fastapi import Response
 
 logger = logging.getLogger("projection")
 
+class _NoPromotedRatings(Exception):
+    """Sentinel: no promoted ratings configured for the league (no DB rows,
+    no xlsx). Raised inside the promoted-blend try-block to skip the rest of
+    it quietly — a normal state (e.g. MLS has no promotion at all), already
+    logged at INFO where it's raised."""
+
+
 class ProjectionService:
     CURRENT_DIR = Path(__file__).resolve().parent
     APP_DIR = CURRENT_DIR.parent
@@ -578,7 +585,16 @@ class ProjectionService:
                 second_ratings['Defense'] = second_ratings['Defense'].astype(float)
                 logger.info(f"[{league}] Promoted team ratings loaded from DB ({len(second_ratings)} teams)")
             else:
-                second_ratings = pd.read_excel(f"{data_folder_path}/{league} Promoted Team Ratings.xlsx")
+                xlsx_path = f"{data_folder_path}/{league} Promoted Team Ratings.xlsx"
+                if not os.path.exists(xlsx_path):
+                    # Nothing configured anywhere — a NORMAL state, not a
+                    # fault: leagues with no promotion at all (MLS), or
+                    # nothing entered yet (admin badge prompts when a
+                    # newcomer actually needs a prior). The FileNotFound
+                    # from read_excel used to land as a daily WARNING.
+                    logger.info(f"[{league}] No promoted ratings configured (no DB rows, no xlsx) — skipping blend")
+                    raise _NoPromotedRatings()
+                second_ratings = pd.read_excel(xlsx_path)
                 second_ratings = second_ratings[['Team', 'Attack', 'Defense']]
                 logger.info(f"[{league}] Promoted team ratings loaded from xlsx")
             second_ratings['Attack'] = (second_ratings['Attack']) * float(league_below_attack_weight)
@@ -609,6 +625,8 @@ class ProjectionService:
             ratings = pd.concat([ratings, second_ratings], ignore_index=True)
             ratings.dropna(inplace=True)
             ratings.reset_index(drop=True, inplace=True)
+        except _NoPromotedRatings:
+            pass  # already logged at INFO — nothing configured, nothing to blend
         except Exception as promoted_err:
             # Was a bare `except: pass` — which is how the NaN blend above
             # went unnoticed for a full season-turnover cycle.

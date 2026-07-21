@@ -348,11 +348,26 @@ class FanTeamWcProjectionService:
             )
 
             if n_players == 0 or n_fixtures == 0:
-                logger.warning(
-                    "Empty input — ensure InternationalTeamStatService + "
-                    "WcPlayerStatService have run AND that fanteam:ingest-wc-csv "
-                    "has been run to populate fanteam_wc_player_mappings."
-                )
+                # Same quiet-state gate as wc_fantasy_points_service: no
+                # upcoming fixtures (tournament over / not scheduled) makes
+                # empty input the expected state, not a fault.
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT COUNT(*) FROM fixtures WHERE competition_id = %s AND kickoff_datetime > NOW()",
+                        (self.scope.competition_id,),
+                    )
+                    n_upcoming = (await cur.fetchone())[0]
+                if n_upcoming == 0:
+                    logger.info(
+                        f"No FanTeam input for {self.scope.competition_name} — expected: "
+                        f"no upcoming fixtures (tournament finished or not yet scheduled)."
+                    )
+                else:
+                    logger.warning(
+                        "Empty input — ensure InternationalTeamStatService + "
+                        "WcPlayerStatService have run AND that fanteam:ingest-wc-csv "
+                        "has been run to populate fanteam_wc_player_mappings."
+                    )
                 return {
                     'n_rows': 0,
                     'n_player_fixtures': n_players,

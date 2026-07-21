@@ -516,15 +516,25 @@ async def get_market_value_with_cache(league_dashed, div, country_code):
             )
         return df
     except Exception as scrape_err:
-        _log.warning(
-            f"[transfermarkt_mv:{league_dashed}] Live scrape failed: {scrape_err} — "
-            f"trying last-good cached snapshot."
-        )
         cached = await read_latest_market_values_async(league_dashed)
         if cached.empty:
-            # No prior snapshot — re-raise so the MV block's existing
-            # try/except logs the failure and skips MV adjustment.
+            # No prior snapshot AND no live scrape — the run genuinely
+            # loses its MV adjustment. That deserves the WARNING; re-raise
+            # so the MV block's existing try/except logs the failure.
+            _log.warning(
+                f"[transfermarkt_mv:{league_dashed}] Live scrape failed ({scrape_err}) "
+                f"and no cached snapshot exists — MV adjustment will be skipped."
+            )
             raise
+        # Cache fallback succeeded → the run is fine on last-good values.
+        # INFO on purpose: the AWS WAF block (since 2026-07-14) fails every
+        # scrape from this IP, and a WARNING here put ~10 rows/day in the
+        # log digest for a non-event. Snapshot freshness is surfaced by the
+        # admin "missing MV" badge instead.
+        _log.info(
+            f"[transfermarkt_mv:{league_dashed}] Live scrape failed ({scrape_err}) — "
+            f"using last-good cached snapshot."
+        )
         return cached
 
 

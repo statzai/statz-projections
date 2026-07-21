@@ -363,9 +363,27 @@ class WcFantasyPointsService:
             )
 
             if n_players == 0 or n_fixtures == 0:
-                logger.warning(
-                    "Empty input — run InternationalTeamStatService + WcPlayerStatService first."
-                )
+                # Quiet state vs fault: once the tournament is over (or
+                # nothing is scheduled yet) there are no upcoming fixtures,
+                # so empty inputs are expected — the 2026 WC final ended and
+                # this warned twice a day. WARNING is reserved for a real
+                # ordering fault: upcoming fixtures exist but the upstream
+                # stat services produced nothing.
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT COUNT(*) FROM fixtures WHERE competition_id = %s AND kickoff_datetime > NOW()",
+                        (self.scope.competition_id,),
+                    )
+                    n_upcoming = (await cur.fetchone())[0]
+                if n_upcoming == 0:
+                    logger.info(
+                        f"No fantasy input for {self.scope.competition_name} — expected: "
+                        f"no upcoming fixtures (tournament finished or not yet scheduled)."
+                    )
+                else:
+                    logger.warning(
+                        "Empty input — run InternationalTeamStatService + WcPlayerStatService first."
+                    )
                 return {
                     'n_rows': 0,
                     'n_player_fixtures': n_players,
