@@ -1868,16 +1868,19 @@ class ProjectionService:
                 # Fantasy-only: keep just gameweeks still open to plan for.
                 fpl_df = ProjectionService._fantasy_gw_filter(fpl_df, _fantasy_upcoming_gws)
 
-                # FPL red-status guard (George, 2026-07-23): drop players whose
-                # CURRENT FPL status is red — 'i' injured, 's' suspended,
-                # 'u' unavailable (loaned out / unregistered), 'n' ineligible.
-                # They can't score FPL points while flagged, whatever the stat
-                # model projects (a loanee's parent-club listing kept Fábio
-                # Vieira projectable at launch; long-term injuries are the same
-                # class). Green 'a' and doubtful 'd' still project. Status is
-                # read live at insert time and bootstraps land twice daily, so
-                # players re-enter automatically as flags lift — no long-vs-
-                # short-term parsing needed, the flag lifecycle handles it.
+                # FPL membership + availability guard (George, 2026-07-23).
+                # ALLOW-list: a player only gets FPL fantasy rows if he is
+                #   (1) IN the current FPL game — active mapping, fpl_id NOT
+                #       NULL. The stat model rightly projects Sportmonks-world
+                #       players who aren't FPL assets at all (departed like
+                #       Trossard, parent-club loanees like Antoñito Cordero);
+                #       none of them belong in fpl_projections.
+                #   (2) not red-flagged — 'i' injured / 's' suspended /
+                #       'u' unavailable-loaned / 'n' ineligible; and
+                #   (3) not a ≤25%-chance doubtful (50/75% 'd' still project —
+                #       George's call).
+                # Status is read live at insert time and bootstraps land twice
+                # daily, so players re-enter automatically as flags lift.
                 try:
                     _u_conn = await get_source_connection()
                     try:
@@ -1885,19 +1888,22 @@ class ProjectionService:
                             await _cur.execute("""
                                 SELECT m.player_id FROM fpl_player_mappings m
                                 JOIN fpl_player_snapshots s ON s.fpl_id = m.fpl_id
-                                WHERE m.player_id IS NOT NULL AND s.status IN ('i','s','u','n')
-                                  AND s.snapshot_date = (SELECT MAX(snapshot_date) FROM fpl_player_snapshots)
+                                 AND s.snapshot_date = (SELECT MAX(snapshot_date) FROM fpl_player_snapshots)
+                                WHERE m.player_id IS NOT NULL AND m.fpl_id IS NOT NULL
+                                  AND s.status NOT IN ('i','s','u','n')
+                                  AND NOT (s.status = 'd' AND s.chance_of_playing_next_round IS NOT NULL
+                                           AND s.chance_of_playing_next_round <= 25)
                             """)
-                            _u_ids = {int(r[0]) for r in await _cur.fetchall()}
+                            _allowed = {int(r[0]) for r in await _cur.fetchall()}
                     finally:
                         release_source_connection(_u_conn)
-                    if _u_ids and '_player_id' in fpl_df.columns:
+                    if _allowed and '_player_id' in fpl_df.columns:
                         _before = len(fpl_df)
-                        fpl_df = fpl_df[~fpl_df['_player_id'].isin(_u_ids)]
+                        fpl_df = fpl_df[fpl_df['_player_id'].isin(_allowed)]
                         if _before - len(fpl_df):
-                            logger.info(f"[{league}] FPL: dropped {_before - len(fpl_df)} rows for {len(_u_ids)} red-status (i/s/u/n) players")
+                            logger.info(f"[{league}] FPL: dropped {_before - len(fpl_df)} rows for players not in the current FPL game or red-flagged")
                 except Exception as _u_err:
-                    logger.warning(f"[{league}] red-status guard skipped: {_u_err}")
+                    logger.warning(f"[{league}] FPL membership guard skipped: {_u_err}")
 
                 logger.info(f"[{league}] Inserting FPL projections into DB ({len(fpl_df)} rows)...")
                 _t = time.time()

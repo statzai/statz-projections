@@ -1772,6 +1772,15 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
         # team_stat_values = row[1].values
         team_players = players[players['current_team_id'] == team_id]  # UPDATED - use team_id
 
+        # Integration ramp (George, 2026-07-23): this club's fixture ids, used
+        # below to count each player's appearances FOR THIS CLUB. New joiners
+        # project at a confidence haircut that lifts to full value by 5 club
+        # games — mirroring the 5-game new-joiner grace window in
+        # player_criteria (gate = whether you project, ramp = how confidently).
+        _ramp_team_fix_ids = set(
+            fixtures[(fixtures['home_team_id'] == team_id) | (fixtures['away_team_id'] == team_id)]['id'].astype(int)
+        )
+
         # Lineup-aware restriction (Phase 1 of confirmed-lineup rerun).
         # Build a per-fixture XI map for THIS team. Each fixture independently
         # gates bench rows in the inner loop below — earlier single-fixture
@@ -1799,6 +1808,17 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
             # UPDATED - New Parameter: season_id and we can now use team
             if player_criteria(name, team, fixtures, player_stats, players, teams, season_id, competition_id, comp_teams,
                                in_confirmed_xi=int(id) in _player_in_any_xi):
+                # Integration ramp: min(1.0, 0.75 + 0.05 × apps-for-this-club).
+                # 0 club apps → 0.75, full value from the 5th club game.
+                # Old-club shares are the best prior for a new joiner but an
+                # optimistic one at full weight (adaptation, rotation while
+                # integrating). Established players hit the 1.0 cap by
+                # construction. Confirmed-XI fixtures bypass below.
+                _p_apps_df = player_stats[(player_stats['player_id'] == int(id))
+                                          & (player_stats['stats_type_id'] == 119)]
+                _p_apps_df = _p_apps_df[_p_apps_df['value'] > 45]
+                _club_apps = int(_p_apps_df['fixture_id'].isin(_ramp_team_fix_ids).sum())
+                _ramp = min(1.0, 0.75 + 0.05 * _club_apps)
                 for stat in range(len(stat_list)):  # UPDATED - use stat instead of i
                     if stat_list[stat] == 'Goals':  # UPDATED - use stat_list[stat] instead of i
                         try:
@@ -1888,6 +1908,12 @@ def distribute_team_predictions_to_players(player_stats, team_df, team_predictio
                         player_pred_stats['kickoff_datetime'] = specific_team_predictions['kickoff_datetime'].iloc[i]
                         player_pred_stats['stat_name'] = stat_list[stat]
                         _value = specific_team_predictions[stat_list[stat]].iloc[i] * stat_prop
+                        # Integration ramp — skipped when the manager has
+                        # spoken (player in this fixture's confirmed XI).
+                        # Applied BEFORE the odds blend so the market can pull
+                        # ramped values back up for players it believes in.
+                        if not (_xi_for_fix is not None and int(id) in _xi_for_fix):
+                            _value = _value * _ramp
                         _blend_st = PLAYER_BLEND_STAT_NAMES.get(stat_list[stat])
                         if odds_for_fixture_players and _blend_st is not None:
                             _ladders = (odds_for_fixture_players
