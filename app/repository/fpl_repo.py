@@ -93,3 +93,29 @@ async def insert_fpl_projections_async(data_list):
         updated_at = NOW()
     """
     return await execute_chunked(sql, values, label="[fpl_projections]")
+
+
+async def cleanup_fpl_projections_async(gameweek_ids, keep_player_ids):
+    """Membership semantics for the covered gameweeks: after the upsert,
+    delete rows for players NOT in this run's kept frame. The insert alone
+    can never REMOVE a player — one newly red-flagged (J.Timber's run-7 rows
+    survived his 'i' flag landing) or dropped from the pool keeps his
+    previous run's rows forever. Returns rows deleted."""
+    gw_ids = [int(g) for g in gameweek_ids if g is not None]
+    keep = [int(p) for p in keep_player_ids if p is not None]
+    if not gw_ids or not keep:
+        return 0
+    conn = await _db.get_connection()
+    try:
+        async with conn.cursor() as cur:
+            gw_ph = ",".join(["%s"] * len(gw_ids))
+            keep_ph = ",".join(["%s"] * len(keep))
+            await cur.execute(
+                f"DELETE FROM fpl_projections WHERE gameweek_id IN ({gw_ph}) AND player_id NOT IN ({keep_ph})",
+                tuple(gw_ids) + tuple(keep),
+            )
+            deleted = cur.rowcount
+        await conn.commit()
+        return deleted
+    finally:
+        _db.pool.release(conn)

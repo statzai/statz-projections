@@ -1912,6 +1912,21 @@ class ProjectionService:
                 _t = time.time()
                 await insert_fpl_projections_async(fpl_df)
                 logger.info(f"[{league}] FPL projections inserted ({time.time()-_t:.1f}s)")
+
+                # Stale-row cleanup: the insert is an upsert, so it can't
+                # REMOVE players — one the membership guard newly excluded,
+                # or who fell out of the pool, keeps his previous run's rows
+                # (J.Timber kept run-7 rows after his 'i' flag landed). Delete
+                # rows in the covered gameweeks for players not in this frame.
+                try:
+                    from app.repository.fpl_repo import cleanup_fpl_projections_async
+                    _cl_gws = [int(g) for g in fpl_df['Gameweek'].dropna().unique().tolist()]
+                    _cl_keep = [int(p) for p in fpl_df['player_id'].dropna().unique().tolist()]
+                    _stale = await cleanup_fpl_projections_async(_cl_gws, _cl_keep)
+                    if _stale:
+                        logger.info(f"[{league}] FPL: {_stale} stale rows removed for players no longer projected/allowed")
+                except Exception as _cl_err:
+                    logger.warning(f"[{league}] FPL stale-row cleanup skipped: {_cl_err}")
             except Exception as e:
                 logger.warning(f"[{league}] FPL computation failed (skipping): {e}", exc_info=True)
 
