@@ -1432,7 +1432,22 @@ def player_criteria(player, team, fixtures, player_stats, players, teams, season
     # protects against zero-history XI selections.
     if in_confirmed_xi:
         return True
-    return len(player_stats_df_last_5) > 0
+    if len(player_stats_df_last_5) > 0:
+        return True
+    # New-joiner grace (George, 2026-07-23 — 26/27 launch). The old hard rule
+    # ("must have appeared in THIS club's last 5") excluded every summer
+    # signing until GW1: they can't have played for a club whose last 5 games
+    # predate their arrival, even though their cross-club history (loaded by
+    # design) projects them fine. Reframe the question from "did he play in
+    # our last 5?" to "have we played 5 fixtures since he last played
+    # ANYWHERE?" — old-club and international appearances count as activity.
+    # Pre-season signings project from day one (club has played ~0 since
+    # May); an unused joiner drops out automatically once his club plays 5
+    # without him; long-inactive players fail implicitly (their club has
+    # inevitably played 5+ since). Same threshold, same loaded data.
+    last_appearance = player_stats_df['kickoff_datetime'].max()
+    games_since = len(team_fixtures[team_fixtures['kickoff_datetime'] > last_appearance])
+    return games_since < 5
 
 
 def get_player_id(player_name, player_df, team, teams, competition_id=None, comp_teams=None):
