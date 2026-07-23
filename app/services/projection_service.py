@@ -1897,11 +1897,14 @@ class ProjectionService:
                             _allowed = {int(r[0]) for r in await _cur.fetchall()}
                     finally:
                         release_source_connection(_u_conn)
-                    if _allowed and '_player_id' in fpl_df.columns:
+                    if _allowed and 'player_id' in fpl_df.columns:
                         _before = len(fpl_df)
-                        fpl_df = fpl_df[fpl_df['_player_id'].isin(_allowed)]
-                        if _before - len(fpl_df):
-                            logger.info(f"[{league}] FPL: dropped {_before - len(fpl_df)} rows for players not in the current FPL game or red-flagged")
+                        fpl_df = fpl_df[fpl_df['player_id'].astype('Int64').isin(_allowed)]
+                        logger.info(f"[{league}] FPL membership guard: {_before - len(fpl_df)} rows dropped (not in current FPL game / red-flagged), {len(fpl_df)} kept")
+                    else:
+                        # Never no-op silently — a missing column or empty allow
+                        # set means ghosts (departed/loaned players) ship.
+                        logger.warning(f"[{league}] FPL membership guard NOT applied: allowed={len(_allowed)}, has player_id col={'player_id' in fpl_df.columns}")
                 except Exception as _u_err:
                     logger.warning(f"[{league}] FPL membership guard skipped: {_u_err}")
 
